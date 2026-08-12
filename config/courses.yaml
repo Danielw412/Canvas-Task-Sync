@@ -1,0 +1,21 @@
+version: 1
+state_path: .canvas-task-sync/state.sqlite3
+gemini_model: gemini-3.6-flash
+
+courses:
+  spanish:
+    name: Honors Spanish IV
+    prefix: SPANISH
+    task_list: School
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    source:
+      type: google_slides
+      url: https://docs.google.com/presentation/d/1QclyYz3XdeE4C6kHvnqznZ5KsUNHRFO2YHu9sYIzGdU/edit?slide=id.g8596fffd0c_4_6#slide=id.g8596fffd0c_4_6
+      page_id: g8596fffd0c_4_6
+      extraction:
+        mode: hybrid
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]
+

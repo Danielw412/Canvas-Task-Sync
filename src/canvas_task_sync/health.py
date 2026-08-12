@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import json
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from time import perf_counter
+
+from dotenv import load_dotenv
+
+from canvas_task_sync.auth import SCOPES, load_google_credentials
+from canvas_task_sync.configuration import ProjectSettings
+from canvas_task_sync.google_tasks import GoogleTasksClient
+from canvas_task_sync.redaction import safe_exception_summary
+from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.web_models import (
+    ConnectionItem,
+    ConnectionStatus,
+    HealthCheck,
+    HealthState,
+)
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _oauth_client_valid(path: Path) -> bool:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(value, dict) and isinstance(value.get("installed"), dict)
+
+
+def connection_status(settings: ProjectSettings, *, port: int = 8787) -> ConnectionStatus:
+    load_dotenv(settings.root_dir / ".env")
+    client_configured = _oauth_client_valid(settings.root_dir / "credentials.json")
+    token_path = settings.root_dir / "token.json"
+    authorized = False
+    scope_summary = "Authorization required"
+    if token_path.exists():
+        try:
+            payload = json.loads(token_path.read_text(encoding="utf-8"))
+            token_scopes = set(payload.get("scopes") or [])
+            authorized = set(SCOPES).issubset(token_scopes)
+            scope_summary = "Required Tasks and Slides scopes are present" if authorized else (
+                "Required Google scopes are missing"
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            scope_summary = "token.json is not valid JSON"
+    gemini = bool(os.getenv("GEMINI_API_KEY"))
+    checks = [
+        ConnectionItem(
+            key="oauth_client",
+            label="OAuth client",
+            state=HealthState.HEALTHY if client_configured else HealthState.MISSING,
+            summary="Valid desktop client" if client_configured else "Upload credentials.json",
+        ),
+        ConnectionItem(
+            key="google_authorization",
+            label="Google authorization",
+            state=HealthState.HEALTHY if authorized else HealthState.MISSING,
+            summary=scope_summary,
+        ),
+        ConnectionItem(
+            key="gemini_api",
+            label="Gemini API",
+            state=HealthState.HEALTHY if gemini else HealthState.MISSING,
+            summary=(
+                f"Configured · {settings.gemini_model}"
+                if gemini
+                else "Add a Gemini API key"
+            ),
+        ),
+        ConnectionItem(
+            key="local_database",
+            label="Local database",
+            state=HealthState.HEALTHY,
+            summary="Operational storage is available",
+        ),
+    ]
+    return ConnectionStatus(
+        google_client_configured=client_configured,
+        google_authorized=authorized,
+        gemini_configured=gemini,
+        local_server=f"127.0.0.1:{port}",
+        checks=checks,
+    )
+
+
+def run_health_checks(settings: ProjectSettings, course_id: str | None = None) -> list[HealthCheck]:
+    load_dotenv(settings.root_dir / ".env")
+    checks: list[HealthCheck] = []
+    api_key = os.getenv("GEMINI_API_KEY")
+    started = perf_counter()
+    if not api_key:
+        checks.append(
+            HealthCheck(
+                key="gemini_api",
+                label="Gemini API",
+                state=HealthState.MISSING,
+                summary="GEMINI_API_KEY is missing.",
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+        )
+    else:
+        try:
+            from google import genai
+
+            with genai.Client(api_key=api_key) as client:
+                model = client.models.get(model=settings.gemini_model)
+            checks.append(
+                HealthCheck(
+                    key="gemini_api",
+                    label="Gemini API",
+                    state=HealthState.HEALTHY,
+                    summary=f"Model {settings.gemini_model} is available.",
+                    duration_ms=int((perf_counter() - started) * 1000),
+                    details={"model": getattr(model, "name", settings.gemini_model)},
+                )
+            )
+        except Exception as error:
+            checks.append(
+                HealthCheck(
+                    key="gemini_api",
+                    label="Gemini API",
+                    state=HealthState.ERROR,
+                    summary=safe_exception_summary(error, known_secrets=[api_key]),
+                    duration_ms=int((perf_counter() - started) * 1000),
+                )
+            )
+
+    started = perf_counter()
+    try:
+        credentials = load_google_credentials(settings.root_dir, interactive=False)
+        checks.append(
+            HealthCheck(
+                key="google_authorization",
+                label="Google authorization",
+                state=HealthState.HEALTHY,
+                summary="Required Google OAuth scopes are valid.",
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+        )
+    except Exception as error:
+        checks.append(
+            HealthCheck(
+                key="google_authorization",
+                label="Google authorization",
+                state=HealthState.ERROR,
+                summary=safe_exception_summary(error),
+                duration_ms=int((perf_counter() - started) * 1000),
+            )
+        )
+        return checks
+
+    tasks_client = GoogleTasksClient(credentials)
+    course_ids = [course_id] if course_id else sorted(settings.courses)
+    for selected_id in course_ids:
+        course = settings.course(selected_id)
+        started = perf_counter()
+        try:
+            capture = create_source_adapter(course.source, credentials).capture(include_image=False)
+            checks.append(
+                HealthCheck(
+                    key=f"source:{selected_id}",
+                    label=f"{course.name} source",
+                    state=HealthState.HEALTHY,
+                    summary=f"Target page is readable · {len(capture.blocks)} blocks.",
+                    duration_ms=int((perf_counter() - started) * 1000),
+                    details={"course_id": selected_id, "page_id": capture.page_id},
+                )
+            )
+        except Exception as error:
+            checks.append(
+                HealthCheck(
+                    key=f"source:{selected_id}",
+                    label=f"{course.name} source",
+                    state=HealthState.ERROR,
+                    summary=safe_exception_summary(error),
+                    duration_ms=int((perf_counter() - started) * 1000),
+                )
+            )
+        started = perf_counter()
+        try:
+            tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
+            task_count = len(tasks_client.list_tasks(tasklist_id))
+            checks.append(
+                HealthCheck(
+                    key=f"tasks:{selected_id}",
+                    label=f"{course.name} task list",
+                    state=HealthState.HEALTHY,
+                    summary=f"'{tasklist_title}' is readable · {task_count} tasks.",
+                    duration_ms=int((perf_counter() - started) * 1000),
+                    details={"course_id": selected_id, "task_count": task_count},
+                )
+            )
+        except Exception as error:
+            checks.append(
+                HealthCheck(
+                    key=f"tasks:{selected_id}",
+                    label=f"{course.name} task list",
+                    state=HealthState.ERROR,
+                    summary=safe_exception_summary(error),
+                    duration_ms=int((perf_counter() - started) * 1000),
+                )
+            )
+    checked_at = _now()
+    for check in checks:
+        check.details.setdefault("checked_at", checked_at.isoformat())
+    return checks

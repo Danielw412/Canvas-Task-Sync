@@ -1,0 +1,68 @@
+[
+  {
+    "source_anchor": "table:agenda_table:r2:c2",
+    "source_text": "Completar actividad de la clase",
+    "row_label": "T",
+    "classification": "homework",
+    "action_kind": "complete",
+    "title": "Complete class activity",
+    "details": "Completar actividad de la clase",
+    "due_relation": "next_class",
+    "confidence": "high"
+  },
+  {
+    "source_anchor": "table:agenda_table:r3:c2",
+    "source_text": "Completar actividades de práctica - VHL",
+    "row_label": "W-Th",
+    "classification": "homework",
+    "action_kind": "practice",
+    "title": "VHL practice",
+    "details": "Completar actividades de práctica - VHL",
+    "due_relation": "next_class",
+    "confidence": "high"
+  },
+  {
+    "source_anchor": "table:agenda_table:r4:c1",
+    "source_text": "Presentar Conversaciones hipotéticas",
+    "row_label": "F",
+    "classification": "classwork",
+    "action_kind": "present",
+    "title": "Present hypothetical conversations",
+    "details": "Presentar Conversaciones hipotéticas",
+    "due_relation": "next_class",
+    "confidence": "high"
+  },
+  {
+    "source_anchor": "table:agenda_table:r4:c2",
+    "source_text": "Completar actividad de la clase y entregarla aquí",
+    "row_label": "F",
+    "classification": "homework",
+    "action_kind": "submit",
+    "title": "Submit class activity",
+    "details": "Completar actividad de la clase y entregarla aquí",
+    "due_relation": "next_class",
+    "confidence": "high"
+  },
+  {
+    "source_anchor": "table:agenda_table:r5:c2",
+    "source_text": "Completar actividades de práctica - VHL",
+    "row_label": "M",
+    "classification": "homework",
+    "action_kind": "practice",
+    "title": "VHL practice",
+    "details": "Completar actividades de práctica - VHL",
+    "due_relation": "next_class",
+    "confidence": "high"
+  },
+  {
+    "source_anchor": "table:agenda_table:r5:c2",
+    "source_text": "¡Traer DINERO!",
+    "row_label": "M",
+    "classification": "homework",
+    "action_kind": "bring",
+    "title": "Bring money",
+    "details": "¡Traer DINERO!",
+    "due_relation": "next_class",
+    "confidence": "high"
+  }
+]

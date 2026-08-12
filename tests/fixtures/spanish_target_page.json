@@ -1,0 +1,80 @@
+{
+  "objectId": "g8596fffd0c_4_6",
+  "revisionId": "sanitized-revision",
+  "contentUrl": "https://temporary.invalid/ignored",
+  "pageProperties": {
+    "pageBackgroundFill": {
+      "solidFill": {
+        "color": {"rgbColor": {"red": 0.98, "green": 0.98, "blue": 0.95}}
+      }
+    }
+  },
+  "pageElements": [
+    {
+      "objectId": "agenda_title",
+      "size": {"width": {"magnitude": 720, "unit": "PT"}, "height": {"magnitude": 40, "unit": "PT"}},
+      "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "PT"},
+      "shape": {
+        "shapeType": "TEXT_BOX",
+        "text": {
+          "textElements": [
+            {"textRun": {"content": "Honors Spanish IV - May 25-29, 2026\n", "style": {"bold": true, "fontSize": {"magnitude": 22, "unit": "PT"}}}}
+          ]
+        }
+      }
+    },
+    {
+      "objectId": "agenda_table",
+      "size": {"width": {"magnitude": 720, "unit": "PT"}, "height": {"magnitude": 420, "unit": "PT"}},
+      "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 50, "unit": "PT"},
+      "table": {
+        "rows": 6,
+        "columns": 3,
+        "tableRows": [
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 0, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "Day\n"}}]}},
+              {"location": {"rowIndex": 0, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Learning Activities / Learning Targets\n"}}]}},
+              {"location": {"rowIndex": 0, "columnIndex": 2}, "text": {"textElements": [{"textRun": {"content": "Assignments\n"}}]}}
+            ]
+          },
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 1, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "M\n"}}]}},
+              {"location": {"rowIndex": 1, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Memorial Day\n"}}]}},
+              {"location": {"rowIndex": 1, "columnIndex": 2}, "text": {"textElements": []}}
+            ]
+          },
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 2, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "T\n"}}]}},
+              {"location": {"rowIndex": 2, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Repasar el subjuntivo y conversar en clase\nLa profesora explicará cómo se calificará la actividad\n"}}]}},
+              {"location": {"rowIndex": 2, "columnIndex": 2}, "text": {"textElements": [{"textRun": {"content": "Completar actividad de la clase\n"}}]}}
+            ]
+          },
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 3, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "W-Th\n"}}]}},
+              {"location": {"rowIndex": 3, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Conversaciones hipotéticas y repaso de gramática\n"}}]}},
+              {"location": {"rowIndex": 3, "columnIndex": 2}, "text": {"textElements": [{"textRun": {"content": "Completar actividades de práctica - VHL\n"}}]}}
+            ]
+          },
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 4, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "F\n"}}]}},
+              {"location": {"rowIndex": 4, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Presentar Conversaciones hipotéticas\nPreguntas y respuestas de De Niño 12\n"}}]}},
+              {"location": {"rowIndex": 4, "columnIndex": 2}, "text": {"textElements": [{"textRun": {"content": "Completar actividad de la clase y entregarla aquí\n"}}]}}
+            ]
+          },
+          {
+            "tableCells": [
+              {"location": {"rowIndex": 5, "columnIndex": 0}, "text": {"textElements": [{"textRun": {"content": "M\n"}}]}},
+              {"location": {"rowIndex": 5, "columnIndex": 1}, "text": {"textElements": [{"textRun": {"content": "Actividad de De Niño y repaso de gramática\n"}}]}},
+              {"location": {"rowIndex": 5, "columnIndex": 2}, "text": {"textElements": [{"textRun": {"content": "Completar actividades de práctica - VHL\n¡Traer DINERO!\n"}}]}}
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
