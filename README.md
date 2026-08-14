@@ -138,8 +138,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1
 ```
 
 The installer registers a hidden per-user scheduled task, starts it immediately, and verifies that
-`http://127.0.0.1:8790/` is ready. It does not expose the site to the local network. To remove the
-scheduled task and desktop shortcut later:
+`http://127.0.0.1:8790/` is ready. The server runs in the background without a terminal or browser
+window, and it does not expose the site to the local network. To remove the scheduled task and
+desktop shortcut later:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\remove-windows-startup.ps1
