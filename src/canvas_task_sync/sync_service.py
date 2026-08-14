@@ -7,7 +7,7 @@ import threading
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from time import perf_counter
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -88,6 +88,7 @@ class PreparedPlan(BaseModel):
     tasklist_id: str
     tasklist_title: str
     configured_mode: ExtractionMode
+    extraction_cache_key: str = ""
     config_hash: str
     page_hash: str
     remote_hash: str
@@ -127,12 +128,39 @@ def _remote_hash(tasks: list[RemoteTask]) -> str:
                 "notes": task.notes,
                 "due": task.due,
                 "status": task.status,
+                "completed": task.completed,
                 "deleted": task.deleted,
                 "hidden": task.hidden,
             }
             for task in sorted(tasks, key=lambda item: item.id)
         ]
     )
+
+
+def _recent_assignment_context(
+    remote_tasks: list[RemoteTask],
+    course: CourseSettings,
+    *,
+    today: date,
+) -> list[str]:
+    prefix = f"[{course.prefix}]".casefold()
+    cutoff = datetime.combine(today, time.min, tzinfo=UTC) - timedelta(days=10.5)
+    context: list[str] = []
+    for task in remote_tasks:
+        if task.deleted or task.hidden or not task.title.casefold().startswith(prefix):
+            continue
+        if task.status == "completed":
+            try:
+                completed_at = datetime.fromisoformat((task.completed or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=UTC)
+            if completed_at.astimezone(UTC) < cutoff:
+                continue
+        due = task.due[:10] if task.due else "no due date"
+        context.append(f"{task.title} | {task.status} | due {due}")
+    return sorted(context)[:200]
 
 
 class SyncService:
@@ -193,11 +221,24 @@ class SyncService:
         credentials = self.credentials_loader(self.settings.root_dir, interactive=False)
         source = self.source_factory(course.source, credentials)
         tasks_client = self.tasks_client_factory(credentials)
+        tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
+        remote_tasks = tasks_client.list_tasks(tasklist_id)
+        existing_assignments = _recent_assignment_context(
+            remote_tasks,
+            course,
+            today=_today(course.timezone),
+        )
+        extraction_cache_key = (
+            f"{self.settings.gemini_cache_key}|context:{_stable_hash(existing_assignments)[:16]}"
+        )
         sink.emit(
             RunStage.AUTHENTICATE_SERVICES,
             "stage_completed",
             "Google credentials and service clients are ready.",
-            metadata={"scopes": ["Google Tasks", "Google Slides readonly"]},
+            metadata={
+                "scopes": ["Google Tasks", "Google Slides readonly"],
+                "source_acquisition": course.source.type,
+            },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
         token.raise_if_cancelled()
@@ -207,11 +248,15 @@ class SyncService:
         sink.emit(
             RunStage.CAPTURE_SOURCE,
             "stage_completed",
-            "Captured the configured Google Slides page.",
+            f"Captured the configured {capture.source_type.replace('_', ' ')} source.",
             metadata={
+                "source_type": capture.source_type,
+                "resource_id": capture.resource_id,
                 "page_id": capture.page_id,
                 "block_count": len(capture.blocks),
                 "page_hash": capture.page_hash,
+                "selection": capture.selection,
+                "capture_warnings": capture.source_metadata.get("warnings", []),
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -224,17 +269,23 @@ class SyncService:
                 source_key=capture.source_key,
                 page_hash=capture.page_hash,
                 extractor_version=EXTRACTOR_VERSION,
-                model_name=self.settings.gemini_model,
+                model_name=extraction_cache_key,
                 configured_mode=course.source.extraction.mode,
             )
             state_records = state.records(course_id, capture.source_key)
         extraction_was_cached = outcome is not None
         if outcome is None:
-            if course.source.extraction.mode in {
+            needs_image = course.source.extraction.mode in {
                 ExtractionMode.IMAGE,
                 ExtractionMode.HYBRID,
                 ExtractionMode.AUTO,
-            }:
+            }
+            if (
+                course.source.extraction.mode == ExtractionMode.AUTO
+                and capture.source_metadata.get("screenshot_available") is False
+            ):
+                needs_image = False
+            if needs_image:
                 add_image = getattr(source, "add_image", None)
                 if not callable(add_image):
                     raise RuntimeError(
@@ -243,9 +294,14 @@ class SyncService:
                 capture = add_image(capture)
             backend = self.backend_factory(
                 model=self.settings.gemini_model,
+                fallback_models=self.settings.gemini_fallback_models,
                 api_key=os.getenv("GEMINI_API_KEY"),
             )
-            outcome = GeminiExtractor(backend).extract(capture, course)
+            outcome = GeminiExtractor(backend).extract(
+                capture,
+                course,
+                existing_assignments=existing_assignments,
+            )
         sink.emit(
             RunStage.EXTRACT_ASSIGNMENTS,
             "stage_completed",
@@ -260,7 +316,10 @@ class SyncService:
                 "uncertain_count": len(outcome.uncertain),
                 "used_mode": outcome.used_mode.value,
                 "fallback_reasons": outcome.fallback_reasons,
-                "model": self.settings.gemini_model,
+                "model": outcome.model_name or self.settings.gemini_model,
+                "configured_model_chain": self.settings.gemini_model_chain,
+                "model_fallback_reasons": outcome.model_fallback_reasons,
+                "existing_assignment_context_count": len(existing_assignments),
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -289,8 +348,6 @@ class SyncService:
         token.raise_if_cancelled()
 
         stage_started = perf_counter()
-        tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
-        remote_tasks = tasks_client.list_tasks(tasklist_id)
         remote_hash = _remote_hash(remote_tasks)
         sink.emit(
             RunStage.COMPARE_GOOGLE_TASKS,
@@ -345,6 +402,7 @@ class SyncService:
             tasklist_id=tasklist_id,
             tasklist_title=tasklist_title,
             configured_mode=course.source.extraction.mode,
+            extraction_cache_key=extraction_cache_key,
             config_hash=config_hash,
             page_hash=capture.page_hash,
             remote_hash=remote_hash,
@@ -473,7 +531,9 @@ class SyncService:
                         source_key=prepared.source_key,
                         page_hash=prepared.page_hash,
                         extractor_version=EXTRACTOR_VERSION,
-                        model_name=self.settings.gemini_model,
+                        model_name=(
+                            prepared.extraction_cache_key or self.settings.gemini_cache_key
+                        ),
                         configured_mode=prepared.configured_mode,
                         outcome=prepared.extraction_outcome,
                     )

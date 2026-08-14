@@ -23,7 +23,7 @@ export async function fetchJson<T>(url: string): Promise<T> {
   if (!response.ok) {
     throw await responseError(response)
   }
-  return response.json() as Promise<T>
+  return parseJsonResponse<T>(response)
 }
 
 async function csrf(): Promise<string> {
@@ -51,19 +51,44 @@ export async function mutateJson<T>(
   const response = await fetch(url, { method: options.method ?? 'POST', headers, body })
   if (!response.ok) throw await responseError(response)
   if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  return parseJsonResponse<T>(response)
 }
 
 async function responseError(response: Response): Promise<ApiError> {
-  let payload: ApiErrorShape
+  const body = await response.text()
+  let payload: ApiErrorShape | null = null
   try {
-    payload = (await response.json()) as ApiErrorShape
+    payload = JSON.parse(body) as ApiErrorShape
   } catch {
-    payload = {
-      error: { code: 'request_failed', message: response.statusText || 'Request failed.', retryable: false },
-    }
+    // The response may be an HTML error document from a proxy or an older local server.
+  }
+  if (!payload?.error?.message) {
+    payload = requestFailedPayload(response)
   }
   return new ApiError(response.status, payload)
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const body = await response.text()
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    throw new ApiError(502, requestFailedPayload(response))
+  }
+}
+
+function requestFailedPayload(response: Response): ApiErrorShape {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+  const isHtml = contentType.includes('text/html')
+  return {
+    error: {
+      code: isHtml ? 'api_version_mismatch' : 'invalid_api_response',
+      message: isHtml
+        ? 'The local app is running an older API. Restart Canvas Task Sync, then refresh this page.'
+        : response.statusText || 'The local app returned an invalid response. Restart it and try again.',
+      retryable: true,
+    },
+  }
 }
 
 export function useOverview(courseId?: string | null) {

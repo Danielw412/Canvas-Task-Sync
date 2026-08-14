@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,9 +39,11 @@ class FakeBackend:
     def __init__(self, candidates: list[GeminiTaskCandidate]) -> None:
         self.candidates = candidates
         self.calls = 0
+        self.kwargs: list[dict[str, object]] = []
 
-    def generate(self, **_kwargs):
+    def generate(self, **kwargs):
         self.calls += 1
+        self.kwargs.append(kwargs)
         return self.candidates
 
 
@@ -263,3 +266,46 @@ def test_partial_failure_keeps_completed_identity_mapping(
         records = state.records("spanish", prepared.source_key)
     assert len(records) == 1
     assert records[0].google_task_id == "remote-1"
+
+
+def test_prepare_feeds_unfinished_and_recent_completed_class_tasks_to_gemini(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, tasks, backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    now = datetime.now(UTC)
+    tasks.tasks = [
+        RemoteTask(id="open", title="[SPANISH] VHL practice", status="needsAction"),
+        RemoteTask(
+            id="recent",
+            title="[SPANISH] Submit class activity",
+            status="completed",
+            completed=(now - timedelta(days=10)).isoformat(),
+        ),
+        RemoteTask(
+            id="old",
+            title="[SPANISH] Old worksheet",
+            status="completed",
+            completed=(now - timedelta(days=11)).isoformat(),
+        ),
+        RemoteTask(id="other", title="[MATH] VHL practice", status="needsAction"),
+    ]
+
+    service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    prompt = str(backend.kwargs[0]["prompt"])
+    assert "[SPANISH] VHL practice" in prompt
+    assert "[SPANISH] Submit class activity" in prompt
+    assert "Old worksheet" not in prompt
+    assert "[MATH]" not in prompt

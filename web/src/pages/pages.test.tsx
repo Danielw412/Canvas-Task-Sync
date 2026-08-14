@@ -44,7 +44,7 @@ const overview: OverviewResponse = {
     google_client_configured: true,
     google_authorized: true,
     gemini_configured: true,
-    local_server: '127.0.0.1:8787',
+    local_server: '127.0.0.1:8790',
     checks: [],
   },
   latest_run: null,
@@ -157,6 +157,31 @@ describe('operational pages', () => {
     })
   })
 
+  it('starts all enabled course previews from one action', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (url === '/api/v1/runs/all') {
+        return jsonResponse({ run_ids: [41, 42], capture_request_ids: ['capture-1'], status: 'queued' }, 202)
+      }
+      return jsonResponse(overview)
+    }))
+    const postMessage = vi.spyOn(window, 'postMessage')
+    renderPage(<OverviewPage />)
+    expect(await screen.findByRole('heading', { name: 'Everything is ready to sync' })).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview all courses' }))
+
+    await waitFor(() => expect(requests.some((request) => request.url === '/api/v1/runs/all')).toBe(true))
+    expect(postMessage).toHaveBeenCalledWith(
+      { source: 'canvas-task-sync-web', type: 'capture-requested' },
+      window.location.origin,
+    )
+    expect(toast).toHaveBeenCalledWith('Started 2 course previews in parallel.', 'success')
+  })
+
   it('filters an immutable plan and requires explicit apply confirmation', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(run)))
     renderPage(
@@ -185,10 +210,20 @@ describe('operational pages', () => {
       requests.push({ url, init })
       if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
       if (url.includes('/gemini-key')) return jsonResponse(null, 204)
+      if (url.includes('/settings/extension')) return jsonResponse({
+        server_url: 'http://127.0.0.1:8790',
+        pairing_token: 'pairing-token-fixture',
+        capture_ttl_seconds: 900,
+        supported_sources: ['google_slides', 'google_docs', 'google_sheets'],
+        load_unpacked_path: 'C:\\project\\extension\\dist',
+        captures: [],
+      })
       return jsonResponse(settings)
     }))
     renderPage(<SettingsPage />)
     const open = await screen.findByRole('button', { name: 'Replace key' })
+    expect(screen.getByRole('heading', { name: 'Chrome source connector' })).toBeVisible()
+    expect(screen.getByLabelText('Extension pairing token')).toHaveValue('pairing-token-fixture')
     open.focus()
     fireEvent.click(open)
     const input = screen.getByLabelText('API key')

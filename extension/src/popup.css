@@ -1,0 +1,31 @@
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; width: 390px; background: #f5f7fb; }
+main { min-height: 220px; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 15px 16px; color: white; background: #233b77; }
+header > div { display: grid; gap: 4px; }
+.badge { font-size: 11px; color: #cbd8ff; }
+.badge.ok { color: #a7f3d0; }
+.badge.bad { color: #fecaca; }
+.icon { border: 0; border-radius: 7px; padding: 6px 8px; color: white; background: #ffffff1a; cursor: pointer; }
+form { display: grid; gap: 13px; padding: 14px 16px; }
+.source-summary { display: grid; gap: 3px; }
+.source-summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-summary small, footer { color: #667085; }
+label { display: grid; gap: 6px; font-size: 12px; font-weight: 650; }
+select, input[type="text"] { width: 100%; border: 1px solid #cdd5e3; border-radius: 7px; padding: 8px; background: white; font: inherit; }
+fieldset { margin: 0; border: 1px solid #d9dfeb; border-radius: 9px; padding: 0; background: white; }
+legend { display: flex; width: calc(100% - 18px); justify-content: space-between; padding: 0 4px; font-size: 12px; font-weight: 700; }
+legend button { border: 0; color: #3156a4; background: transparent; font-size: 11px; cursor: pointer; }
+.targets { max-height: 200px; overflow: auto; padding: 7px 10px 10px; }
+.target { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid #edf0f5; }
+.target:last-child { border-bottom: 0; }
+.target span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.target input.range { grid-column: 2; font-size: 11px; padding: 6px; }
+.primary { border: 0; border-radius: 8px; padding: 10px 12px; color: white; background: #3156a4; font-weight: 700; cursor: pointer; }
+.primary:disabled { cursor: wait; opacity: .65; }
+.message { margin: 16px; padding: 12px; border-radius: 8px; background: white; color: #475467; }
+.message.error { color: #9b1c1c; background: #fff1f1; }
+.progress { margin: 0; color: #3156a4; font-size: 12px; }
+footer { padding: 0 16px 14px; font-size: 10px; line-height: 1.45; }

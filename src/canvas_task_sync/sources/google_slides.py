@@ -240,6 +240,8 @@ class GoogleSlidesSource:
         return SourceCapture(
             source_key=self.source_key,
             source_url=self.settings.url,
+            source_type="google_slides",
+            resource_id=self.presentation_id,
             presentation_id=self.presentation_id,
             page_id=self.settings.page_id,
             page_hash=canonical_page_hash(page),

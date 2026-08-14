@@ -1,0 +1,82 @@
+version: 1
+state_path: .canvas-task-sync/state.sqlite3
+gemini_model: gemini-3.6-flash
+
+courses:
+  spanish:
+    name: Honors Spanish IV
+    prefix: SPANISH
+    task_list: School
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    source:
+      type: google_slides
+      url: 
+        https://docs.google.com/presentation/d/1QclyYz3XdeE4C6kHvnqznZ5KsUNHRFO2YHu9sYIzGdU/edit?slide=id.g8596fffd0c_4_6#slide=id.g8596fffd0c_4_6
+      page_id: g8596fffd0c_4_6
+      extraction:
+        mode: hybrid
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]
+  computerscience:
+    enabled: true
+    name: AP Computer Science
+    prefix: CS
+    task_list: School
+    timezone: America/New_York
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+    source:
+      type: browser
+      url: 
+        https://docs.google.com/spreadsheets/d/18ngIjJOcG6UC5sig7NEv_l209WZpdrRLd8JtBIo1Img/edit?gid=0#gid=0
+      source_format: auto
+      freshness_seconds: 900
+      selection:
+        slide_ids: []
+        section_ids: []
+        sheets: []
+      extraction:
+        mode: hybrid
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds:
+        - present
+        - submit
+        - bring
+
+  stats:
+    enabled: true
+    name: AP Statistics
+    prefix: STATS
+    task_list: School
+    timezone: America/New_York
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+    source:
+      type: browser
+      url: 
+        https://docs.google.com/document/d/15AiFpTcCfAy0cpXBsO3NTrXqjpkt3VqrHWeNJKyeQ4Q/edit?tab=t.0
+      source_format: google_docs
+      freshness_seconds: 900
+      selection:
+        slide_ids: []
+        section_ids: []
+        sheets: []
+      extraction:
+        mode: text
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds:
+        - bring
+        - present
+        - submit

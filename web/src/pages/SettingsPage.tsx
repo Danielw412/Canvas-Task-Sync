@@ -1,5 +1,6 @@
 import {
   Check,
+  Copy,
   Database,
   ExternalLink,
   FileJson,
@@ -8,6 +9,7 @@ import {
   Laptop,
   LockKeyhole,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -26,9 +28,19 @@ interface SettingsResponse {
   paths: { control_database: string; state_database: string; config: string }
 }
 
+interface ExtensionSetup {
+  server_url: string
+  pairing_token: string
+  capture_ttl_seconds: number
+  supported_sources: string[]
+  load_unpacked_path: string
+  captures: { source_type: string; captured_at: string; item_count: number; screenshot_count: number }[]
+}
+
 export default function SettingsPage() {
   const { toast } = useApp()
   const { data, error, mutate } = useSWR<SettingsResponse>('/api/v1/settings/connections', fetchJson)
+  const { data: extension, error: extensionError, mutate: mutateExtension } = useSWR<ExtensionSetup>('/api/v1/settings/extension', fetchJson)
   const [tab, setTab] = useState<'connections' | 'general' | 'privacy'>('connections')
   const [keyModal, setKeyModal] = useState(false)
   const [apiKey, setApiKey] = useState('')
@@ -39,7 +51,7 @@ export default function SettingsPage() {
     setBusy(true)
     try {
       await work()
-      await Promise.all([mutate(), globalMutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))])
+      await Promise.all([mutate(), mutateExtension(), globalMutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))])
       toast(success, 'success')
     } catch (requestError) {
       toast(requestError instanceof Error ? requestError.message : 'The action failed.', 'error')
@@ -64,6 +76,16 @@ export default function SettingsPage() {
     await action(() => mutateJson('/api/v1/settings/general', { method: 'PUT', body: { history_retention_days: days } }), 'History retention updated.')
   }
 
+  async function copyPairingToken() {
+    if (!extension?.pairing_token) return
+    try {
+      await navigator.clipboard.writeText(extension.pairing_token)
+      toast('Extension pairing token copied.', 'success')
+    } catch {
+      toast('Copy failed. Select the token and copy it manually.', 'error')
+    }
+  }
+
   if (error) return <EmptyState title="Settings could not load" body={error.message} />
   const connections = data?.connections
   return <div className="settings-page">
@@ -73,16 +95,22 @@ export default function SettingsPage() {
       <section className="settings-main">
         {tab === 'connections' ? <>
           <section className="settings-section panel"><header><h2>Google connection</h2><span className={connections?.google_authorized ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.google_authorized ? 'healthy' : 'missing'} size={17} />{connections?.google_authorized ? 'Authorized' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>OAuth client file</strong><small>credentials.json</small></div><div className="setup-result"><StatusIcon state={connections?.google_client_configured ? 'healthy' : 'missing'} size={17} /><span>{connections?.google_client_configured ? 'Valid desktop client' : 'Not configured'}</span></div><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => void uploadClient(event.target.files?.[0])} /><Button variant="secondary" icon={Upload} disabled={busy} onClick={() => fileInput.current?.click()}>{connections?.google_client_configured ? 'Replace file' : 'Upload file'}</Button></div><div className="setup-row"><span className="step-number">2</span><div><strong>Google authorization</strong><small>Tasks and Slides access</small></div><div className="scope-list"><span><Check size={14} />Google Tasks · Read and write</span><span><Check size={14} />Google Slides · Read selected presentation pages</span></div><Button variant="secondary" disabled={busy || !connections?.google_client_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/google/authorize'), 'Google authorization completed.')}>{connections?.google_authorized ? 'Reauthorize' : 'Authorize'}</Button></div>{connections?.google_authorized ? <button className="settings-danger-row" disabled={busy} onClick={() => { if (window.confirm('Disconnect Google access? Your OAuth client file remains, but token.json is removed from active use.')) void action(() => mutateJson('/api/v1/settings/google/disconnect'), 'Google access disconnected.') }}><span>Disconnect</span><small>Disconnect Google access for Tasks and Slides.</small></button> : null}</section>
-          <section className="settings-section panel"><header><h2>Gemini API</h2><span className={connections?.gemini_configured ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.gemini_configured ? 'healthy' : 'missing'} size={17} />{connections?.gemini_configured ? 'Configured' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>API key</strong><small>Stored locally in .env and never returned by the API</small></div><div className="masked-key">••••••••••••••••••••••••</div><div className="button-cluster"><Button variant="secondary" icon={KeyRound} onClick={() => setKeyModal(true)}>{connections?.gemini_configured ? 'Replace key' : 'Add key'}</Button><Button variant="secondary" disabled={busy || !connections?.gemini_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini connection passed.')}>Test connection</Button></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Model</strong><small>gemini-3.6-flash</small></div></div></section>
-          <LocalServerSection address={connections?.local_server ?? '127.0.0.1:8787'} />
+          <section className="settings-section panel"><header><h2>Gemini API</h2><span className={connections?.gemini_configured ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.gemini_configured ? 'healthy' : 'missing'} size={17} />{connections?.gemini_configured ? 'Configured' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>API key</strong><small>Stored locally in .env and never returned by the API</small></div><div className="masked-key">••••••••••••••••••••••••</div><div className="button-cluster"><Button variant="secondary" icon={KeyRound} onClick={() => setKeyModal(true)}>{connections?.gemini_configured ? 'Replace key' : 'Add key'}</Button><Button variant="secondary" disabled={busy || !connections?.gemini_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini connection passed.')}>Test connection</Button></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Model</strong><small>gemini-3.7-flash → 3.6 → 3.5 · high reasoning</small></div></div></section>
+          <ChromeConnectorSection data={extension} error={extensionError} busy={busy} copyToken={copyPairingToken} rotate={() => action(() => mutateJson('/api/v1/settings/extension/rotate'), 'Extension pairing token rotated. Paste the new token into the extension.')} clear={() => action(() => mutateJson('/api/v1/settings/extension/captures', { method: 'DELETE' }), 'In-memory browser captures cleared.')} />
+          <LocalServerSection address={connections?.local_server ?? '127.0.0.1:8790'} />
         </> : null}
-        {tab === 'general' ? <><LocalServerSection address={connections?.local_server ?? '127.0.0.1:8787'} /><section className="settings-section panel"><header><h2>App behavior</h2></header><div className="setting-row"><div><strong>Default course</strong><small>Use the course selected in the top bar.</small></div><span>Follow current selection</span></div><div className="setting-row"><div><strong>Browser launch</strong><small>The CLI opens this control center by default.</small></div><span>Use <code>--no-open</code> to disable</span></div></section></> : null}
+        {tab === 'general' ? <><LocalServerSection address={connections?.local_server ?? '127.0.0.1:8790'} /><section className="settings-section panel"><header><h2>App behavior</h2></header><div className="setting-row"><div><strong>Default course</strong><small>Use the course selected in the top bar.</small></div><span>Follow current selection</span></div><div className="setting-row"><div><strong>Browser launch</strong><small>The CLI opens this control center by default.</small></div><span>Use <code>--no-open</code> to disable</span></div></section></> : null}
         {tab === 'privacy' ? <DataPrivacy data={data} busy={busy} updateRetention={updateRetention} clear={() => { if (window.confirm('Clear all run history and sanitized debug events? Sync mappings and extraction cache are kept.')) void action(() => mutateJson('/api/v1/history', { method: 'DELETE' }), 'Run history cleared.') }} /> : null}
       </section>
       <aside className="settings-rail inspector-rail"><section className="rail-section"><h2>Connection checks</h2><div className="connection-check-list">{connections?.checks.map((check) => <div key={check.key}><span className="connection-icon">{check.key.includes('oauth') ? <FileJson size={19} /> : check.key.includes('gemini') ? <Sparkles size={19} /> : <Database size={19} />}</span><div><strong>{check.label}</strong><small>{check.summary}</small></div><StatusIcon state={check.state} /><span>{check.state === 'healthy' ? 'OK' : 'Check'}</span></div>)}</div><a href="/diagnostics" className="inline-link">View diagnostics <ExternalLink size={15} /></a></section><section className="security-list"><h2>Security</h2><div><LockKeyhole size={19} /><span>Secrets are never shown after saving</span></div><div><ShieldCheck size={19} /><span>Logs and debug metadata are sanitized</span></div><div><HardDrive size={19} /><span>Source images are not retained</span></div><div><Laptop size={19} /><span>Credentials stay on this computer</span></div></section></aside>
     </div>
     {keyModal ? <Modal title={connections?.gemini_configured ? 'Replace Gemini API key' : 'Add Gemini API key'} onClose={() => setKeyModal(false)} footer={<><Button variant="secondary" onClick={() => setKeyModal(false)}>Cancel</Button><Button icon={KeyRound} disabled={busy || apiKey.length < 8} onClick={() => void saveKey()}>Save key</Button></>}><label className="form-field"><span>API key</span><input aria-label="API key" type="password" autoFocus autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /><small>The key is written to your local .env file. It will not be returned or logged.</small></label></Modal> : null}
   </div>
+}
+
+function ChromeConnectorSection({ data, error, busy, copyToken, rotate, clear }: { data?: ExtensionSetup; error?: Error; busy: boolean; copyToken: () => Promise<void>; rotate: () => Promise<void>; clear: () => Promise<void> }) {
+  const capture = data?.captures?.[0]
+  return <section className="settings-section panel"><header><h2>Chrome source connector</h2><span className={capture ? 'tone-success' : 'tone-warning'}><StatusIcon state={capture ? 'healthy' : 'warning'} size={17} />{capture ? 'Capture ready' : 'Waiting for capture'}</span></header>{error ? <p className="tone-danger">{error.message}</p> : <><div className="setup-row"><span className="step-number">1</span><div><strong>Load the unpacked extension</strong><small>Open <code>chrome://extensions</code>, enable Developer mode, choose Load unpacked, and select:</small><small><code>{data?.load_unpacked_path ?? 'extension/dist'}</code></small></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Pair with this local app</strong><small>Use server <code>{data?.server_url ?? 'http://127.0.0.1:8790'}</code>. The token authorizes only this loopback bridge.</small></div><input className="extension-token" aria-label="Extension pairing token" readOnly value={data?.pairing_token ?? ''} onFocus={(event) => event.currentTarget.select()} /><div className="button-cluster"><Button variant="secondary" icon={Copy} disabled={!data?.pairing_token} onClick={() => void copyToken()}>Copy token</Button><Button variant="secondary" icon={RotateCcw} disabled={busy} onClick={() => void rotate()}>Rotate</Button></div></div><div className="setup-row"><span className="step-number">3</span><div><strong>Capture the open file</strong><small>Open Slides, Docs, or Sheets in Chrome, click the extension, choose portions and a mode, then send the capture.</small></div>{capture ? <div className="setup-result"><StatusIcon state="healthy" size={17} /><span>{capture.source_type.replace('google_', '')} · {capture.item_count} items · {capture.screenshot_count} screenshots</span></div> : null}</div><p className="local-note"><LockKeyhole size={15} />Captures stay in memory for {Math.round((data?.capture_ttl_seconds ?? 900) / 60)} minutes, are never written to disk, and contain no exported login credentials.</p>{capture ? <button className="settings-danger-row" disabled={busy} onClick={() => void clear()}><span>Clear browser captures</span><small>Immediately removes all pending in-memory source content.</small></button> : null}</>}</section>
 }
 
 function LocalServerSection({ address }: { address: string }) {

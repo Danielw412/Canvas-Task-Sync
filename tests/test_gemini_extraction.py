@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
-from canvas_task_sync.gemini import GeminiExtractor
+from canvas_task_sync.gemini import GeminiExtractionError, GeminiExtractor, GoogleGenAIBackend
 from canvas_task_sync.models import Confidence, ExtractionMode
 
 
@@ -119,3 +120,65 @@ def test_auto_retries_when_anchor_or_row_context_is_missing(
     assert outcome.used_mode == ExtractionMode.HYBRID
     assert len(backend.calls) == 2
     assert outcome.fallback_reasons
+
+
+def test_model_quota_fallback_chain_keeps_high_reasoning():
+    calls = []
+
+    class Models:
+        def generate_content(self, *, model, contents, config):
+            calls.append((model, contents, config))
+            if model != "gemini-3.5-flash":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED quota exceeded")
+            return SimpleNamespace(parsed=[], text="[]")
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.7-flash",
+        client=SimpleNamespace(models=Models()),
+        fallback_models=["gemini-3.6-flash", "gemini-3.5-flash"],
+    )
+    assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
+    assert [call[0] for call in calls] == [
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ]
+    assert all(
+        str(call[2].thinking_config.thinking_level).casefold().endswith("high")
+        for call in calls
+    )
+    assert backend.used_model == "gemini-3.5-flash"
+    assert len(backend.fallback_reasons) == 2
+
+
+def test_recent_assignment_context_is_included_in_gemini_prompt(
+    spanish_capture, spanish_course, spanish_candidates
+):
+    backend = FakeBackend([spanish_candidates])
+    GeminiExtractor(backend).extract(
+        spanish_capture,
+        spanish_course,
+        existing_assignments=["[SPANISH] VHL practice | needsAction | due 2026-08-18"],
+    )
+    assert "[SPANISH] VHL practice | needsAction | due 2026-08-18" in backend.calls[0][
+        "prompt"
+    ]
+
+
+def test_exhausted_model_chain_reports_each_attempt_without_raw_provider_details():
+    class Models:
+        def generate_content(self, **_kwargs):
+            raise RuntimeError("429 RESOURCE_EXHAUSTED secret-provider-detail")
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.7-flash",
+        client=SimpleNamespace(models=Models()),
+        fallback_models=["gemini-3.6-flash", "gemini-3.5-flash"],
+    )
+    with pytest.raises(GeminiExtractionError) as caught:
+        backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None)
+    message = str(caught.value)
+    assert "gemini-3.7-flash: quota or rate limit" in message
+    assert "gemini-3.6-flash: quota or rate limit" in message
+    assert "gemini-3.5-flash: quota or rate limit" in message
+    assert "secret-provider-detail" not in message

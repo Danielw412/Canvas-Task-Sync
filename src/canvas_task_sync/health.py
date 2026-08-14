@@ -9,10 +9,12 @@ from time import perf_counter
 from dotenv import load_dotenv
 
 from canvas_task_sync.auth import SCOPES, load_google_credentials
+from canvas_task_sync.browser_capture import BrowserCaptureBroker
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ConnectionItem,
     ConnectionStatus,
@@ -33,7 +35,9 @@ def _oauth_client_valid(path: Path) -> bool:
     return isinstance(value, dict) and isinstance(value.get("installed"), dict)
 
 
-def connection_status(settings: ProjectSettings, *, port: int = 8787) -> ConnectionStatus:
+def connection_status(
+    settings: ProjectSettings, *, port: int = DEFAULT_WEB_PORT
+) -> ConnectionStatus:
     load_dotenv(settings.root_dir / ".env")
     client_configured = _oauth_client_valid(settings.root_dir / "credentials.json")
     token_path = settings.root_dir / "token.json"
@@ -68,7 +72,7 @@ def connection_status(settings: ProjectSettings, *, port: int = 8787) -> Connect
             label="Gemini API",
             state=HealthState.HEALTHY if gemini else HealthState.MISSING,
             summary=(
-                f"Configured · {settings.gemini_model}"
+                f"Configured · {' → '.join(settings.gemini_model_chain)} · high reasoning"
                 if gemini
                 else "Add a Gemini API key"
             ),
@@ -84,12 +88,17 @@ def connection_status(settings: ProjectSettings, *, port: int = 8787) -> Connect
         google_client_configured=client_configured,
         google_authorized=authorized,
         gemini_configured=gemini,
-        local_server=f"127.0.0.1:{port}",
+        local_server=f"{DEFAULT_WEB_HOST}:{port}",
         checks=checks,
     )
 
 
-def run_health_checks(settings: ProjectSettings, course_id: str | None = None) -> list[HealthCheck]:
+def run_health_checks(
+    settings: ProjectSettings,
+    course_id: str | None = None,
+    *,
+    capture_broker: BrowserCaptureBroker | None = None,
+) -> list[HealthCheck]:
     load_dotenv(settings.root_dir / ".env")
     checks: list[HealthCheck] = []
     api_key = os.getenv("GEMINI_API_KEY")
@@ -109,15 +118,36 @@ def run_health_checks(settings: ProjectSettings, course_id: str | None = None) -
             from google import genai
 
             with genai.Client(api_key=api_key) as client:
-                model = client.models.get(model=settings.gemini_model)
+                model = None
+                selected_model = None
+                model_errors: list[Exception] = []
+                for candidate in settings.gemini_model_chain:
+                    try:
+                        model = client.models.get(model=candidate)
+                        selected_model = candidate
+                        break
+                    except Exception as error:
+                        model_errors.append(error)
+                if model is None or selected_model is None:
+                    raise model_errors[-1]
             checks.append(
                 HealthCheck(
                     key="gemini_api",
                     label="Gemini API",
                     state=HealthState.HEALTHY,
-                    summary=f"Model {settings.gemini_model} is available.",
+                    summary=(
+                        f"Model {selected_model} is available with high reasoning."
+                        if selected_model == settings.gemini_model
+                        else (
+                            f"Fallback model {selected_model} is available; primary is unavailable."
+                        )
+                    ),
                     duration_ms=int((perf_counter() - started) * 1000),
-                    details={"model": getattr(model, "name", settings.gemini_model)},
+                    details={
+                        "model": getattr(model, "name", selected_model),
+                        "configured_chain": settings.gemini_model_chain,
+                        "thinking_level": "high",
+                    },
                 )
             )
         except Exception as error:
@@ -161,15 +191,27 @@ def run_health_checks(settings: ProjectSettings, course_id: str | None = None) -
         course = settings.course(selected_id)
         started = perf_counter()
         try:
-            capture = create_source_adapter(course.source, credentials).capture(include_image=False)
+            capture = create_source_adapter(
+                course.source,
+                credentials,
+                capture_broker=capture_broker,
+            ).capture(include_image=False)
             checks.append(
                 HealthCheck(
                     key=f"source:{selected_id}",
                     label=f"{course.name} source",
                     state=HealthState.HEALTHY,
-                    summary=f"Target page is readable · {len(capture.blocks)} blocks.",
+                    summary=(
+                        f"{capture.source_type.replace('_', ' ').title()} capture is readable · "
+                        f"{len(capture.blocks)} blocks."
+                    ),
                     duration_ms=int((perf_counter() - started) * 1000),
-                    details={"course_id": selected_id, "page_id": capture.page_id},
+                    details={
+                        "course_id": selected_id,
+                        "source_type": capture.source_type,
+                        "resource_id": capture.resource_id,
+                        "page_id": capture.page_id,
+                    },
                 )
             )
         except Exception as error:

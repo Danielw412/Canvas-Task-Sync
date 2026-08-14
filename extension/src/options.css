@@ -1,0 +1,20 @@
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #f5f7fb; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(760px, calc(100% - 32px)); margin: 40px auto; }
+header { margin-bottom: 24px; }
+h1 { margin-bottom: 6px; }
+header p, small, li { color: #667085; }
+.permission-copy { margin: 0; color: #667085; font-size: 13px; line-height: 1.55; }
+section { display: grid; gap: 15px; margin: 16px 0; padding: 22px; border: 1px solid #dce2ec; border-radius: 12px; background: white; box-shadow: 0 4px 16px #1f2c4d0a; }
+h2 { margin: 0 0 4px; font-size: 17px; }
+label { display: grid; gap: 7px; font-size: 13px; font-weight: 700; }
+input, select { width: 100%; padding: 9px 10px; border: 1px solid #cbd3e1; border-radius: 7px; font: inherit; background: white; }
+.override-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.actions, .save-row { display: flex; align-items: center; gap: 12px; }
+button { border: 0; border-radius: 8px; padding: 10px 15px; color: white; background: #3156a4; font-weight: 700; cursor: pointer; }
+button.secondary { color: #3156a4; border: 1px solid #bfcbe2; background: white; }
+.save-row { justify-content: flex-end; margin: 18px 0; }
+#connection-result, #save-result, #screenshot-access-result { font-size: 13px; color: #3f7a55; }
+.troubleshooting ul { margin: 0; padding-left: 20px; line-height: 1.7; }
+@media (max-width: 640px) { .override-grid { grid-template-columns: 1fr; } }

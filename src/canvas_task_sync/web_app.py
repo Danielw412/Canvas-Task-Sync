@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import re
 import secrets
 from collections.abc import AsyncIterable
 from contextlib import asynccontextmanager, suppress
@@ -17,6 +19,14 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
 from canvas_task_sync.auth import load_google_credentials
+from canvas_task_sync.browser_capture import (
+    MAX_CAPTURE_BYTES,
+    MAX_CAPTURE_TEXT_BYTES,
+    BrowserCaptureBroker,
+    BrowserCaptureEnvelope,
+    resource_id_from_url,
+    source_type_from_url,
+)
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.configuration_service import (
     MAX_CREDENTIAL_FILE_BYTES,
@@ -31,9 +41,16 @@ from canvas_task_sync.run_manager import (
     ScheduleManager,
     next_schedule_occurrence,
 )
+from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.sources.browser_connector import (
+    automatic_acquisition_mode,
+    extension_selection,
+)
 from canvas_task_sync.sync_service import SyncService
+from canvas_task_sync.web_constants import DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
+    CaptureFailure,
     CourseSave,
     CourseView,
     DiagnosticsResponse,
@@ -41,6 +58,7 @@ from canvas_task_sync.web_models import (
     GeneralSettings,
     HealthState,
     OverviewResponse,
+    RunAllCreate,
     RunApply,
     RunCreate,
     RunStatus,
@@ -56,7 +74,16 @@ class WebRuntime:
         self.configuration = ConfigurationService(config_path)
         self.settings = self.configuration.load()
         self.store = ControlStore(self.settings.root_dir / ".canvas-task-sync" / "control.sqlite3")
-        self.sync_service = SyncService(self.settings)
+        self.capture_broker = BrowserCaptureBroker()
+        pairing_token = self.store.get_setting("extension_pairing_token")
+        if not isinstance(pairing_token, str) or len(pairing_token) < 32:
+            pairing_token = secrets.token_urlsafe(32)
+            self.store.set_setting("extension_pairing_token", pairing_token)
+        self.extension_pairing_token = pairing_token
+        self.sync_service = SyncService(
+            self.settings,
+            source_factory=self.create_source_adapter,
+        )
         self.runs = RunManager(self.store, self.sync_service)
         self.schedules = ScheduleManager(self.store, self.runs)
         self.csrf_token = secrets.token_urlsafe(32)
@@ -66,6 +93,18 @@ class WebRuntime:
         self.settings = self.configuration.load()
         self.sync_service.settings = self.settings
         return self.settings
+
+    def create_source_adapter(self, settings: Any, credentials: Any) -> Any:
+        return create_source_adapter(
+            settings,
+            credentials,
+            capture_broker=self.capture_broker,
+        )
+
+    def rotate_extension_pairing_token(self) -> str:
+        self.extension_pairing_token = secrets.token_urlsafe(32)
+        self.store.set_setting("extension_pairing_token", self.extension_pairing_token)
+        return self.extension_pairing_token
 
     async def start(self) -> None:
         self.store.prune_history()
@@ -81,6 +120,7 @@ class WebRuntime:
             self.retention_task = None
         await self.schedules.stop()
         await self.runs.stop()
+        self.capture_broker.clear()
         self.store.close()
 
     async def _retention_loop(self) -> None:
@@ -89,7 +129,7 @@ class WebRuntime:
             self.store.prune_history()
 
 
-def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
+def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         runtime = WebRuntime(config_path, port=port)
@@ -115,9 +155,16 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Content-Type", "X-CSRF-Token", "Last-Event-ID"],
+        allow_headers=[
+            "Accept",
+            "Content-Type",
+            "X-CSRF-Token",
+            "X-Extension-Token",
+            "Last-Event-ID",
+        ],
     )
 
     @app.middleware("http")
@@ -137,7 +184,39 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
                 message="This control center accepts loopback requests only.",
             )
         is_mutation = request.method not in {"GET", "HEAD", "OPTIONS"}
-        if request.url.path.startswith("/api/v1/") and is_mutation:
+        is_extension_api = request.url.path.startswith("/api/v1/extension/")
+        if is_extension_api:
+            runtime = _runtime(request)
+            origin = request.headers.get("origin")
+            if origin and not re.fullmatch(r"chrome-extension://[a-p]{32}", origin):
+                return _error_response(
+                    status_code=403,
+                    code="extension_origin_not_allowed",
+                    message="The extension bridge accepts Chrome extension requests only.",
+                )
+            if request.method != "OPTIONS" and not hmac.compare_digest(
+                request.headers.get("x-extension-token", ""),
+                runtime.extension_pairing_token,
+            ):
+                return _error_response(
+                    status_code=401,
+                    code="extension_pairing_failed",
+                    message="The extension pairing token is missing or no longer valid.",
+                )
+            content_length = request.headers.get("content-length")
+            maximum_request_bytes = MAX_CAPTURE_TEXT_BYTES + (MAX_CAPTURE_BYTES * 2)
+            if (
+                request.method == "POST"
+                and content_length
+                and content_length.isdigit()
+                and int(content_length) > maximum_request_bytes
+            ):
+                return _error_response(
+                    status_code=413,
+                    code="capture_too_large",
+                    message="The browser capture exceeds the local bridge size limit.",
+                )
+        elif request.url.path.startswith("/api/v1/") and is_mutation:
             runtime = _runtime(request)
             origin = request.headers.get("origin")
             allowed_origins = {
@@ -298,7 +377,12 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
     async def test_course(request: Request, course_id: str) -> dict[str, Any]:
         runtime = _runtime(request)
         runtime.settings.course(course_id)
-        checks = await asyncio.to_thread(run_health_checks, runtime.settings, course_id)
+        checks = await asyncio.to_thread(
+            run_health_checks,
+            runtime.settings,
+            course_id,
+            capture_broker=runtime.capture_broker,
+        )
         return {"checks": checks}
 
     @api.get("/courses-config")
@@ -334,8 +418,43 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
         course = runtime.settings.course(payload.course_id)
         if not course.enabled:
             raise _http_error(409, "course_disabled", "Enable this course before running it.")
+        capture_request = _queue_automatic_capture(
+            runtime,
+            course,
+            extraction_mode=payload.extraction_mode,
+        )
         run_id = runtime.runs.create_preview(payload)
-        return {"run_id": run_id, "status": "queued"}
+        return {
+            "run_id": run_id,
+            "status": "queued",
+            "capture_request_id": (
+                capture_request["request_id"] if capture_request is not None else None
+            ),
+        }
+
+    @api.post("/runs/all", status_code=202)
+    def create_all_runs(request: Request, payload: RunAllCreate) -> dict[str, Any]:
+        runtime = _runtime(request)
+        run_ids: list[int] = []
+        capture_request_ids: list[str] = []
+        for course_id, course in sorted(runtime.settings.courses.items()):
+            if not course.enabled:
+                continue
+            capture_request = _queue_automatic_capture(runtime, course)
+            if capture_request is not None:
+                capture_request_ids.append(str(capture_request["request_id"]))
+            run_ids.append(
+                runtime.runs.create_preview(
+                    RunCreate(course_id=course_id, include_past=payload.include_past)
+                )
+            )
+        if not run_ids:
+            raise _http_error(409, "no_enabled_courses", "Enable at least one course first.")
+        return {
+            "run_ids": run_ids,
+            "status": "queued",
+            "capture_request_ids": capture_request_ids,
+        }
 
     @api.post("/runs/{run_id}/apply", status_code=202)
     def apply_run(request: Request, run_id: int, payload: RunApply) -> dict[str, Any]:
@@ -507,6 +626,86 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
             },
         }
 
+    @api.get("/settings/extension")
+    def get_extension_setup(request: Request) -> dict[str, Any]:
+        runtime = _runtime(request)
+        return {
+            "server_url": f"http://127.0.0.1:{runtime.port}",
+            "pairing_token": runtime.extension_pairing_token,
+            "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
+            "supported_sources": ["google_slides", "google_docs", "google_sheets"],
+            "load_unpacked_path": str(runtime.settings.root_dir / "extension" / "dist"),
+            "captures": [
+                status.as_dict() for status in runtime.capture_broker.list_statuses()
+            ],
+            "capture_requests": runtime.capture_broker.list_capture_requests(),
+        }
+
+    @api.post("/settings/extension/rotate")
+    def rotate_extension_pairing(request: Request) -> dict[str, Any]:
+        runtime = _runtime(request)
+        cleared = runtime.capture_broker.clear()
+        return {
+            "pairing_token": runtime.rotate_extension_pairing_token(),
+            "cleared_captures": cleared,
+        }
+
+    @api.delete("/settings/extension/captures", status_code=204)
+    def clear_extension_captures(request: Request) -> Response:
+        _runtime(request).capture_broker.clear()
+        return Response(status_code=204)
+
+    @api.get("/extension/status")
+    def extension_status(request: Request) -> dict[str, Any]:
+        runtime = _runtime(request)
+        return {
+            "connected": True,
+            "api_version": 1,
+            "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
+            "supported_sources": ["google_slides", "google_docs", "google_sheets"],
+            "captures": [
+                status.as_dict() for status in runtime.capture_broker.list_statuses()
+            ],
+            "capture_requests": runtime.capture_broker.list_capture_requests(),
+        }
+
+    @api.get("/extension/capture-requests/next", response_model=None)
+    def next_extension_capture_request(request: Request) -> Response | dict[str, Any]:
+        capture_request = _runtime(request).capture_broker.claim_capture_request()
+        if capture_request is None:
+            return Response(status_code=204)
+        return capture_request
+
+    @api.post("/extension/capture-requests/{request_id}/failed", status_code=204)
+    def fail_extension_capture_request(
+        request: Request,
+        request_id: str,
+        payload: CaptureFailure,
+    ) -> Response:
+        if not _runtime(request).capture_broker.fail_capture_request(
+            request_id,
+            error_code=payload.code,
+            error_message=payload.message,
+        ):
+            raise _http_error(404, "capture_request_not_found", "Capture request was not found.")
+        return Response(status_code=204)
+
+    @api.post("/extension/captures", status_code=202)
+    def accept_extension_capture(
+        request: Request,
+        payload: BrowserCaptureEnvelope,
+    ) -> dict[str, Any]:
+        status = _runtime(request).capture_broker.put(payload)
+        return {
+            "accepted": True,
+            "capture": status.as_dict(),
+        }
+
+    @api.delete("/extension/captures", status_code=204)
+    def discard_extension_captures(request: Request) -> Response:
+        _runtime(request).capture_broker.clear()
+        return Response(status_code=204)
+
     @api.put("/settings/general")
     def update_general_settings(
         request: Request, payload: GeneralSettings
@@ -526,7 +725,12 @@ def create_web_app(config_path: Path, *, port: int = 8787) -> FastAPI:
     @api.post("/settings/gemini/test")
     async def test_gemini(request: Request) -> dict[str, Any]:
         runtime = _runtime(request)
-        checks = await asyncio.to_thread(run_health_checks, runtime.settings, None)
+        checks = await asyncio.to_thread(
+            run_health_checks,
+            runtime.settings,
+            None,
+            capture_broker=runtime.capture_broker,
+        )
         check = next((item for item in checks if item.key == "gemini_api"), None)
         return {"check": check}
 
@@ -628,14 +832,49 @@ def _default_course(settings: ProjectSettings) -> str | None:
     return enabled[0] if enabled else next(iter(sorted(settings.courses)), None)
 
 
+def _queue_automatic_capture(
+    runtime: WebRuntime,
+    course: Any,
+    *,
+    extraction_mode: Any | None = None,
+) -> dict[str, Any] | None:
+    if course.source.type != "browser":
+        return None
+    source = course.source.model_copy(deep=True)
+    if extraction_mode is not None:
+        source.extraction.mode = extraction_mode
+    return runtime.capture_broker.request_capture(
+        source.url,
+        automatic_acquisition_mode(source),
+        extension_selection(source),
+    )
+
+
 def _course_views(runtime: WebRuntime) -> list[CourseView]:
     connections = connection_status(runtime.settings, port=runtime.port)
-    ready = connections.google_authorized and connections.gemini_configured
     views: list[CourseView] = []
     for course_id, course in sorted(runtime.settings.courses.items()):
+        source_ready = True
+        if course.source.type == "browser":
+            try:
+                runtime.capture_broker.get(
+                    source_type_from_url(course.source.url),
+                    resource_id_from_url(course.source.url),
+                    max_age_seconds=course.source.freshness_seconds,
+                )
+            except Exception:
+                source_ready = False
+        ready = (
+            connections.google_authorized
+            and connections.gemini_configured
+            and source_ready
+        )
         if not course.enabled:
             readiness = HealthState.WARNING
             message = "Disabled"
+        elif course.source.type == "browser" and not source_ready:
+            readiness = HealthState.WARNING
+            message = "Browser capture needed"
         elif ready:
             readiness = HealthState.HEALTHY
             message = "Ready"
@@ -708,6 +947,22 @@ def _mount_frontend(app: FastAPI) -> None:
     assets = web_dist / "assets"
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="web-assets")
+
+    @app.api_route(
+        "/api/{full_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
+    async def api_not_found(full_path: str):
+        del full_path
+        return _error_response(
+            status_code=404,
+            code="api_route_not_found",
+            message=(
+                "This API route is not available. Restart Canvas Task Sync if the web interface "
+                "was updated while the local server was running."
+            ),
+        )
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def frontend(full_path: str):

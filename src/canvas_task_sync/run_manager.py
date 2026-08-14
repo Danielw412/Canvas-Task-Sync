@@ -86,20 +86,28 @@ class RunManager:
         self.store = store
         self.service = service
         self._queue: asyncio.Queue[int | None] = asyncio.Queue()
-        self._worker_task: asyncio.Task[None] | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="canvas-sync")
+        self._worker_count = max(2, min(8, len(service.settings.courses) or 1))
+        self._worker_tasks: list[asyncio.Task[None]] = []
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._worker_count,
+            thread_name_prefix="canvas-sync",
+        )
         self._event_condition = threading.Condition()
         self._queued: set[int] = set()
 
     async def start(self) -> None:
-        if self._worker_task is None:
-            self._worker_task = asyncio.create_task(self._worker(), name="canvas-sync-worker")
+        if not self._worker_tasks:
+            self._worker_tasks = [
+                asyncio.create_task(self._worker(), name=f"canvas-sync-worker-{index + 1}")
+                for index in range(self._worker_count)
+            ]
 
     async def stop(self) -> None:
-        if self._worker_task is not None:
-            await self._queue.put(None)
-            await self._worker_task
-            self._worker_task = None
+        if self._worker_tasks:
+            for _ in self._worker_tasks:
+                await self._queue.put(None)
+            await asyncio.gather(*self._worker_tasks)
+            self._worker_tasks = []
         self._executor.shutdown(wait=True, cancel_futures=False)
 
     def create_preview(

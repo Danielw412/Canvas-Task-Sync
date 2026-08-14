@@ -1,0 +1,17 @@
+version: 1
+state_path: .canvas-task-sync/state.sqlite3
+gemini_model: test-model
+courses:
+  agenda:
+    name: Browser Agenda
+    prefix: SCHOOL
+    task_list: School
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    source:
+      type: browser
+      url: https://docs.google.com/spreadsheets/d/sheets_fixture/edit?gid=0
+      source_format: google_sheets
+      freshness_seconds: 900
+      extraction:
+        mode: text

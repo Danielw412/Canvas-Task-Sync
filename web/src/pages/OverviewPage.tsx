@@ -47,6 +47,7 @@ export default function OverviewPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [includePast, setIncludePast] = useState(false)
   const [rebaseWeek, setRebaseWeek] = useState('')
+  const [startingAll, setStartingAll] = useState(false)
   const selectedMode = mode || course?.settings.source.extraction.mode || 'hybrid'
 
   async function previewSync(advanced = false) {
@@ -56,7 +57,7 @@ export default function OverviewPage() {
       return
     }
     try {
-      const result = await mutateJson<{ run_id: number }>('/api/v1/runs', {
+      const result = await mutateJson<{ run_id: number; capture_request_id?: string | null }>('/api/v1/runs', {
         body: {
           course_id: course.id,
           extraction_mode: selectedMode,
@@ -64,11 +65,29 @@ export default function OverviewPage() {
           test_rebase_week: advanced && rebaseWeek ? rebaseWeek : undefined,
         },
       })
+      if (result.capture_request_id) wakeExtensionCaptureQueue()
       setAdvancedOpen(false)
       await mutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))
       navigate(`/runs/${result.run_id}`)
     } catch (requestError) {
       toast(requestError instanceof Error ? requestError.message : 'Preview could not be started.', 'error')
+    }
+  }
+
+  async function previewAllCourses() {
+    setStartingAll(true)
+    try {
+      const result = await mutateJson<{ run_ids: number[]; capture_request_ids: string[] }>('/api/v1/runs/all', {
+        body: { include_past: false },
+      })
+      if (result.capture_request_ids.length) wakeExtensionCaptureQueue()
+      await mutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))
+      toast(`Started ${result.run_ids.length} course previews in parallel.`, 'success')
+      navigate('/runs')
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'Course previews could not be started.', 'error')
+    } finally {
+      setStartingAll(false)
     }
   }
 
@@ -88,6 +107,7 @@ export default function OverviewPage() {
         <div><h1>{connected ? 'Everything is ready to sync' : 'Finish setup to start syncing'}</h1><p>Review the source, preview changes, and apply only what you approve.</p></div>
         <div className="overview-actions">
           <Button icon={Play} onClick={() => void previewSync()} disabled={!course?.settings.enabled || isLoading}>Preview sync</Button>
+          <Button variant="secondary" icon={Play} onClick={() => void previewAllCourses()} disabled={isLoading || startingAll}>{startingAll ? 'Starting allâ€¦' : 'Preview all courses'}</Button>
           <label className="select-control"><span className="sr-only">Extraction mode</span><select value={selectedMode} onChange={(event) => setMode(event.target.value as ExtractionMode)}><option value="hybrid">Hybrid extraction</option><option value="auto">Auto extraction</option><option value="image">Image extraction</option><option value="text">Text extraction</option></select></label>
           <Button variant="ghost" className="advanced-preview-button" onClick={() => setAdvancedOpen(true)}>Advanced preview</Button>
         </div>
@@ -134,4 +154,11 @@ export default function OverviewPage() {
     </aside>
     {advancedOpen ? <Modal title="Advanced preview" onClose={() => setAdvancedOpen(false)} footer={<><Button variant="secondary" onClick={() => setAdvancedOpen(false)}>Cancel</Button><Button icon={Play} disabled={!course?.settings.enabled || isLoading} onClick={() => void previewSync(true)}>Start diagnostic preview</Button></>}><div className="advanced-preview-form"><label className="form-field"><span>Extraction mode override</span><select aria-label="Extraction mode override" value={selectedMode} onChange={(event) => setMode(event.target.value as ExtractionMode)}><option value="hybrid">Hybrid</option><option value="auto">Auto</option><option value="image">Image</option><option value="text">Text</option></select></label><label className="check-control"><input aria-label="Include past-due changes" type="checkbox" checked={includePast} onChange={(event) => setIncludePast(event.target.checked)} /><span><strong>Include past-due changes</strong><small>Only affects this manual preview. Review remains required before any write.</small></span></label><label className="form-field"><span>Rebase fixture week (optional)</span><input aria-label="Rebase fixture week (optional)" type="date" value={rebaseWeek} onChange={(event) => setRebaseWeek(event.target.value)} /><small>Choose a Monday. Rebasing is diagnostic-only and permanently disables Apply for the resulting preview.</small></label></div></Modal> : null}
   </div>
+}
+
+function wakeExtensionCaptureQueue() {
+  window.postMessage(
+    { source: 'canvas-task-sync-web', type: 'capture-requested' },
+    window.location.origin,
+  )
 }

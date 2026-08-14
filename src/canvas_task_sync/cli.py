@@ -10,6 +10,7 @@ from pathlib import Path
 from canvas_task_sync.app import authorize, default_config_path, run_doctor, run_sync
 from canvas_task_sync.configuration import load_settings
 from canvas_task_sync.models import ExtractionMode, SyncActionKind, SyncPlan
+from canvas_task_sync.web_constants import DEFAULT_WEB_PORT
 
 DISPLAY_ORDER = [
     SyncActionKind.CREATE,
@@ -75,8 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument(
         "--port",
         type=int,
-        default=8787,
-        help="Loopback port for the web control center (default: 8787).",
+        default=DEFAULT_WEB_PORT,
+        help=f"Loopback port for the web control center (default: {DEFAULT_WEB_PORT}).",
     )
     web.add_argument(
         "--no-open",

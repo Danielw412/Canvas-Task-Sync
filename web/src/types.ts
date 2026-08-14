@@ -27,6 +27,7 @@ export type RunStage =
   | 'complete'
 
 export type ExtractionMode = 'image' | 'text' | 'hybrid' | 'auto'
+export type BrowserSourceFormat = 'auto' | 'google_slides' | 'google_docs' | 'google_sheets'
 export type SyncActionKind =
   | 'create'
   | 'update'
@@ -37,6 +38,33 @@ export type SyncActionKind =
   | 'remote_missing'
   | 'historical_blocked'
 
+export interface ExtractionSettings {
+  mode: ExtractionMode
+  thumbnail_size: 'small' | 'medium' | 'large'
+  assignments_default_due: 'explicit_date' | 'same_day' | 'next_class' | 'none'
+  same_day_action_kinds: string[]
+}
+
+export interface GoogleSlidesSourceSettings {
+  type: 'google_slides'
+  url: string
+  page_id: string
+  extraction: ExtractionSettings
+}
+
+export interface BrowserSourceSettings {
+  type: 'browser'
+  url: string
+  source_format: BrowserSourceFormat
+  freshness_seconds: number
+  selection: {
+    slide_ids: string[]
+    section_ids: string[]
+    sheets: { sheet_id?: string | null; sheet_name?: string | null; range_a1?: string | null }[]
+  }
+  extraction: ExtractionSettings
+}
+
 export interface CourseSettings {
   enabled: boolean
   name: string
@@ -44,17 +72,7 @@ export interface CourseSettings {
   task_list: string
   timezone: string
   meeting_days: string[]
-  source: {
-    type: string
-    url: string
-    page_id: string
-    extraction: {
-      mode: ExtractionMode
-      thumbnail_size: 'small' | 'medium' | 'large'
-      assignments_default_due: 'explicit_date' | 'same_day' | 'next_class' | 'none'
-      same_day_action_kinds: string[]
-    }
-  }
+  source: GoogleSlidesSourceSettings | BrowserSourceSettings
 }
 
 export interface CourseView {

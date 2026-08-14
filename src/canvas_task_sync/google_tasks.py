@@ -98,6 +98,7 @@ class GoogleTasksClient:
                             notes=str(item.get("notes", "")),
                             due=item.get("due"),
                             status=str(item.get("status", "needsAction")),
+                            completed=item.get("completed"),
                             deleted=bool(item.get("deleted", False)),
                             hidden=bool(item.get("hidden", False)),
                         )
@@ -134,6 +135,7 @@ class GoogleTasksClient:
             notes=str(item.get("notes", notes)),
             due=item.get("due"),
             status=str(item.get("status", "needsAction")),
+            completed=item.get("completed"),
         )
 
     def update_task(
@@ -165,5 +167,5 @@ class GoogleTasksClient:
             notes=str(item.get("notes", notes)),
             due=item.get("due"),
             status=str(item.get("status", "needsAction")),
+            completed=item.get("completed"),
         )
-

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Source connector settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header><h1>Source connector settings</h1><p>Connect this extension to the loopback-only Canvas Task Sync control center.</p></header>
+      <section>
+        <h2>Local app connection</h2>
+        <label><span>Local app address</span><input id="server-url" type="url" spellcheck="false" /></label>
+        <label><span>Pairing token</span><input id="pairing-token" type="password" autocomplete="off" spellcheck="false" /><small>Copy this from Settings → Chrome source connector in the local app.</small></label>
+        <div class="actions"><button id="test" class="secondary">Test connection</button><span id="connection-result"></span></div>
+      </section>
+      <section>
+        <h2>Content acquisition defaults</h2>
+        <label><span>Global default</span><select id="global-mode"></select></label>
+        <div class="override-grid">
+          <label><span>Google Slides</span><select data-override="google_slides"></select></label>
+          <label><span>Google Docs</span><select data-override="google_docs"></select></label>
+          <label><span>Google Sheets</span><select data-override="google_sheets"></select></label>
+        </div>
+        <small>Preferred modes automatically try the other method when the first method fails. “Both” requires both methods to succeed.</small>
+      </section>
+      <section>
+        <h2>Automatic screenshot access</h2>
+        <p class="permission-copy">Chrome requires an optional all-sites capture grant for screenshots started by the website. The connector still opens only configured Google Docs URLs, never reads cookies, and does not need this grant for automatic text extraction.</p>
+        <div class="actions"><button id="screenshot-access" class="secondary">Enable automatic screenshots</button><span id="screenshot-access-result"></span></div>
+      </section>
+      <section class="troubleshooting">
+        <h2>Troubleshooting</h2>
+        <ul>
+          <li>Keep <code>canvas-task-sync web</code> running while sending a capture.</li>
+          <li>Open the file in Chrome and confirm the page is fully loaded before capturing.</li>
+          <li>If pairing fails after token rotation, paste the new token here.</li>
+          <li>For Sheets, select a bounded range when a workbook is very large.</li>
+          <li>The extension never reads Chrome cookies or exports login credentials.</li>
+        </ul>
+      </section>
+      <div class="save-row"><button id="save">Save settings</button><span id="save-result"></span></div>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

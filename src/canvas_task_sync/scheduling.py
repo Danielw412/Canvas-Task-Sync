@@ -83,10 +83,33 @@ NON_ACTION_PATTERNS = (
     "como se calificara",
     "grading narration",
 )
+CLASSWORK_ONLY_PATTERNS = (
+    "practice identifying hypotheses",
+    "work through released ap frq",
+    "work through released ap free response",
+)
+WEEKDAY_PATTERN = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
 
 
 class AgendaDateError(ValueError):
     pass
+
+
+def _is_classwork_only(evidence_normalized: str) -> bool:
+    return bool(
+        any(pattern in evidence_normalized for pattern in CLASSWORK_ONLY_PATTERNS)
+        or (
+            "practice identifying" in evidence_normalized
+            and "hypotheses" in evidence_normalized
+        )
+        or (
+            "work through released ap" in evidence_normalized
+            and ("frq" in evidence_normalized or "free response" in evidence_normalized)
+        )
+    )
 
 
 def parse_agenda_range(text: str) -> tuple[date, date] | None:
@@ -207,6 +230,19 @@ def _explicit_date(task: ExtractedTask, source_date: date | None) -> date | None
     return None
 
 
+def _explicit_weekday_date(
+    source_text: str,
+    row_range: tuple[date, date] | None,
+) -> date | None:
+    if row_range is None:
+        return None
+    matches = list(WEEKDAY_PATTERN.finditer(source_text))
+    if not matches:
+        return None
+    weekday = DAY_ALIASES[matches[-1].group(1).casefold()]
+    return _on_or_after(row_range[0], weekday)
+
+
 def _task_position(task: ExtractedTask, block: AgendaBlock) -> tuple[int, str, str]:
     haystack = normalized_text(block.text)
     needle = normalized_text(task.source_text)
@@ -314,17 +350,28 @@ def build_draft_tasks(
 
             is_assignment = block.role == BlockRole.ASSIGNMENTS
             is_same_day_action = task.action_kind in course.source.extraction.same_day_action_kinds
+            explicit_weekday = _explicit_weekday_date(task.source_text, row_range)
             relation = task.due_relation
-            if is_same_day_action:
-                relation = DueRelation.SAME_DAY
-            elif is_assignment and relation in {DueRelation.NONE, DueRelation.SAME_DAY}:
-                relation = course.source.extraction.assignments_default_due
+            if explicit_weekday is None:
+                if is_same_day_action:
+                    relation = DueRelation.SAME_DAY
+                elif is_assignment and relation in {DueRelation.NONE, DueRelation.SAME_DAY}:
+                    relation = course.source.extraction.assignments_default_due
 
             effective_classification = (
                 TaskClassification.HOMEWORK if is_assignment else task.classification
             )
+            if block.role == BlockRole.LEARNING or _is_classwork_only(evidence_normalized):
+                effective_classification = TaskClassification.CLASSWORK
+            if (
+                effective_classification == TaskClassification.HOMEWORK
+                and relation == DueRelation.NONE
+            ):
+                relation = DueRelation.NEXT_CLASS
             deadline_bearing_classwork = (
-                relation == DueRelation.EXPLICIT_DATE or is_same_day_action
+                relation == DueRelation.EXPLICIT_DATE
+                or is_same_day_action
+                or explicit_weekday is not None
             )
             if (
                 effective_classification == TaskClassification.CLASSWORK
@@ -343,7 +390,10 @@ def build_draft_tasks(
             source_date = row_range[1] if row_range else None
             due_date: date | None = None
             due_basis = "No supported due date"
-            if relation == DueRelation.EXPLICIT_DATE:
+            if explicit_weekday is not None:
+                due_date = explicit_weekday
+                due_basis = "Weekday explicitly stated in source evidence"
+            elif relation == DueRelation.EXPLICIT_DATE:
                 due_date = _explicit_date(task, source_date)
                 if due_date is None:
                     uncertain.append(
@@ -384,7 +434,7 @@ def build_draft_tasks(
                     )
                     continue
                 due_date = next_class_day(source_date, course.meeting_weekdays)
-                due_basis = "Assignments-column work due next configured class"
+                due_basis = "Work with no stated date due next configured school day"
             elif effective_classification == TaskClassification.HOMEWORK:
                 uncertain.append(
                     UncertainItem(

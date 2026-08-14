@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,6 +20,26 @@ WEEKDAY_NAMES = {
     "sat": 5,
     "sun": 6,
 }
+
+GOOGLE_WORKSPACE_PATHS = {
+    "google_slides": re.compile(r"/presentation/(?:u/\d+/)?d/"),
+    "google_docs": re.compile(r"/document/(?:u/\d+/)?d/"),
+    "google_sheets": re.compile(r"/spreadsheets/(?:u/\d+/)?d/"),
+}
+
+
+def _google_workspace_source_type(value: str) -> str | None:
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or parsed.hostname != "docs.google.com":
+        return None
+    return next(
+        (
+            source_type
+            for source_type, pattern in GOOGLE_WORKSPACE_PATHS.items()
+            if pattern.search(parsed.path)
+        ),
+        None,
+    )
 
 
 class ExtractionSettings(BaseModel):
@@ -38,26 +60,15 @@ class ExtractionSettings(BaseModel):
 
 
 class GoogleSlidesSourceSettings(BaseModel):
-    type: str = "google_slides"
+    type: Literal["google_slides"] = "google_slides"
     url: str
     page_id: str
     extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
 
-    @model_validator(mode="after")
-    def validate_source_type(self) -> GoogleSlidesSourceSettings:
-        if self.type != "google_slides":
-            raise ValueError(f"Unsupported source type: {self.type}")
-        return self
-
     @field_validator("url")
     @classmethod
     def validate_google_slides_url(cls, value: str) -> str:
-        parsed = urlparse(value)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != "docs.google.com"
-            or "/presentation/d/" not in parsed.path
-        ):
+        if _google_workspace_source_type(value) != "google_slides":
             raise ValueError("url must be a Google Slides presentation URL")
         return value
 
@@ -69,6 +80,72 @@ class GoogleSlidesSourceSettings(BaseModel):
         return value.strip()
 
 
+class BrowserSheetSelection(BaseModel):
+    sheet_id: str | None = None
+    sheet_name: str | None = None
+    range_a1: str | None = None
+
+    @model_validator(mode="after")
+    def validate_identifier(self) -> BrowserSheetSelection:
+        if not (self.sheet_id or self.sheet_name):
+            raise ValueError("A sheet selection needs a sheet_id or sheet_name")
+        if self.range_a1 is not None:
+            self.range_a1 = self.range_a1.strip() or None
+        return self
+
+
+class BrowserSelectionSettings(BaseModel):
+    slide_ids: list[str] = Field(default_factory=list)
+    section_ids: list[str] = Field(default_factory=list)
+    sheets: list[BrowserSheetSelection] = Field(default_factory=list)
+
+    @field_validator("slide_ids", "section_ids")
+    @classmethod
+    def normalize_identifiers(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+BrowserSourceFormat = Literal[
+    "auto",
+    "google_slides",
+    "google_docs",
+    "google_sheets",
+]
+
+
+class BrowserSourceSettings(BaseModel):
+    type: Literal["browser"] = "browser"
+    url: str
+    source_format: BrowserSourceFormat = "auto"
+    freshness_seconds: int = Field(default=900, ge=30, le=3600)
+    selection: BrowserSelectionSettings = Field(default_factory=BrowserSelectionSettings)
+    extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
+
+    @field_validator("url")
+    @classmethod
+    def validate_google_workspace_url(cls, value: str) -> str:
+        if _google_workspace_source_type(value) is None:
+            raise ValueError("url must be a Google Slides, Docs, or Sheets URL")
+        return value
+
+    @model_validator(mode="after")
+    def validate_format_matches_url(self) -> BrowserSourceSettings:
+        detected = _google_workspace_source_type(self.url)
+        if detected is None:  # The field validator reports the user-facing URL error first.
+            return self
+        if self.source_format != "auto" and self.source_format != detected:
+            raise ValueError(
+                f"source_format {self.source_format!r} does not match the configured URL"
+            )
+        return self
+
+
+SourceSettings = Annotated[
+    GoogleSlidesSourceSettings | BrowserSourceSettings,
+    Field(discriminator="type"),
+]
+
+
 class CourseSettings(BaseModel):
     enabled: bool = True
     name: str
@@ -76,7 +153,7 @@ class CourseSettings(BaseModel):
     task_list: str
     timezone: str = "America/New_York"
     meeting_days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
-    source: GoogleSlidesSourceSettings
+    source: SourceSettings
 
     @field_validator("meeting_days")
     @classmethod
@@ -113,9 +190,32 @@ class CourseSettings(BaseModel):
 class ProjectSettings(BaseModel):
     version: int = 1
     state_path: Path = Path(".canvas-task-sync/state.sqlite3")
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-3.7-flash"
+    gemini_fallback_models: list[str] = Field(
+        default_factory=lambda: ["gemini-3.6-flash", "gemini-3.5-flash"]
+    )
     courses: dict[str, CourseSettings]
     root_dir: Path = Path(".")
+
+    @field_validator("gemini_model")
+    @classmethod
+    def validate_gemini_model(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("gemini_model cannot be empty")
+        return value.strip()
+
+    @field_validator("gemini_fallback_models")
+    @classmethod
+    def validate_gemini_fallback_models(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+    @property
+    def gemini_model_chain(self) -> list[str]:
+        return list(dict.fromkeys([self.gemini_model, *self.gemini_fallback_models]))
+
+    @property
+    def gemini_cache_key(self) -> str:
+        return " -> ".join(self.gemini_model_chain)
 
     def course(self, course_id: str) -> CourseSettings:
         try:

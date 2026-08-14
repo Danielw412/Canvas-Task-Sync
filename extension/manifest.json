@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Canvas Task Sync Source Connector",
+  "version": "0.3.0",
+  "description": "Captures selected Google Slides, Docs, and Sheets content for the local Canvas Task Sync app.",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://docs.google.com/*"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
+      "js": ["local-bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Capture agenda source"
+  },
+  "options_page": "options.html"
+}

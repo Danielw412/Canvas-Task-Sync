@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+DEFAULT_WEB_HOST = "127.0.0.1"
+DEFAULT_WEB_PORT = 8790
+DEFAULT_WEB_URL = f"http://{DEFAULT_WEB_HOST}:{DEFAULT_WEB_PORT}"

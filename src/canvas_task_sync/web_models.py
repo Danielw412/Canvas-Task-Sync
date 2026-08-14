@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.models import ExtractionMode, SyncPlan
+from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 
 
 class RunStatus(StrEnum):
@@ -81,6 +82,15 @@ class RunCreate(BaseModel):
         if value is not None and value.weekday() != 0:
             raise ValueError("The rebased week date must be a Monday.")
         return value
+
+
+class RunAllCreate(BaseModel):
+    include_past: bool = False
+
+
+class CaptureFailure(BaseModel):
+    code: str = Field(default="automatic_capture_failed", min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=1000)
 
 
 class RunApply(BaseModel):
@@ -210,7 +220,7 @@ class ConnectionStatus(BaseModel):
     google_client_configured: bool
     google_authorized: bool
     gemini_configured: bool
-    local_server: str = "127.0.0.1:8787"
+    local_server: str = f"{DEFAULT_WEB_HOST}:{DEFAULT_WEB_PORT}"
     checks: list[ConnectionItem] = Field(default_factory=list)
 
 

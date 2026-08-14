@@ -2,7 +2,6 @@ import {
   Activity,
   BookOpen,
   CalendarDays,
-  ChevronDown,
   CircleCheck,
   Clock3,
   Grid2X2,
@@ -15,6 +14,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { mutate } from 'swr'
 import { mutateJson, useOverview } from '../lib/api'
 import { useApp } from './AppContext'
+import { CourseSwitcher } from './CourseSwitcher'
 import { Button } from './ui'
 
 const navigation = [
@@ -63,13 +63,7 @@ export function AppShell() {
           <NavLink to="/" aria-label="Canvas Task Sync overview"><RefreshCw size={29} strokeWidth={2.2} /><span>Canvas Task Sync</span></NavLink>
           <NavLink to="/settings" aria-label="Open settings"><MoreHorizontal size={25} /></NavLink>
         </div>
-        <div className="course-select-wrap">
-          <BookOpen size={20} />
-          <select aria-label="Selected course" value={selectedCourseId ?? ''} onChange={(event) => setSelectedCourseId(event.target.value)}>
-            {data?.courses.map((course) => <option key={course.id} value={course.id}>{course.settings.name}</option>)}
-          </select>
-          <ChevronDown size={17} />
-        </div>
+        <CourseSwitcher courses={data?.courses ?? []} selectedCourseId={selectedCourseId} onSelect={setSelectedCourseId} />
         <div className="topbar__actions">
           <Button variant="secondary" icon={HeartPulse} onClick={runHealth}>Run health check</Button>
           <div className={`connection-summary ${healthy ? 'tone-success' : 'tone-warning'}`}>

@@ -224,6 +224,10 @@ def test_api_enforces_host_origin_csrf_and_never_echoes_secret_input(tmp_path):
     app = create_web_app(_write_project(tmp_path))
     with TestClient(app) as client:
         assert client.get("/api/v1/overview").status_code == 200
+        missing_api = client.get("/api/v1/not-a-real-route")
+        assert missing_api.status_code == 404
+        assert missing_api.headers["content-type"].startswith("application/json")
+        assert missing_api.json()["error"]["code"] == "api_route_not_found"
         rejected = client.post("/api/v1/health-runs")
         assert rejected.status_code == 403
         assert rejected.json()["error"]["code"] == "csrf_failed"

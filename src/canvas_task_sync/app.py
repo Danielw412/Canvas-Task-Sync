@@ -60,7 +60,7 @@ def run_doctor(settings: ProjectSettings, course_id: str | None = None) -> list[
         tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
         task_count = len(tasks_client.list_tasks(tasklist_id))
         checks.append(
-            f"{selected_id}: target page {capture.page_id} is readable "
+            f"{selected_id}: {capture.source_type} source {capture.page_id} is readable "
             f"({len(capture.blocks)} blocks)."
         )
         checks.append(

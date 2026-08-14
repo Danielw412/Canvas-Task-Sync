@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Capture source</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div><strong>Source connector</strong><span id="connection" class="badge">Checking app…</span></div>
+        <button id="settings" class="icon" title="Extension settings" aria-label="Extension settings">⚙</button>
+      </header>
+      <section id="loading" class="message">Inspecting the active Google file…</section>
+      <section id="error" class="message error" hidden></section>
+      <form id="capture-form" hidden>
+        <div class="source-summary"><strong id="source-title"></strong><small id="source-kind"></small></div>
+        <label>
+          <span>Acquisition mode</span>
+          <select id="mode">
+            <option value="">Use configured default</option>
+            <option value="screenshot">Screenshot only</option>
+            <option value="text">Text only</option>
+            <option value="both">Screenshot + text</option>
+            <option value="prefer_screenshot">Prefer screenshot, fall back to text</option>
+            <option value="prefer_text">Prefer text, fall back to screenshot</option>
+          </select>
+        </label>
+        <fieldset>
+          <legend><span id="selection-title">Relevant portions</span><span><button type="button" id="select-all">All</button><button type="button" id="select-current">Current</button></span></legend>
+          <div id="targets" class="targets"></div>
+        </fieldset>
+        <button id="capture" class="primary" type="submit">Capture and send to local app</button>
+        <p id="progress" class="progress" hidden></p>
+      </form>
+      <footer>Only the active file and selected portions are read. Captures are not saved by the extension.</footer>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

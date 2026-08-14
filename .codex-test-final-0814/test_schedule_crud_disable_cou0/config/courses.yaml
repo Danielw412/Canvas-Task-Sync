@@ -1,0 +1,22 @@
+# keep this header comment
+version: 1
+state_path: .canvas-task-sync/state.sqlite3
+gemini_model: test-model
+courses:
+  spanish:
+    # keep this course comment
+    enabled: false
+    name: Test Spanish
+    prefix: SPANISH
+    task_list: School
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    source:
+      type: google_slides
+      url: https://docs.google.com/presentation/d/fixture/edit
+      page_id: slide-1
+      extraction:
+        mode: text
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]

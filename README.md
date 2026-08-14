@@ -1,7 +1,9 @@
 # Canvas Task Sync
 
 Canvas Task Sync turns visually structured course agendas into deterministic Google Tasks. The
-first configured source is the Honors Spanish IV Google Slide, but source capture, Gemini
+first configured source is the Honors Spanish IV Google Slide. An optional Chrome extension can
+also capture selected Google Slides, Docs, and Sheets through the user's existing browser session.
+Source capture, Gemini
 interpretation, deadline policy, identity, and Google reconciliation are separate modules so Canvas
 and other agenda formats can be added without rewriting the sync logic.
 
@@ -121,11 +123,26 @@ canvas-task-sync sync --course spanish --extraction-mode hybrid
 Start the single-user control center on the loopback interface:
 
 ```powershell
-# Opens http://127.0.0.1:8787 in the default browser.
+# Opens http://127.0.0.1:8790 in the default browser.
 canvas-task-sync web
 
 # Choose another loopback port or leave browser opening to yourself.
-canvas-task-sync web --port 8790 --no-open
+canvas-task-sync web --port 8791 --no-open
+```
+
+To start the control center automatically when you sign in to Windows and add a desktop website
+shortcut, run this once from the project directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1
+```
+
+The installer registers a hidden per-user scheduled task, starts it immediately, and verifies that
+`http://127.0.0.1:8790/` is ready. It does not expose the site to the local network. To remove the
+scheduled task and desktop shortcut later:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\remove-windows-startup.ps1
 ```
 
 The web app provides an overview, live run progress, immutable preview plans, guarded apply,
@@ -147,16 +164,99 @@ text, table structure, geometry, and styles. A successful apply stores its struc
 SQLite. A later unchanged run reuses that extraction and avoids the expensive thumbnail request.
 Dry runs never create or modify the SQLite file.
 
+## Chrome source connector
+
+The Manifest V3 extension in `extension/` is an acquisition client, not a second sync system. It
+captures source content, sends a normalized capture to the loopback-only control center, and then the
+existing `GeminiExtractor`, date policy, identity, planner, dry-run, and Google Tasks code run exactly
+as they do for the direct Slides API source. It does not contain Canvas integration.
+
+Build and load it:
+
+```powershell
+Set-Location .\extension
+npm test
+npm run build
+```
+
+1. Start `canvas-task-sync web` and open **Settings → Connections → Chrome source connector**.
+2. In Chrome, open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select
+   the displayed `extension\dist` directory.
+3. Open the extension's settings, paste the local server address and pairing token, then choose
+   **Test connection**.
+4. Configure a course with `source.type: browser`. Starting its preview now queues the extension,
+   which opens the Google file, captures it with the configured mode, closes only the temporary tab,
+   and lets the existing preview continue. The popup remains available for one-off manual captures
+   and fine-grained selection.
+5. Use **Preview all courses** to start all enabled courses together. Non-browser capture and Gemini
+   processing run in parallel; extension acquisition is deliberately FIFO to keep tab activation and
+   screenshot capture reliable. Applying remains a separate guarded action and automated tests never
+   create real Google Tasks.
+
+Example browser-backed course source:
+
+```yaml
+source:
+  type: browser
+  url: https://docs.google.com/spreadsheets/d/18ngIjJOcG6UC5sig7NEv_l209WZpdrRLd8JtBIo1Img/edit?gid=0
+  source_format: google_sheets # or auto, google_slides, google_docs
+  freshness_seconds: 900
+  selection:                  # optional; empty means use the extension's selection
+    slide_ids: []
+    section_ids: []
+    sheets:
+      - sheet_id: "0"
+        sheet_name: Agenda
+        range_a1: A1:F60
+  extraction:
+    mode: auto
+    assignments_default_due: next_class
+    same_day_action_kinds: [bring, present, submit]
+```
+
+Extension acquisition modes are independent from Gemini extraction modes:
+
+- **Screenshot only** and **text only** acquire only that content type.
+- **Screenshot + text** requires both methods to succeed.
+- **Prefer screenshot** and **prefer text** try the selected method first and clearly report when the
+  other method was used as a fallback.
+- One global default can be overridden for Slides, Docs, or Sheets in the extension settings. The
+  popup can also override the mode for one capture.
+
+The extension requests only `activeTab`, `alarms`, `scripting`, `storage`, loopback HTTP access, and
+`https://docs.google.com/*`. Persistent Docs host access is needed for background-requested capture
+and authenticated Docs exports; it authorizes only content the current Chrome session can already
+display. The extension never requests cookie access, reads credential stores, or sends school login
+credentials. Pairing configuration is stored in extension local storage;
+screenshots and school content are not. The app validates type, URL, IDs, sizes, MIME signatures, and
+credential-like metadata, keeps at most eight captures in memory for 15 minutes, and clears them on
+server shutdown. Pairing tokens can be rotated and captures cleared immediately from Settings.
+Chrome additionally requires `<all_urls>` for a background tab screenshot. This is declared as an
+optional host permission and requested only when the user clicks **Enable automatic screenshots**;
+automatic text capture and all other connector features work without it.
+
+See [extension/README.md](extension/README.md) for format behavior, selection details, error messages,
+and troubleshooting.
+
 ## Deadline and identity policy
 
 The target-page date heading and row labels are parsed deterministically:
 
 - Assignments-column work defaults to the next configured class day.
+- Homework with no stated date also defaults to the next configured school day.
 - `bring`, `present`, and `submit` use the end date of their agenda row.
+- A weekday explicitly stated in the source (for example, "Bring the FRQ Thursday") overrides the
+  ordinary same-row action rule.
 - A compound `W-Th` row ends Thursday, so next class is Friday.
 - A repeated Monday after Friday resolves to the following week.
 - Explicit dates are accepted only when the exact source evidence supports them.
 - Ordinary class activities, holidays, learning targets, and teacher narration are ignored.
+
+Gemini receives unfinished tasks for the same course plus completed tasks from the preceding 10.5
+days as duplicate context. It is instructed to reuse one concise assignment title while the existing
+deterministic identity and deduplication layers remain authoritative. The configured model chain is
+`gemini-3.7-flash`, `gemini-3.6-flash`, then `gemini-3.5-flash`; quota, rate-limit, unavailable-model,
+and unsupported-model errors advance to the next model, with high reasoning on every attempt.
 
 Initial logical IDs use course, presentation/page, page element, table row/column, and deterministic
 in-cell order—not model wording. Stored IDs survive wording and deadline edits. Reordered actions use
@@ -172,8 +272,9 @@ adapters may implement `add_image()` so the application can hash/check its cache
 expensive image. Register the source at `canvas_task_sync.sources.create_source_adapter` and add its
 validated configuration model.
 
-Canvas pages/assignments, Google Docs, Google Sheets, PDFs, local images, and general URLs should do
-format-specific acquisition only. They then reuse `GeminiExtractor`, `build_draft_tasks`,
+Canvas pages/assignments, PDFs, local images, and general URLs should do format-specific acquisition
+only. Browser formats register an extension adapter and reuse the generic local browser source
+adapter. They then reuse `GeminiExtractor`, `build_draft_tasks`,
 `SyncPlanner`, managed markers, and Google Tasks unchanged.
 
 ## Tests
@@ -181,10 +282,12 @@ format-specific acquisition only. They then reuse `GeminiExtractor`, `build_draf
 ```powershell
 python -m pytest
 python -m ruff check src tests
+Set-Location extension; npm test; npm run build
 ```
 
 The test fixtures contain sanitized target-page JSON, a text-safe base64 PNG transport fixture, and
 structured Spanish Gemini output. Tests cover all extraction modes, exact Unicode evidence, auto
 fallback, the six expected rebased tasks, date safety, duplicate VHL identities, row/wording/deadline
-changes, marker recovery, user-note preservation, pagination, collisions, disappearance, and dry-run
-safety.
+changes, automatic extension queuing, Docs/Slides/Sheets metadata, model failover, recent-assignment
+context, marker recovery, user-note preservation, pagination, collisions, disappearance, parallel
+run-all dispatch, and dry-run safety.

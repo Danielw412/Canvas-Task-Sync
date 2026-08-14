@@ -185,3 +185,96 @@ def test_duplicate_gemini_candidates_are_collapsed_by_application_code(
     assert not uncertain
     assert len(ignored) == 1
     assert "Duplicate extraction" in ignored[0].reason
+
+
+def test_statistics_agenda_classwork_default_due_and_explicit_thursday(
+    spanish_capture, spanish_course
+):
+    replacements = {
+        "table:agenda_table:r2:c1": (
+            "Practice identifying null and alternative hypotheses",
+            "T",
+        ),
+        "table:agenda_table:r2:c2": (
+            "Complete Unit 6 AP Classroom practice problems",
+            "T",
+        ),
+        "table:agenda_table:r3:c0": ("W", "W"),
+        "table:agenda_table:r3:c1": ("Work through released AP FRQs", "W"),
+        "table:agenda_table:r3:c2": (
+            "Complete 2022 AP FRQ #4\nBring completed FRQ to class Thursday",
+            "W",
+        ),
+    }
+    blocks = [
+        block.model_copy(
+            update={
+                "text": replacements[block.anchor][0],
+                "row_label": replacements[block.anchor][1],
+            }
+        )
+        if block.anchor in replacements
+        else block
+        for block in spanish_capture.blocks
+    ]
+    capture = spanish_capture.model_copy(update={"blocks": blocks})
+    tasks = [
+        ExtractedTask(
+            source_anchor="table:agenda_table:r2:c1",
+            source_text="Practice identifying null and alternative hypotheses",
+            row_label="T",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.COMPLETE,
+            title_stem="Practice identifying hypotheses",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor="table:agenda_table:r2:c2",
+            source_text="Complete Unit 6 AP Classroom practice problems",
+            row_label="T",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.COMPLETE,
+            title_stem="Complete Unit 6 practice",
+            due_relation=DueRelation.NONE,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor="table:agenda_table:r3:c1",
+            source_text="Work through released AP FRQs",
+            row_label="W",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.COMPLETE,
+            title_stem="Work through released AP FRQs",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor="table:agenda_table:r3:c2",
+            source_text="Bring completed FRQ to class Thursday",
+            row_label="W",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.BRING,
+            title_stem="Bring completed FRQ",
+            due_relation=DueRelation.SAME_DAY,
+            confidence=Confidence.HIGH,
+        ),
+    ]
+
+    drafts, uncertain, ignored = build_draft_tasks(
+        course_id="statistics",
+        course=spanish_course,
+        capture=capture,
+        tasks=tasks,
+        today=date(2026, 5, 1),
+    )
+
+    assert not uncertain
+    assert [(item.title, item.due_date) for item in drafts] == [
+        ("[SPANISH] Complete Unit 6 practice", date(2026, 5, 27)),
+        ("[SPANISH] Bring completed FRQ", date(2026, 5, 28)),
+    ]
+    assert {item.title for item in ignored} == {
+        "Practice identifying hypotheses",
+        "Work through released AP FRQs",
+    }

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -73,6 +73,28 @@ class AgendaBlock(BaseModel):
     row_label: str | None = None
     text: str
     geometry: dict[str, Any] = Field(default_factory=dict)
+    order: int = 0
+    slide_id: str | None = None
+    section_id: str | None = None
+    sheet_id: str | None = None
+    sheet_name: str | None = None
+    range_a1: str | None = None
+    structured_data: Any | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceImage(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: str
+    order: int = 0
+    item_id: str | None = None
+    mime_type: str = "image/png"
+    data: bytes
+    sha256: str
+    width: int | None = None
+    height: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceCapture(BaseModel):
@@ -80,11 +102,17 @@ class SourceCapture(BaseModel):
 
     source_key: str
     source_url: str
-    presentation_id: str
-    page_id: str
+    source_type: str = "google_slides"
+    resource_id: str | None = None
+    presentation_id: str | None = None
+    page_id: str | None = None
     page_hash: str
     transcript: str
     blocks: list[AgendaBlock]
+    captured_at: datetime | None = None
+    selection: dict[str, Any] = Field(default_factory=dict)
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+    images: list[SourceImage] = Field(default_factory=list)
     image_bytes: bytes | None = None
     image_mime_type: str | None = None
     image_sha256: str | None = None
@@ -137,6 +165,8 @@ class ExtractionOutcome(BaseModel):
     tasks: list[ExtractedTask] = Field(default_factory=list)
     uncertain: list[UncertainItem] = Field(default_factory=list)
     fallback_reasons: list[str] = Field(default_factory=list)
+    model_name: str | None = None
+    model_fallback_reasons: list[str] = Field(default_factory=list)
 
 
 class DraftTask(BaseModel):
@@ -168,6 +198,7 @@ class RemoteTask(BaseModel):
     notes: str = ""
     due: str | None = None
     status: str = "needsAction"
+    completed: str | None = None
     deleted: bool = False
     hidden: bool = False
 
