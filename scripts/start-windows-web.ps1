@@ -3,17 +3,17 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-# This remains a foreground diagnostic launcher. The installed scheduled task invokes
-# pythonw.exe directly so no PowerShell process is needed for Windows startup.
+# This compatibility launcher is also detached. The installed scheduled task invokes
+# pythonw.exe directly, while manual/scripted invocations return after starting it.
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$pythonwPath = Join-Path $projectRoot ".venv\Scripts\pythonw.exe"
 $configPath = Join-Path $projectRoot "config\courses.yaml"
 $startupModulePath = Join-Path $projectRoot "src\canvas_task_sync\windows_startup.py"
 $logDirectory = Join-Path $projectRoot ".canvas-task-sync"
 $logPath = Join-Path $logDirectory "web-startup.log"
 
-if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-    throw "The project virtual environment was not found at $pythonPath"
+if (-not (Test-Path -LiteralPath $pythonwPath -PathType Leaf)) {
+    throw "The project virtual environment's windowless Python executable was not found at $pythonwPath"
 }
 
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
@@ -27,8 +27,13 @@ if (-not (Test-Path -LiteralPath $startupModulePath -PathType Leaf)) {
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 Set-Location -LiteralPath $projectRoot
 
-Write-Host "Starting the foreground diagnostic server. Logs: $logPath"
-& $pythonPath -m canvas_task_sync.windows_startup `
-    --config $configPath `
-    --log-path $logPath
-exit $LASTEXITCODE
+Write-Host "Starting the background server. Logs: $logPath"
+$actionArguments = '-m canvas_task_sync.windows_startup --config "{0}" --log-path "{1}"' -f $configPath, $logPath
+$process = Start-Process `
+    -FilePath $pythonwPath `
+    -ArgumentList $actionArguments `
+    -WorkingDirectory $projectRoot `
+    -WindowStyle Hidden `
+    -PassThru
+
+Write-Host "Background server started (PID $($process.Id))."

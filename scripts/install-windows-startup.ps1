@@ -27,8 +27,14 @@ if (-not (Test-Path -LiteralPath $startupModulePath -PathType Leaf)) {
 }
 
 # Fail early with a useful installer error if the venv does not contain the current package.
-& $pythonwPath -c "import canvas_task_sync.windows_startup"
-if ($LASTEXITCODE -ne 0) {
+$importCheck = Start-Process `
+    -FilePath $pythonwPath `
+    -ArgumentList '-c "import canvas_task_sync.windows_startup"' `
+    -WorkingDirectory $projectRoot `
+    -WindowStyle Hidden `
+    -Wait `
+    -PassThru
+if ($importCheck.ExitCode -ne 0) {
     throw "The project's virtual environment cannot import canvas_task_sync.windows_startup. Reinstall the project into $projectRoot."
 }
 
