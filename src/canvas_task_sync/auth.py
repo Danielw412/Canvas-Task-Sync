@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -11,6 +14,12 @@ TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
 SLIDES_READONLY_SCOPE = "https://www.googleapis.com/auth/presentations.readonly"
 SCOPES = [TASKS_SCOPE, SLIDES_READONLY_SCOPE]
 
+# A sync-all operation prepares courses concurrently.  All of those workers share the
+# same OAuth token file, so credential refresh and persistence must be one critical
+# section.  The unique temporary file in _write_token also prevents a second local
+# process (for example, a CLI invocation beside the web app) from colliding with it.
+_CREDENTIALS_LOCK = threading.RLock()
+
 
 class AuthenticationError(RuntimeError):
     pass
@@ -18,9 +27,21 @@ class AuthenticationError(RuntimeError):
 
 def _write_token(path: Path, credentials: Credentials) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(credentials.to_json(), encoding="utf-8")
-    temporary.replace(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(credentials.to_json())
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _token_scopes(path: Path) -> set[str]:
@@ -35,6 +56,15 @@ def load_google_credentials(
     root_dir: Path,
     *,
     interactive: bool = False,
+) -> Credentials:
+    with _CREDENTIALS_LOCK:
+        return _load_google_credentials_locked(root_dir, interactive=interactive)
+
+
+def _load_google_credentials_locked(
+    root_dir: Path,
+    *,
+    interactive: bool,
 ) -> Credentials:
     token_path = root_dir / "token.json"
     client_path = root_dir / "credentials.json"
@@ -82,4 +112,3 @@ def load_google_credentials(
     )
     _write_token(token_path, credentials)
     return credentials
-

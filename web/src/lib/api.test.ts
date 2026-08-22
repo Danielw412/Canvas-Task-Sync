@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, fetchJson } from './api'
+import { agendaWeekOptions, ApiError, fetchJson } from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -26,5 +26,20 @@ describe('fetchJson', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ connected: true })))
 
     await expect(fetchJson<{ connected: boolean }>('/api/v1/example')).resolves.toEqual({ connected: true })
+  })
+})
+
+describe('agendaWeekOptions', () => {
+  it('shows the exact Monday through Friday date range for every choice', () => {
+    const options = agendaWeekOptions(
+      'America/New_York',
+      new Date('2026-08-17T16:00:00Z'),
+    )
+
+    expect(options).toEqual([
+      { value: 'previous_week', label: 'Previous Week · Aug 10–14, 2026' },
+      { value: 'this_week', label: 'This Week · Aug 17–21, 2026' },
+      { value: 'next_week', label: 'Next Week · Aug 24–28, 2026' },
+    ])
   })
 })

@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from datetime import date
 
-from canvas_task_sync.google_tasks import GoogleTasksClient, date_from_google_due, google_due
+import pytest
+
+from canvas_task_sync.google_tasks import (
+    GoogleTasksClient,
+    GoogleTasksError,
+    date_from_google_due,
+    google_due,
+)
 
 
 class _Request:
@@ -28,10 +35,20 @@ class _TasksResource(_PagedListResource):
     def __init__(self, pages):
         super().__init__(pages)
         self.patch_calls = []
+        self.insert_calls = []
+        self.get_values = []
 
     def patch(self, **kwargs):
         self.patch_calls.append(kwargs)
         return _Request({"id": kwargs["task"], **kwargs["body"]})
+
+    def insert(self, **kwargs):
+        self.insert_calls.append(kwargs)
+        return _Request({"id": "created", **kwargs["body"]})
+
+    def get(self, **kwargs):
+        value = self.get_values.pop(0)
+        return _Request({"id": kwargs["task"], **value})
 
 
 class _Service:
@@ -95,3 +112,45 @@ def test_google_due_is_date_only_semantics():
     assert google_due(date(2026, 8, 12)) == "2026-08-12T00:00:00.000Z"
     assert date_from_google_due("2026-08-12T00:00:00.000Z") == date(2026, 8, 12)
 
+
+def test_create_omits_empty_notes_and_includes_due_date():
+    service = _Service(tasklists={None: {"items": []}}, tasks={None: {"items": []}})
+    GoogleTasksClient(service=service).create_task(
+        "school",
+        title="[SPANISH] Task",
+        notes="",
+        due_date=date(2026, 8, 12),
+    )
+    assert service.tasks_resource.insert_calls[0]["body"] == {
+        "title": "[SPANISH] Task",
+        "due": "2026-08-12T00:00:00.000Z",
+    }
+
+
+def test_due_verification_repairs_once_and_refetches():
+    service = _Service(tasklists={None: {"items": []}}, tasks={None: {"items": []}})
+    service.tasks_resource.get_values = [
+        {"due": None},
+        {"due": "2026-08-12T00:00:00.000Z"},
+    ]
+    verified = GoogleTasksClient(service=service).verify_due(
+        "school", "task-id", date(2026, 8, 12)
+    )
+    assert verified.due == "2026-08-12T00:00:00.000Z"
+    assert service.tasks_resource.patch_calls == [
+        {
+            "tasklist": "school",
+            "task": "task-id",
+            "body": {"due": "2026-08-12T00:00:00.000Z"},
+        }
+    ]
+
+
+def test_due_verification_fails_when_server_still_omits_date():
+    service = _Service(tasklists={None: {"items": []}}, tasks={None: {"items": []}})
+    service.tasks_resource.get_values = [{"due": None}, {"due": None}]
+    with pytest.raises(GoogleTasksError, match="did not retain due date 2026-08-12"):
+        GoogleTasksClient(service=service).verify_due(
+            "school", "task-id", date(2026, 8, 12)
+        )
+    assert len(service.tasks_resource.patch_calls) == 1

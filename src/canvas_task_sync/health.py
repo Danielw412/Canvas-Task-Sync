@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -13,7 +14,7 @@ from canvas_task_sync.browser_capture import BrowserCaptureBroker
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.redaction import safe_exception_summary
-from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.sources import create_course_source_adapter
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ConnectionItem,
@@ -21,6 +22,7 @@ from canvas_task_sync.web_models import (
     HealthCheck,
     HealthState,
 )
+from canvas_task_sync.week import monday_for
 
 
 def _now() -> datetime:
@@ -48,8 +50,10 @@ def connection_status(
             payload = json.loads(token_path.read_text(encoding="utf-8"))
             token_scopes = set(payload.get("scopes") or [])
             authorized = set(SCOPES).issubset(token_scopes)
-            scope_summary = "Required Tasks and Slides scopes are present" if authorized else (
-                "Required Google scopes are missing"
+            scope_summary = (
+                "Required Tasks and Slides scopes are present"
+                if authorized
+                else ("Required Google scopes are missing")
             )
         except (json.JSONDecodeError, UnicodeDecodeError):
             scope_summary = "token.json is not valid JSON"
@@ -191,9 +195,11 @@ def run_health_checks(
         course = settings.course(selected_id)
         started = perf_counter()
         try:
-            capture = create_source_adapter(
-                course.source,
+            local_today = datetime.now(ZoneInfo(course.timezone)).date()
+            capture = create_course_source_adapter(
+                course,
                 credentials,
+                target_week_start=monday_for(local_today),
                 capture_broker=capture_broker,
             ).capture(include_image=False)
             checks.append(
@@ -226,16 +232,28 @@ def run_health_checks(
             )
         started = perf_counter()
         try:
-            tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
-            task_count = len(tasks_client.list_tasks(tasklist_id))
+            list_details: list[dict[str, object]] = []
+            for configured_title in dict.fromkeys(
+                [course.task_list, course.assessment_task_list]
+            ):
+                tasklist_id, tasklist_title = tasks_client.resolve_task_list(configured_title)
+                list_details.append(
+                    {
+                        "title": tasklist_title,
+                        "task_count": len(tasks_client.list_tasks(tasklist_id)),
+                    }
+                )
             checks.append(
                 HealthCheck(
                     key=f"tasks:{selected_id}",
-                    label=f"{course.name} task list",
+                    label=f"{course.name} task lists",
                     state=HealthState.HEALTHY,
-                    summary=f"'{tasklist_title}' is readable · {task_count} tasks.",
+                    summary=" · ".join(
+                        f"'{item['title']}' readable ({item['task_count']} tasks)"
+                        for item in list_details
+                    ),
                     duration_ms=int((perf_counter() - started) * 1000),
-                    details={"course_id": selected_id, "task_count": task_count},
+                    details={"course_id": selected_id, "task_lists": list_details},
                 )
             )
         except Exception as error:

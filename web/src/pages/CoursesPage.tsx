@@ -1,8 +1,8 @@
-import { AlertTriangle, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, Save, Search, TestTube2 } from 'lucide-react'
+import { AlertTriangle, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, Save, Search, TestTube2, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
-import { Button, CheckRow, EmptyState } from '../components/ui'
+import { Button, CheckRow, EmptyState, Modal } from '../components/ui'
 import { fetchJson, mutateJson } from '../lib/api'
 import type { CourseSettings, CourseView } from '../types'
 
@@ -11,12 +11,12 @@ const blankCourse: CourseSettings = {
   name: '',
   prefix: '',
   task_list: 'School',
+  assessment_task_list: 'Tests',
+  ai_instructions: '',
   timezone: 'America/New_York',
   meeting_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
   source: {
-    type: 'google_slides',
-    url: '',
-    page_id: '',
+    type: 'none',
     extraction: {
       mode: 'hybrid',
       thumbnail_size: 'large',
@@ -41,6 +41,7 @@ export default function CoursesPage() {
   const [tab, setTab] = useState<'general' | 'source' | 'deadline'>('source')
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [deleteCourse, setDeleteCourse] = useState<{ id: string; name: string } | null>(null)
   const visibleCourses = useMemo(() => (courses ?? []).filter((course) => course.settings.name.toLowerCase().includes(query.toLowerCase())), [courses, query])
 
   function selectCourse(id: string) {
@@ -116,6 +117,26 @@ export default function CoursesPage() {
     } finally { setBusy(false) }
   }
 
+  async function confirmDelete() {
+    if (!deleteCourse) return
+    setBusy(true)
+    try {
+      const updated = await mutateJson<CourseView[]>(`/api/v1/courses/${deleteCourse.id}`, { method: 'DELETE' })
+      await mutate(updated, { revalidate: false })
+      await Promise.all([
+        globalMutate((key) => typeof key === 'string' && key.includes('/api/v1/overview')),
+        globalMutate('/api/v1/schedules'),
+      ])
+      setSelectedId(updated[0]?.id ?? null)
+      setDraft(null)
+      setEdited(false)
+      setDeleteCourse(null)
+      toast('Course deleted. Existing Google Tasks and run history were kept.', 'success')
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'Course could not be deleted.', 'error')
+    } finally { setBusy(false) }
+  }
+
   if (error) return <EmptyState title="Courses could not load" body={error.message} />
 
   return <div className="courses-page">
@@ -132,9 +153,10 @@ export default function CoursesPage() {
         </div>
         <footer className="editor-actions"><Button variant="secondary" onClick={() => { setDraft(null); setEdited(false) }} disabled={!edited}>Discard changes</Button><Button icon={Save} disabled={busy || !edited} onClick={save}>Save changes</Button></footer>
       </section> : <EmptyState title="Add your first course" body="Connect a browser-captured Google file or a Google Slides API page to a Google Tasks list." action={<Button icon={Plus} onClick={beginAdd}>Add course</Button>} />}
-      <aside className="config-inspector"><h2>Configuration checks</h2>{activeDraft ? <div className="health-list"><CheckRow>Source URL · {activeDraft.settings.source.url ? 'Configured' : 'Required'}</CheckRow><CheckRow>{activeDraft.settings.source.type === 'google_slides' ? `Slide page · ${activeDraft.settings.source.page_id ? 'Configured' : 'Required'}` : 'Browser connector · Capture required before each preview'}</CheckRow><CheckRow>Extraction · {activeDraft.settings.source.extraction.mode} · {activeDraft.settings.source.type === 'google_slides' ? activeDraft.settings.source.extraction.thumbnail_size : 'extension capture'}</CheckRow><CheckRow>Google Tasks list · {activeDraft.settings.task_list || 'Required'}</CheckRow><CheckRow>Timezone · {activeDraft.settings.timezone}</CheckRow></div> : null}<div className="config-file"><h3>Config file</h3><div><span>config/courses.yaml</span><Copy size={16} /></div><a className="inline-link" href="/api/v1/courses-config" target="_blank" rel="noreferrer">View sanitized config <ExternalLink size={15} /></a><small>Secrets are never stored in this file.</small></div></aside>
+      <aside className="config-inspector"><h2>Configuration checks</h2>{activeDraft ? <div className="health-list"><CheckRow>Canvas API · {activeDraft.settings.canvas_course_id ? `Course ${activeDraft.settings.canvas_course_id}` : 'Required without a fallback'}</CheckRow><CheckRow>{activeDraft.settings.source.type === 'none' ? 'Fallback · None' : `Fallback URL · ${activeDraft.settings.source.url ? 'Configured' : 'Required'}`}</CheckRow><CheckRow>{activeDraft.settings.source.type === 'google_slides' ? `Slide page · ${activeDraft.settings.source.page_id ? 'Configured' : 'Required'}` : activeDraft.settings.source.type === 'browser' ? 'Browser connector · Last-resort capture' : 'Canvas-only acquisition'}</CheckRow><CheckRow>Extraction · {activeDraft.settings.source.extraction.mode} · {activeDraft.settings.source.type === 'google_slides' ? activeDraft.settings.source.extraction.thumbnail_size : activeDraft.settings.source.type === 'browser' ? 'extension capture' : 'Canvas text'}</CheckRow><CheckRow>Assignments · {activeDraft.settings.task_list || 'Required'}</CheckRow><CheckRow>Tests &amp; quizzes · {activeDraft.settings.assessment_task_list || 'Required'}</CheckRow><CheckRow>Timezone · {activeDraft.settings.timezone}</CheckRow></div> : null}<div className="config-file"><h3>Config file</h3><div><span>config/courses.yaml</span><Copy size={16} /></div><a className="inline-link" href="/api/v1/courses-config" target="_blank" rel="noreferrer">View sanitized config <ExternalLink size={15} /></a><small>Secrets are never stored in this file.</small></div></aside>
     </div>
-    {activeDraft && !activeDraft.creating ? <section className="danger-band"><Button variant="danger" icon={AlertTriangle} disabled={busy} onClick={toggleEnabled}>{activeDraft.settings.enabled ? 'Disable course' : 'Enable course'}</Button><p>{activeDraft.settings.enabled ? 'Disabling stops future runs for this course. It never deletes Google Tasks.' : 'Enable the course to allow previews and schedules again.'}</p></section> : null}
+    {activeDraft && !activeDraft.creating ? <section className="danger-band"><div className="danger-band__actions"><Button variant="danger" icon={AlertTriangle} disabled={busy} onClick={toggleEnabled}>{activeDraft.settings.enabled ? 'Disable course' : 'Enable course'}</Button><Button variant="danger" icon={Trash2} disabled={busy} onClick={() => setDeleteCourse({ id: activeDraft.id, name: activeDraft.settings.name })}>Delete course</Button></div><p>{activeDraft.settings.enabled ? 'Disabling stops future runs. Deleting removes this configuration and its schedules. Neither action deletes existing Google Tasks.' : 'Enable the course to allow previews and schedules again, or delete its local configuration. Existing Google Tasks are never deleted.'}</p></section> : null}
+    {deleteCourse ? <Modal title={`Delete ${deleteCourse.name}?`} onClose={() => { if (!busy) setDeleteCourse(null) }} footer={<><Button variant="secondary" disabled={busy} onClick={() => setDeleteCourse(null)}>Cancel</Button><Button variant="danger" icon={Trash2} disabled={busy} onClick={() => void confirmDelete()}>Delete course</Button></>}><div className="confirmation-copy"><AlertTriangle className="tone-danger" size={28} /><p>This permanently removes the course from the local configuration and deletes every schedule assigned to it. Run history and existing Google Tasks are kept.</p></div></Modal> : null}
   </div>
 }
 
@@ -147,16 +169,26 @@ function GeneralForm({ draft, updateId, update }: { draft: { id: string; setting
 }
 
 function SourceForm({ settings, update }: { settings: CourseSettings; update: (recipe: (value: CourseSettings) => void) => void }) {
-  function switchSource(type: 'google_slides' | 'browser') {
+  function switchSource(type: 'none' | 'google_slides' | 'browser') {
     update((value) => {
       const extraction = structuredClone(value.source.extraction)
-      const url = value.source.url
-      value.source = type === 'browser'
+      const url = value.source.type === 'none' ? '' : value.source.url
+      value.source = type === 'none'
+        ? { type: 'none', extraction }
+        : type === 'browser'
         ? { type: 'browser', url, source_format: 'auto', freshness_seconds: 900, selection: { slide_ids: [], section_ids: [], sheets: [] }, extraction }
         : { type: 'google_slides', url, page_id: '', extraction }
     })
   }
-  return <><div className="form-section"><h3>Source</h3><Field label="Source acquisition" help="Browser connector uses only content already open and authorized in Chrome."><select value={settings.source.type} onChange={(event) => switchSource(event.target.value as 'google_slides' | 'browser')}><option value="browser">Chrome source connector · Slides, Docs, Sheets</option><option value="google_slides">Google Slides API · Existing direct connection</option></select></Field><Field label={settings.source.type === 'browser' ? 'Google file URL' : 'Presentation URL'} help={settings.source.type === 'browser' ? 'Paste a Google Slides, Docs, or Sheets edit URL.' : 'Paste the Google Slides share or edit link.'}><input type="url" value={settings.source.url} onChange={(event) => update((value) => { value.source.url = event.target.value })} /></Field>{settings.source.type === 'google_slides' ? <Field label="Slide page ID" help="The stable page ID after slide=id. in the URL."><input value={settings.source.page_id} onChange={(event) => update((value) => { if (value.source.type === 'google_slides') value.source.page_id = event.target.value })} /></Field> : <div className="form-grid form-grid--two"><Field label="Expected format"><select value={settings.source.source_format} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.source_format = event.target.value as typeof value.source.source_format })}><option value="auto">Detect from URL</option><option value="google_slides">Google Slides</option><option value="google_docs">Google Docs</option><option value="google_sheets">Google Sheets</option></select></Field><Field label="Capture freshness"><select value={settings.source.freshness_seconds} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.freshness_seconds = Number(event.target.value) })}><option value={300}>5 minutes</option><option value={900}>15 minutes</option><option value={1800}>30 minutes</option><option value={3600}>1 hour</option></select></Field></div>}</div><div className="form-section"><h3>Extraction</h3><div className="form-grid form-grid--three"><Field label="Gemini mode"><select value={settings.source.extraction.mode} onChange={(event) => update((value) => { value.source.extraction.mode = event.target.value as CourseSettings['source']['extraction']['mode'] })}><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="image">Image</option><option value="text">Text</option></select></Field>{settings.source.type === 'google_slides' ? <Field label="Thumbnail size"><select value={settings.source.extraction.thumbnail_size} onChange={(event) => update((value) => { value.source.extraction.thumbnail_size = event.target.value as 'small' | 'medium' | 'large' })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></Field> : <Field label="Extension acquisition"><input value="Set globally or per source in extension" disabled /></Field>}<Field label="Model (inherited)"><input value="gemini-3.7-flash → 3.6 → 3.5 · high reasoning" disabled /></Field></div><p className="form-help">For browser sources, capture matching content before previewing: <em>text</em> needs text, <em>image</em> needs screenshots, and <em>hybrid</em> needs both. <em>Auto</em> accepts either and retains the existing Gemini fallback behavior.</p></div><div className="form-section"><h3>Destination</h3><div className="form-grid form-grid--two"><Field label="Google Tasks list"><input value={settings.task_list} onChange={(event) => update((value) => { value.task_list = event.target.value })} /></Field><Field label="Task title prefix"><input value={settings.prefix} onChange={(event) => update((value) => { value.prefix = event.target.value.toUpperCase() })} /></Field></div></div></>
+  return <>
+    <div className="form-section"><h3>Source</h3>
+      <div className="form-grid form-grid--two"><Field label="Canvas course ID" help="When set, Canvas API discovery runs first."><input inputMode="numeric" value={settings.canvas_course_id ?? ''} onChange={(event) => update((value) => { value.canvas_course_id = event.target.value.replace(/\D/g, '') || null })} placeholder="12604" /></Field><Field label="Canvas base URL override" help="Usually inherited from CANVAS_BASE_URL."><input type="url" value={settings.canvas_base_url ?? ''} onChange={(event) => update((value) => { value.canvas_base_url = event.target.value || null })} placeholder="https://school.instructure.com" /></Field></div>
+      <Field label="Fallback acquisition" help="Optional. Used only when Canvas cannot provide a verified agenda, or when selected manually."><select value={settings.source.type} onChange={(event) => switchSource(event.target.value as 'none' | 'google_slides' | 'browser')}><option value="none">No fallback · Canvas API only</option><option value="google_slides">Google Slides API · Direct fallback</option><option value="browser">Chrome source connector · Last resort</option></select></Field>
+      {settings.source.type === 'none' ? <p className="form-help">Canvas API content is the only agenda source. A failed or unverified week match stops safely for review.</p> : <><Field label={settings.source.type === 'browser' ? 'Google file URL' : 'Presentation URL'} help={settings.source.type === 'browser' ? 'Paste a Google Slides, Docs, or Sheets edit URL.' : 'Paste the Google Slides share or edit link.'}><input type="url" value={settings.source.url} onChange={(event) => update((value) => { if (value.source.type !== 'none') value.source.url = event.target.value })} /></Field>{settings.source.type === 'google_slides' ? <Field label="Slide page ID" help="The stable page ID after slide=id. in the URL."><input value={settings.source.page_id} onChange={(event) => update((value) => { if (value.source.type === 'google_slides') value.source.page_id = event.target.value })} /></Field> : <div className="form-grid form-grid--two"><Field label="Expected format"><select value={settings.source.source_format} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.source_format = event.target.value as typeof value.source.source_format })}><option value="auto">Detect from URL</option><option value="google_slides">Google Slides</option><option value="google_docs">Google Docs</option><option value="google_sheets">Google Sheets</option></select></Field><Field label="Capture freshness"><select value={settings.source.freshness_seconds} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.freshness_seconds = Number(event.target.value) })}><option value={300}>5 minutes</option><option value={900}>15 minutes</option><option value={1800}>30 minutes</option><option value={3600}>1 hour</option></select></Field></div>}</>}
+    </div>
+    <div className="form-section"><h3>Extraction</h3><div className="form-grid form-grid--three"><Field label="Gemini mode"><select value={settings.source.extraction.mode} onChange={(event) => update((value) => { value.source.extraction.mode = event.target.value as CourseSettings['source']['extraction']['mode'] })}><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="image">Image</option><option value="text">Text</option></select></Field>{settings.source.type === 'google_slides' ? <Field label="Thumbnail size"><select value={settings.source.extraction.thumbnail_size} onChange={(event) => update((value) => { value.source.extraction.thumbnail_size = event.target.value as 'small' | 'medium' | 'large' })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></Field> : <Field label="Acquisition"><input value={settings.source.type === 'browser' ? 'Browser extension capture' : 'Canvas API text'} disabled /></Field>}<Field label="Model (inherited)"><input value="gemini-3.7-flash → 3.6 → 3.5 · high reasoning" disabled /></Field></div><Field label="Course notes / AI instructions" help="Applied only to this course when Gemini decides which grounded tasks to create. Changes invalidate the extraction cache."><textarea rows={5} value={settings.ai_instructions} onChange={(event) => update((value) => { value.ai_instructions = event.target.value })} placeholder="Example: Do not create homework tasks for reading assignments in this course." /></Field><p className="form-help">Canvas API captures use text directly. A direct Google API source is the next fallback; Chrome capture is used only when configured or explicitly selected.</p></div>
+    <div className="form-section"><h3>Destination</h3><div className="form-grid form-grid--three"><Field label="Assignments list"><input value={settings.task_list} onChange={(event) => update((value) => { value.task_list = event.target.value })} /></Field><Field label="Tests & quizzes list"><input value={settings.assessment_task_list} onChange={(event) => update((value) => { value.assessment_task_list = event.target.value })} /></Field><Field label="Task title prefix"><input value={settings.prefix} onChange={(event) => update((value) => { value.prefix = event.target.value.toUpperCase() })} /></Field></div></div>
+  </>
 }
 
 function DeadlineForm({ settings, update }: { settings: CourseSettings; update: (recipe: (value: CourseSettings) => void) => void }) {

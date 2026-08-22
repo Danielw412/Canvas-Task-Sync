@@ -5,8 +5,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.gemini import GeminiExtractionError, GeminiExtractor, GoogleGenAIBackend
-from canvas_task_sync.models import Confidence, ExtractionMode
+from canvas_task_sync.models import (
+    ActionKind,
+    AgendaBlock,
+    Confidence,
+    DueRelation,
+    ExtractionMode,
+    GeminiTaskCandidate,
+    SourceCapture,
+    TaskClassification,
+)
 
 
 class FakeBackend:
@@ -84,6 +94,54 @@ def test_unreconciled_source_disagreement_is_uncertain(
     assert "could not be reconciled" in outcome.uncertain[0].reason
 
 
+def test_exact_canvas_subphrase_reconciles_without_absorbing_the_entire_row():
+    block = AgendaBlock(
+        anchor="canvas:physics:6",
+        element_id="physics:table:0",
+        kind="table_cell",
+        row_index=2,
+        row_label="T",
+        text=(
+            "Tuesday Classwork: Unit 1 Assignment 1 in Canvas Homework: "
+            "Read chapter 3 in the text book, and sign up for AP Classroom."
+        ),
+    )
+    capture = SourceCapture(
+        source_key="canvas:11126:week:2026-08-17",
+        source_url="https://canvas.example/courses/11126",
+        source_type="canvas",
+        page_hash="a" * 64,
+        transcript=block.text,
+        blocks=[block],
+        selection={"week_start": "2026-08-17"},
+    )
+    candidate = GeminiTaskCandidate(
+        source_anchor=block.anchor,
+        source_text="Read chapter 3 in the text book",
+        row_label="T",
+        classification=TaskClassification.HOMEWORK,
+        action_kind=ActionKind.READ,
+        title="Read chapter 3",
+        due_relation=DueRelation.NEXT_CLASS,
+        confidence=Confidence.HIGH,
+    )
+    course = CourseSettings.model_validate(
+        {
+            "name": "AP Physics C",
+            "prefix": "PHYSICS",
+            "task_list": "School",
+            "source": {"type": "none", "extraction": {"mode": "text"}},
+            "canvas_course_id": "11126",
+        }
+    )
+
+    outcome = GeminiExtractor(FakeBackend([[candidate]])).extract(capture, course)
+
+    assert not outcome.uncertain
+    assert len(outcome.tasks) == 1
+    assert outcome.tasks[0].source_text == "Read chapter 3 in the text book"
+
+
 def test_auto_retries_hybrid_when_image_ocr_loses_punctuation(
     spanish_capture, spanish_course, spanish_candidates
 ):
@@ -136,6 +194,7 @@ def test_model_quota_fallback_chain_keeps_high_reasoning():
         "gemini-3.7-flash",
         client=SimpleNamespace(models=Models()),
         fallback_models=["gemini-3.6-flash", "gemini-3.5-flash"],
+        retry_waiter=lambda _seconds, _attempts: None,
     )
     assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
     assert [call[0] for call in calls] == [
@@ -148,7 +207,33 @@ def test_model_quota_fallback_chain_keeps_high_reasoning():
         for call in calls
     )
     assert backend.used_model == "gemini-3.5-flash"
-    assert len(backend.fallback_reasons) == 2
+    assert len(backend.fallback_reasons) == 3
+
+
+def test_two_failed_models_wait_one_minute_then_retry_chain():
+    calls: list[str] = []
+    waits: list[tuple[float, list[str]]] = []
+
+    class Models:
+        def generate_content(self, *, model, **_kwargs):
+            calls.append(model)
+            if len(calls) <= 2:
+                raise RuntimeError("503 UNAVAILABLE")
+            return SimpleNamespace(parsed=[], text="[]")
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.7-flash",
+        client=SimpleNamespace(models=Models()),
+        fallback_models=["gemini-3.6-flash"],
+        retry_waiter=lambda seconds, attempts: waits.append((seconds, attempts)),
+    )
+
+    assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
+    assert calls == ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.7-flash"]
+    assert waits == [(60.0, [
+        "gemini-3.7-flash: service unavailable",
+        "gemini-3.6-flash: service unavailable",
+    ])]
 
 
 def test_recent_assignment_context_is_included_in_gemini_prompt(
@@ -163,6 +248,30 @@ def test_recent_assignment_context_is_included_in_gemini_prompt(
     assert "[SPANISH] VHL practice | needsAction | due 2026-08-18" in backend.calls[0][
         "prompt"
     ]
+    assert "task_type=quiz" in backend.calls[0]["prompt"]
+    assert "Study guides, studying, preparation, corrections" in backend.calls[0]["prompt"]
+    assert "latest consecutive occurrence" in backend.calls[0]["prompt"]
+    assert "exact atomic phrase" in backend.calls[0]["prompt"]
+    assert "one to three concise sentences" in backend.calls[0]["prompt"]
+
+
+def test_course_ai_instructions_are_delimited_and_scoped_to_that_course(
+    spanish_capture, spanish_course, spanish_candidates
+):
+    instructed = spanish_course.model_copy(deep=True)
+    instructed.ai_instructions = "Do not create homework tasks for reading assignments."
+    instructed_backend = FakeBackend([spanish_candidates])
+    GeminiExtractor(instructed_backend).extract(spanish_capture, instructed)
+
+    plain_backend = FakeBackend([spanish_candidates])
+    GeminiExtractor(plain_backend).extract(spanish_capture, spanish_course)
+
+    instructed_prompt = instructed_backend.calls[0]["prompt"]
+    assert "<course-instructions>" in instructed_prompt
+    assert "Do not create homework tasks for reading assignments." in instructed_prompt
+    assert "Do not create homework tasks for reading assignments." not in plain_backend.calls[0][
+        "prompt"
+    ]
 
 
 def test_exhausted_model_chain_reports_each_attempt_without_raw_provider_details():
@@ -174,6 +283,7 @@ def test_exhausted_model_chain_reports_each_attempt_without_raw_provider_details
         "gemini-3.7-flash",
         client=SimpleNamespace(models=Models()),
         fallback_models=["gemini-3.6-flash", "gemini-3.5-flash"],
+        retry_waiter=lambda _seconds, _attempts: None,
     )
     with pytest.raises(GeminiExtractionError) as caught:
         backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None)

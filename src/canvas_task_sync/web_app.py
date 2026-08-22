@@ -5,6 +5,7 @@ import hmac
 import json
 import re
 import secrets
+import uuid
 from collections.abc import AsyncIterable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -27,27 +28,29 @@ from canvas_task_sync.browser_capture import (
     resource_id_from_url,
     source_type_from_url,
 )
-from canvas_task_sync.configuration import ProjectSettings
+from canvas_task_sync.configuration import CourseSettings, ProjectSettings
 from canvas_task_sync.configuration_service import (
     MAX_CREDENTIAL_FILE_BYTES,
     ConfigurationService,
 )
 from canvas_task_sync.control_store import ControlStore
 from canvas_task_sync.health import connection_status, run_health_checks
+from canvas_task_sync.models import AcquisitionStrategy
 from canvas_task_sync.redaction import safe_exception_summary, sanitize
 from canvas_task_sync.run_manager import (
+    ACTIVE_STATUSES,
     TERMINAL_STATUSES,
     RunManager,
     ScheduleManager,
     next_schedule_occurrence,
 )
-from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.sources import create_course_source_adapter, create_source_adapter
 from canvas_task_sync.sources.browser_connector import (
     automatic_acquisition_mode,
     extension_selection,
 )
 from canvas_task_sync.sync_service import SyncService
-from canvas_task_sync.web_constants import DEFAULT_WEB_PORT
+from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
     CaptureFailure,
@@ -94,11 +97,19 @@ class WebRuntime:
         self.sync_service.settings = self.settings
         return self.settings
 
-    def create_source_adapter(self, settings: Any, credentials: Any) -> Any:
+    def create_source_adapter(self, settings: Any, credentials: Any, **kwargs: Any) -> Any:
+        if isinstance(settings, CourseSettings):
+            return create_course_source_adapter(
+                settings,
+                credentials,
+                capture_broker=self.capture_broker,
+                **kwargs,
+            )
         return create_source_adapter(
             settings,
             credentials,
             capture_broker=self.capture_broker,
+            **kwargs,
         )
 
     def rotate_extension_pairing_token(self) -> str:
@@ -129,7 +140,12 @@ class WebRuntime:
             self.store.prune_history()
 
 
-def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAPI:
+def create_web_app(
+    config_path: Path,
+    *,
+    port: int = DEFAULT_WEB_PORT,
+    simple_port: int = DEFAULT_SIMPLE_WEB_PORT,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         runtime = WebRuntime(config_path, port=port)
@@ -154,7 +170,12 @@ def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAP
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origins=[
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            f"http://127.0.0.1:{simple_port}",
+            f"http://localhost:{simple_port}",
+        ],
         allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
@@ -224,6 +245,8 @@ def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAP
                 f"http://localhost:{runtime.port}",
                 "http://127.0.0.1:5173",
                 "http://localhost:5173",
+                f"http://127.0.0.1:{simple_port}",
+                f"http://localhost:{simple_port}",
             }
             if origin and origin not in allowed_origins:
                 return _error_response(
@@ -358,6 +381,25 @@ def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAP
         runtime.reload_settings()
         return _course_views(runtime)
 
+    @api.delete("/courses/{course_id}", response_model=list[CourseView])
+    def delete_course(request: Request, course_id: str) -> list[CourseView]:
+        runtime = _runtime(request)
+        if runtime.store.list_runs(
+            limit=1,
+            course_id=course_id,
+            statuses=ACTIVE_STATUSES,
+        ):
+            raise _http_error(
+                409,
+                "course_run_active",
+                "This course has an active run. Cancel or wait for it to finish before "
+                "deleting the course.",
+            )
+        runtime.configuration.delete_course(course_id)
+        runtime.store.delete_schedules_for_course(course_id)
+        runtime.reload_settings()
+        return _course_views(runtime)
+
     @api.post("/courses/{course_id}/disable", response_model=list[CourseView])
     def disable_course(request: Request, course_id: str) -> list[CourseView]:
         runtime = _runtime(request)
@@ -422,10 +464,13 @@ def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAP
             runtime,
             course,
             extraction_mode=payload.extraction_mode,
+            acquisition_strategy=payload.acquisition_strategy,
         )
-        run_id = runtime.runs.create_preview(payload)
+        operation_id = str(uuid.uuid4())
+        run_id = runtime.runs.create_preview(payload, operation_id=operation_id)
         return {
             "run_id": run_id,
+            "operation_id": operation_id,
             "status": "queued",
             "capture_request_id": (
                 capture_request["request_id"] if capture_request is not None else None
@@ -435,26 +480,114 @@ def create_web_app(config_path: Path, *, port: int = DEFAULT_WEB_PORT) -> FastAP
     @api.post("/runs/all", status_code=202)
     def create_all_runs(request: Request, payload: RunAllCreate) -> dict[str, Any]:
         runtime = _runtime(request)
+        operation_id = str(uuid.uuid4())
         run_ids: list[int] = []
         capture_request_ids: list[str] = []
         for course_id, course in sorted(runtime.settings.courses.items()):
             if not course.enabled:
                 continue
-            capture_request = _queue_automatic_capture(runtime, course)
+            capture_request = _queue_automatic_capture(
+                runtime,
+                course,
+                acquisition_strategy=payload.acquisition_strategy,
+            )
             if capture_request is not None:
                 capture_request_ids.append(str(capture_request["request_id"]))
             run_ids.append(
                 runtime.runs.create_preview(
-                    RunCreate(course_id=course_id, include_past=payload.include_past)
+                    RunCreate(
+                        course_id=course_id,
+                        mode=payload.mode,
+                        include_past=payload.include_past,
+                        week_selection=payload.week_selection,
+                        acquisition_strategy=payload.acquisition_strategy,
+                    ),
+                    operation_id=operation_id,
                 )
             )
         if not run_ids:
             raise _http_error(409, "no_enabled_courses", "Enable at least one course first.")
         return {
             "run_ids": run_ids,
+            "operation_id": operation_id,
             "status": "queued",
             "capture_request_ids": capture_request_ids,
         }
+
+    @api.get("/operations")
+    def list_operations(request: Request, limit: int = 50) -> list[dict[str, Any]]:
+        runtime = _runtime(request)
+        runs = _annotate_runs(runtime, runtime.store.list_runs(limit=500))
+        grouped: dict[str, list[Any]] = {}
+        for run in runs:
+            grouped.setdefault(run.operation_id, []).append(run)
+        result: list[dict[str, Any]] = []
+        for operation_id, operation_runs in list(grouped.items())[: min(max(limit, 1), 100)]:
+            statuses = {run.status for run in operation_runs}
+            if statuses & ACTIVE_STATUSES:
+                status = RunStatus.RUNNING
+            elif RunStatus.FAILED_PARTIAL in statuses:
+                status = RunStatus.FAILED_PARTIAL
+            elif RunStatus.FAILED in statuses:
+                status = RunStatus.FAILED
+            elif statuses & {RunStatus.REVIEW_NEEDED, RunStatus.STALE}:
+                status = RunStatus.REVIEW_NEEDED
+            elif RunStatus.AWAITING_APPROVAL in statuses:
+                status = RunStatus.AWAITING_APPROVAL
+            elif RunStatus.CANCELLED in statuses:
+                status = RunStatus.CANCELLED
+            else:
+                status = RunStatus.SUCCEEDED
+            result.append(
+                {
+                    "id": operation_id,
+                    "run_ids": [run.id for run in operation_runs],
+                    "course_ids": [run.course_id for run in operation_runs],
+                    "course_names": [run.course_name or run.course_id for run in operation_runs],
+                    "status": status.value,
+                    "created_at": min(run.created_at for run in operation_runs),
+                    "finished_at": max(
+                        (run.finished_at for run in operation_runs if run.finished_at),
+                        default=None,
+                    ),
+                }
+            )
+        return result
+
+    @api.get("/operations/{operation_id}/events", response_class=EventSourceResponse)
+    async def operation_events(
+        request: Request,
+        operation_id: str,
+        last_event_id: int | None = Header(default=None),
+    ) -> AsyncIterable[ServerSentEvent]:
+        runtime = _runtime(request)
+        if not runtime.store.runs_for_operation(operation_id):
+            raise _http_error(404, "operation_not_found", "Sync operation was not found.")
+        cursor = last_event_id or 0
+        while True:
+            events = runtime.store.operation_events_after(operation_id, cursor)
+            for event in events:
+                cursor = int(event["id"])
+                course = runtime.settings.courses.get(str(event["course_id"]))
+                event["operation_id"] = operation_id
+                event["course_name"] = course.name if course else event["course_id"]
+                yield ServerSentEvent(
+                    data=event,
+                    event="log",
+                    id=str(cursor),
+                    retry=1000,
+                )
+            operation_runs = runtime.store.runs_for_operation(operation_id)
+            if all(run.status in TERMINAL_STATUSES for run in operation_runs) and not events:
+                yield ServerSentEvent(
+                    data={"operation_id": operation_id},
+                    event="complete",
+                    id=str(cursor),
+                )
+                break
+            if await request.is_disconnected():
+                break
+            await runtime.runs.wait_for_events(timeout=1.0)
 
     @api.post("/runs/{run_id}/apply", status_code=202)
     def apply_run(request: Request, run_id: int, payload: RunApply) -> dict[str, Any]:
@@ -837,8 +970,13 @@ def _queue_automatic_capture(
     course: Any,
     *,
     extraction_mode: Any | None = None,
+    acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO,
 ) -> dict[str, Any] | None:
     if course.source.type != "browser":
+        return None
+    if acquisition_strategy == AcquisitionStrategy.CANVAS_API:
+        return None
+    if course.canvas_course_id and acquisition_strategy == AcquisitionStrategy.AUTO:
         return None
     source = course.source.model_copy(deep=True)
     if extraction_mode is not None:

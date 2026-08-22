@@ -14,6 +14,18 @@ class ExtractionMode(StrEnum):
     AUTO = "auto"
 
 
+class WeekSelection(StrEnum):
+    PREVIOUS = "previous_week"
+    CURRENT = "this_week"
+    NEXT = "next_week"
+
+
+class AcquisitionStrategy(StrEnum):
+    AUTO = "auto"
+    CANVAS_API = "canvas_api"
+    CONFIGURED_SOURCE = "configured_source"
+
+
 class BlockRole(StrEnum):
     HEADER = "header"
     DAY = "day"
@@ -25,6 +37,12 @@ class BlockRole(StrEnum):
 class TaskClassification(StrEnum):
     HOMEWORK = "homework"
     CLASSWORK = "classwork"
+
+
+class TaskType(StrEnum):
+    ASSIGNMENT = "assignment"
+    QUIZ = "quiz"
+    TEST = "test"
 
 
 class ActionKind(StrEnum):
@@ -61,6 +79,7 @@ class SyncActionKind(StrEnum):
     SOURCE_MISSING = "source_missing"
     REMOTE_MISSING = "remote_missing"
     HISTORICAL_BLOCKED = "historical_blocked"
+    NOTES_CLEANUP = "notes_cleanup"
 
 
 class AgendaBlock(BaseModel):
@@ -123,6 +142,7 @@ class GeminiTaskCandidate(BaseModel):
     source_text: str
     row_label: str | None = None
     classification: TaskClassification
+    task_type: TaskType = TaskType.ASSIGNMENT
     action_kind: ActionKind
     title: str
     details: str = ""
@@ -137,6 +157,7 @@ class ExtractedTask(BaseModel):
     source_text: str
     row_label: str | None = None
     classification: TaskClassification
+    task_type: TaskType = TaskType.ASSIGNMENT
     action_kind: ActionKind
     title_stem: str
     details: str = ""
@@ -173,15 +194,19 @@ class DraftTask(BaseModel):
     course_id: str
     source_key: str
     source_url: str
+    assignment_url: str | None = None
     source_anchor: str
     source_text: str
     ordinal: int = 0
     title: str
     details: str
     classification: TaskClassification
+    task_type: TaskType = TaskType.ASSIGNMENT
     action_kind: ActionKind
     due_date: date | None = None
     due_basis: str
+    due_uncertain: bool = False
+    due_uncertain_reason: str | None = None
     source_date: date | None = None
     historical: bool = False
     fingerprint: str
@@ -189,7 +214,7 @@ class DraftTask(BaseModel):
 
 class DesiredTask(DraftTask):
     logical_id: str
-    managed_notes: str
+    destination_task_list: str
 
 
 class RemoteTask(BaseModel):
@@ -201,6 +226,8 @@ class RemoteTask(BaseModel):
     completed: str | None = None
     deleted: bool = False
     hidden: bool = False
+    tasklist_id: str | None = None
+    tasklist_title: str | None = None
 
 
 class StateRecord(BaseModel):
@@ -223,16 +250,28 @@ class SyncAction(BaseModel):
     title: str
     logical_id: str | None = None
     due_date: date | None = None
+    due_uncertain: bool = False
+    due_uncertain_reason: str | None = None
     reason: str
     evidence: str | None = None
     source_anchor: str | None = None
     remote_task_id: str | None = None
     desired: DesiredTask | None = None
+    task_list: str | None = None
+    replacement_notes: str | None = None
+    recovered_state: StateRecord | None = None
+    due_verified: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.desired is not None and self.desired.due_uncertain:
+            self.due_uncertain = True
+            self.due_uncertain_reason = self.desired.due_uncertain_reason
 
 
 class SyncPlan(BaseModel):
     course_id: str
     task_list: str
+    task_lists: list[str] = Field(default_factory=list)
     dry_run: bool
     extraction_mode: ExtractionMode
     fallback_reasons: list[str] = Field(default_factory=list)

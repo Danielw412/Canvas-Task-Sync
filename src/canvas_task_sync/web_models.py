@@ -8,7 +8,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator
 
 from canvas_task_sync.configuration import CourseSettings
-from canvas_task_sync.models import ExtractionMode, SyncPlan
+from canvas_task_sync.models import (
+    AcquisitionStrategy,
+    ExtractionMode,
+    SyncPlan,
+    WeekSelection,
+)
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 
 
@@ -72,6 +77,9 @@ class HealthState(StrEnum):
 
 class RunCreate(BaseModel):
     course_id: str
+    mode: RunMode = RunMode.AUTO_APPLY
+    week_selection: WeekSelection = WeekSelection.CURRENT
+    acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO
     extraction_mode: ExtractionMode | None = None
     include_past: bool = False
     test_rebase_week: date | None = None
@@ -83,9 +91,26 @@ class RunCreate(BaseModel):
             raise ValueError("The rebased week date must be a Monday.")
         return value
 
+    @field_validator("mode")
+    @classmethod
+    def validate_manual_mode(cls, value: RunMode) -> RunMode:
+        if value == RunMode.HEALTH:
+            raise ValueError("Manual sync mode must be preview or auto_apply.")
+        return value
+
 
 class RunAllCreate(BaseModel):
+    mode: RunMode = RunMode.AUTO_APPLY
     include_past: bool = False
+    week_selection: WeekSelection = WeekSelection.CURRENT
+    acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO
+
+    @field_validator("mode")
+    @classmethod
+    def validate_manual_mode(cls, value: RunMode) -> RunMode:
+        if value == RunMode.HEALTH:
+            raise ValueError("Manual sync mode must be preview or auto_apply.")
+        return value
 
 
 class CaptureFailure(BaseModel):
@@ -112,6 +137,7 @@ class RunEvent(BaseModel):
 
 class RunSummary(BaseModel):
     id: int
+    operation_id: str = ""
     course_id: str
     course_name: str | None = None
     trigger: RunTrigger
@@ -122,6 +148,9 @@ class RunSummary(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     extraction_mode: ExtractionMode | None = None
+    week_selection: WeekSelection = WeekSelection.CURRENT
+    target_week_start: date | None = None
+    acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO
     counts: dict[str, int] = Field(default_factory=dict)
     applied_counts: dict[str, int] = Field(default_factory=dict)
     plan_hash: str | None = None

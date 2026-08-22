@@ -11,8 +11,9 @@ from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.models import ExtractionMode, SyncPlan
-from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.sources import create_course_source_adapter
 from canvas_task_sync.sync_service import SyncService
+from canvas_task_sync.week import monday_for
 
 
 def _today(timezone_name: str) -> date:
@@ -54,18 +55,22 @@ def run_doctor(settings: ProjectSettings, course_id: str | None = None) -> list[
     checks = ["Gemini API key is configured.", "Google OAuth scopes are valid."]
     for selected_id in course_ids:
         course = settings.course(selected_id)
-        capture = create_source_adapter(course.source, credentials).capture(
-            include_image=False
-        )
-        tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
-        task_count = len(tasks_client.list_tasks(tasklist_id))
+        capture = create_course_source_adapter(
+            course,
+            credentials,
+            target_week_start=monday_for(_today(course.timezone)),
+        ).capture(include_image=False)
         checks.append(
             f"{selected_id}: {capture.source_type} source {capture.page_id} is readable "
             f"({len(capture.blocks)} blocks)."
         )
-        checks.append(
-            f"{selected_id}: Google Tasks list '{tasklist_title}' is readable ({task_count} tasks)."
-        )
+        for configured_title in dict.fromkeys([course.task_list, course.assessment_task_list]):
+            tasklist_id, tasklist_title = tasks_client.resolve_task_list(configured_title)
+            task_count = len(tasks_client.list_tasks(tasklist_id))
+            checks.append(
+                f"{selected_id}: Google Tasks list '{tasklist_title}' is readable "
+                f"({task_count} tasks)."
+            )
     return checks
 
 

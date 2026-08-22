@@ -27,6 +27,8 @@ export type RunStage =
   | 'complete'
 
 export type ExtractionMode = 'image' | 'text' | 'hybrid' | 'auto'
+export type WeekSelection = 'previous_week' | 'this_week' | 'next_week'
+export type AcquisitionStrategy = 'auto' | 'canvas_api' | 'configured_source'
 export type BrowserSourceFormat = 'auto' | 'google_slides' | 'google_docs' | 'google_sheets'
 export type SyncActionKind =
   | 'create'
@@ -37,6 +39,7 @@ export type SyncActionKind =
   | 'source_missing'
   | 'remote_missing'
   | 'historical_blocked'
+  | 'notes_cleanup'
 
 export interface ExtractionSettings {
   mode: ExtractionMode
@@ -65,14 +68,23 @@ export interface BrowserSourceSettings {
   extraction: ExtractionSettings
 }
 
+export interface NoFallbackSourceSettings {
+  type: 'none'
+  extraction: ExtractionSettings
+}
+
 export interface CourseSettings {
   enabled: boolean
   name: string
   prefix: string
   task_list: string
+  assessment_task_list: string
+  ai_instructions: string
   timezone: string
   meeting_days: string[]
-  source: GoogleSlidesSourceSettings | BrowserSourceSettings
+  canvas_course_id?: string | null
+  canvas_base_url?: string | null
+  source: GoogleSlidesSourceSettings | BrowserSourceSettings | NoFallbackSourceSettings
 }
 
 export interface CourseView {
@@ -104,23 +116,31 @@ export interface SyncAction {
   title: string
   logical_id?: string | null
   due_date?: string | null
+  due_uncertain?: boolean
+  due_uncertain_reason?: string | null
   reason: string
   evidence?: string | null
   source_anchor?: string | null
   remote_task_id?: string | null
+  task_list?: string | null
+  due_verified?: boolean
   desired?: {
     details: string
     source_url: string
+    assignment_url?: string | null
     source_text: string
     due_basis: string
     action_kind: string
     classification: string
+    task_type: 'assignment' | 'quiz' | 'test'
+    destination_task_list: string
   } | null
 }
 
 export interface SyncPlan {
   course_id: string
   task_list: string
+  task_lists: string[]
   dry_run: boolean
   extraction_mode: ExtractionMode
   fallback_reasons: string[]
@@ -142,6 +162,7 @@ export interface RunEvent {
 
 export interface RunSummary {
   id: number
+  operation_id?: string
   course_id: string
   course_name?: string | null
   trigger: 'manual' | 'schedule'
@@ -152,12 +173,31 @@ export interface RunSummary {
   started_at?: string | null
   finished_at?: string | null
   extraction_mode?: ExtractionMode | null
+  week_selection?: WeekSelection
+  target_week_start?: string | null
+  acquisition_strategy?: AcquisitionStrategy
   counts: Record<string, number>
   applied_counts: Record<string, number>
   plan_hash?: string | null
   error_code?: string | null
   error_summary?: string | null
   schedule_id?: number | null
+}
+
+export interface OperationSummary {
+  id: string
+  run_ids: number[]
+  course_ids: string[]
+  course_names: string[]
+  status: RunStatus
+  created_at: string
+  finished_at?: string | null
+}
+
+export interface OperationLogEvent extends RunEvent {
+  operation_id: string
+  course_id: string
+  course_name: string
 }
 
 export interface RunDetail extends RunSummary {

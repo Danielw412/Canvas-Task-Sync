@@ -9,6 +9,12 @@ export default defineConfig({
     outDir: resolve(__dirname, '../src/canvas_task_sync/web_dist'),
     emptyOutDir: true,
     sourcemap: true,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        simple: resolve(__dirname, 'simple.html'),
+      },
+    },
   },
   server: {
     host: '127.0.0.1',

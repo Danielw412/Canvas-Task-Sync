@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, time
+import threading
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
 
+from canvas_task_sync.configuration import NoFallbackSourceSettings
 from canvas_task_sync.configuration_service import ConfigurationService
 from canvas_task_sync.control_store import ControlStore
 from canvas_task_sync.redaction import REDACTED, redact_text, sanitize
-from canvas_task_sync.run_manager import ScheduleManager, next_schedule_occurrence
+from canvas_task_sync.run_manager import (
+    ScheduleManager,
+    StoreProgressSink,
+    next_schedule_occurrence,
+)
 from canvas_task_sync.web_app import create_web_app
 from canvas_task_sync.web_models import (
+    CourseSave,
     EventLevel,
     RunMode,
     RunStage,
@@ -22,6 +29,21 @@ from canvas_task_sync.web_models import (
     ScheduleCreate,
     ScheduleMode,
 )
+
+
+def test_switching_to_no_fallback_removes_old_source_fields(tmp_path):
+    config_path = _write_project(tmp_path)
+    service = ConfigurationService(config_path)
+    course = service.load().course("spanish").model_copy(deep=True)
+    course.canvas_course_id = "12604"
+    course.source = NoFallbackSourceSettings(extraction=course.source.extraction)
+
+    service.save_course(CourseSave(id="spanish", settings=course), creating=False)
+
+    source = service.sanitized_document()["courses"]["spanish"]["source"]
+    assert source["type"] == "none"
+    assert "url" not in source
+    assert "page_id" not in source
 
 
 def _write_project(root: Path, *, enabled: bool = True) -> Path:
@@ -78,6 +100,21 @@ def test_redaction_covers_secret_fields_bearers_keys_and_binary():
     assert redact_text(f"Bearer {api_key}") == f"Bearer {REDACTED}"
 
 
+def test_redaction_normalizes_dates_for_json_event_metadata():
+    value = sanitize(
+        {
+            "due_date": date(2026, 8, 19),
+            "captured_at": datetime(2026, 8, 17, 21, 30, tzinfo=UTC),
+        }
+    )
+
+    assert value == {
+        "due_date": "2026-08-19",
+        "captured_at": "2026-08-17T21:30:00+00:00",
+    }
+    json.dumps(value)
+
+
 def test_control_store_replays_events_and_sanitizes_at_write_boundary(tmp_path):
     store = ControlStore(tmp_path / "control.sqlite3")
     try:
@@ -98,14 +135,44 @@ def test_control_store_replays_events_and_sanitizes_at_write_boundary(tmp_path):
             event_type="second",
             message="Validated",
             level=EventLevel.INFO,
-            metadata={"api_key": "should-never-persist", "count": 3},
+            metadata={
+                "api_key": "should-never-persist",
+                "count": 3,
+                "due_date": date(2026, 8, 19),
+            },
         )
 
         replay = store.events_after(run_id, sequence=1)
         assert [event.sequence for event in replay] == [2]
-        assert replay[0].metadata == {"api_key": REDACTED, "count": 3}
+        assert replay[0].metadata == {
+            "api_key": REDACTED,
+            "count": 3,
+            "due_date": "2026-08-19",
+        }
         store.update_run(run_id, status=RunStatus.SUCCEEDED, finished_at=datetime.now(UTC))
         assert store.get_run(run_id).status == RunStatus.SUCCEEDED
+    finally:
+        store.close()
+
+
+def test_progress_events_persist_the_current_run_stage(tmp_path):
+    store = ControlStore(tmp_path / "control.sqlite3")
+    try:
+        run_id = store.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.AUTO_APPLY,
+        )
+        sink = StoreProgressSink(store, run_id, threading.Condition())
+
+        sink.emit(
+            RunStage.EXTRACT_ASSIGNMENTS,
+            "gemini_retry_wait",
+            "Waiting before retrying Gemini.",
+            level=EventLevel.WARNING,
+        )
+
+        assert store.get_run(run_id, include_events=False).stage == RunStage.EXTRACT_ASSIGNMENTS
     finally:
         store.close()
 
@@ -189,6 +256,7 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     service = ConfigurationService(config)
     course = service.load().course("spanish")
     course.name = "Updated Spanish"
+    course.ai_instructions = "Skip optional reading tasks."
     from canvas_task_sync.web_models import CourseSave
 
     service.save_course(CourseSave(id="spanish", settings=course), creating=False)
@@ -196,7 +264,64 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     assert "# keep this header comment" in text
     assert "# keep this course comment" in text
     assert "name: Updated Spanish" in text
+    assert "ai_instructions: Skip optional reading tasks." in text
+    assert service.load().course("spanish").ai_instructions == "Skip optional reading tasks."
     assert config.with_suffix(".yaml.bak").exists()
+
+
+def test_configuration_deletes_course_and_preserves_backup(tmp_path):
+    config = _write_project(tmp_path)
+    service = ConfigurationService(config)
+
+    settings = service.delete_course("spanish")
+
+    assert settings.courses == {}
+    assert "spanish:" not in config.read_text(encoding="utf-8")
+    assert "spanish:" in config.with_suffix(".yaml.bak").read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="does not exist"):
+        service.delete_course("spanish")
+
+
+def test_delete_course_removes_schedules_but_keeps_run_history(tmp_path):
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        headers = _csrf(client)
+        schedule = client.post(
+            "/api/v1/schedules",
+            headers=headers,
+            json={
+                "name": "Weekday preview",
+                "course_id": "spanish",
+                "weekdays": [0, 1, 2, 3, 4],
+                "local_time": "19:00",
+                "timezone": "America/New_York",
+                "mode": "preview",
+                "enabled": True,
+            },
+        )
+        assert schedule.status_code == 201
+        run_id = app.state.runtime.store.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.PREVIEW,
+        )
+        blocked = client.delete("/api/v1/courses/spanish", headers=headers)
+        assert blocked.status_code == 409
+        assert blocked.json()["error"]["code"] == "course_run_active"
+
+        app.state.runtime.store.update_run(
+            run_id,
+            status=RunStatus.CANCELLED,
+            finished_at=datetime.now(UTC),
+        )
+
+        deleted = client.delete("/api/v1/courses/spanish", headers=headers)
+
+        assert deleted.status_code == 200
+        assert deleted.json() == []
+        assert client.get("/api/v1/schedules").json()["items"] == []
+        assert app.state.runtime.store.get_run(run_id, include_events=False) is not None
+        assert app.state.runtime.settings.courses == {}
 
 
 def test_oauth_upload_requires_desktop_client_and_localhost_redirect(tmp_path):
@@ -295,6 +420,76 @@ def test_run_event_stream_replays_after_last_event_id(tmp_path):
         assert "id: 2" in response.text
         assert "event: stage_completed" in response.text
         assert "id: 1" not in response.text
+
+
+def test_manual_web_runs_default_to_auto_apply_and_share_all_operation_id(tmp_path):
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        captured: list[tuple[object, str]] = []
+
+        def create_without_worker(request, **kwargs):
+            operation_id = kwargs["operation_id"]
+            captured.append((request, operation_id))
+            return runtime.store.create_run(
+                operation_id=operation_id,
+                course_id=request.course_id,
+                trigger=RunTrigger.MANUAL,
+                requested_mode=request.mode,
+            )
+
+        runtime.runs.create_preview = create_without_worker
+        headers = _csrf(client)
+
+        single = client.post("/api/v1/runs", headers=headers, json={"course_id": "spanish"})
+        all_courses = client.post("/api/v1/runs/all", headers=headers, json={})
+
+        assert single.status_code == 202
+        assert all_courses.status_code == 202
+        assert captured[0][0].mode == RunMode.AUTO_APPLY
+        assert captured[1][0].mode == RunMode.AUTO_APPLY
+        assert captured[0][1] == single.json()["operation_id"]
+        assert captured[1][1] == all_courses.json()["operation_id"]
+
+
+def test_operation_history_and_event_stream_merge_course_runs(tmp_path):
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        operation_id = "operation-test"
+        run_ids = [
+            runtime.store.create_run(
+                operation_id=operation_id,
+                course_id="spanish",
+                trigger=RunTrigger.MANUAL,
+                requested_mode=RunMode.AUTO_APPLY,
+            )
+            for _ in range(2)
+        ]
+        for index, run_id in enumerate(run_ids, start=1):
+            runtime.store.add_event(
+                run_id,
+                stage=RunStage.APPLY_CHANGES,
+                event_type="action_applied",
+                message=f"Created task {index}",
+                metadata={"action": "create", "title": f"Task {index}"},
+            )
+            runtime.store.update_run(
+                run_id,
+                status=RunStatus.SUCCEEDED,
+                finished_at=datetime.now(UTC),
+            )
+
+        operations = client.get("/api/v1/operations").json()
+        stream = client.get(f"/api/v1/operations/{operation_id}/events")
+
+        assert operations[0]["id"] == operation_id
+        assert operations[0]["run_ids"] == list(reversed(run_ids))
+        assert stream.status_code == 200
+        assert stream.text.count("event: log") == 2
+        assert '"operation_id": "operation-test"' in stream.text
+        assert '"event_type": "action_applied"' in stream.text
+        assert "event: complete" in stream.text
 
 
 def test_schedule_crud_disable_course_and_support_bundle_are_safe(tmp_path):

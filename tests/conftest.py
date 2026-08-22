@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from canvas_task_sync.configuration import load_settings
+from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.models import GeminiTaskCandidate, SourceCapture
 from canvas_task_sync.sources.google_slides import (
     build_anchor_transcript,
@@ -49,6 +49,24 @@ def spanish_candidates() -> list[GeminiTaskCandidate]:
 
 @pytest.fixture
 def spanish_course():
-    root = Path(__file__).parents[1]
-    return load_settings(root / "config" / "courses.yaml").course("spanish")
-
+    return CourseSettings.model_validate(
+        {
+            "name": "Honors Spanish IV",
+            "prefix": "SPANISH",
+            "task_list": "School",
+            "assessment_task_list": "Tests",
+            "timezone": "America/New_York",
+            "meeting_days": ["mon", "tue", "wed", "thu", "fri"],
+            "source": {
+                "type": "google_slides",
+                "url": "https://docs.google.com/presentation/d/fixture/edit",
+                "page_id": "g8596fffd0c_4_6",
+                "extraction": {
+                    "mode": "hybrid",
+                    "thumbnail_size": "large",
+                    "assignments_default_due": "next_class",
+                    "same_day_action_kinds": ["bring", "present", "submit"],
+                },
+            },
+        }
+    )

@@ -5,10 +5,14 @@ from datetime import date
 from canvas_task_sync.gemini import GeminiExtractor
 from canvas_task_sync.models import (
     ActionKind,
+    AgendaBlock,
+    BlockRole,
     Confidence,
     DueRelation,
     ExtractedTask,
+    SourceCapture,
     TaskClassification,
+    TaskType,
 )
 from canvas_task_sync.scheduling import (
     build_draft_tasks,
@@ -83,6 +87,101 @@ def test_application_policy_overrides_gemini_for_same_day_actions(
     assert by_title["[SPANISH] Bring money"].due_date == date(2026, 6, 1)
 
 
+def test_assessment_uses_explicit_date_then_dated_row_and_formats_title(
+    spanish_capture, spanish_course
+):
+    explicit = ExtractedTask(
+        source_anchor="table:agenda_table:r3:c2",
+        source_text="Crime and Punishment Exam May 29, 2026",
+        row_label="W/Th",
+        classification=TaskClassification.HOMEWORK,
+        task_type=TaskType.TEST,
+        action_kind=ActionKind.OTHER,
+        title_stem="Crime and Punishment Exam",
+        due_relation=DueRelation.EXPLICIT_DATE,
+        explicit_due_date="2026-05-29",
+        confidence=Confidence.HIGH,
+    )
+    row_quiz = ExtractedTask(
+        source_anchor="table:agenda_table:r3:c2",
+        source_text="Vocabulary",
+        row_label="W/Th",
+        classification=TaskClassification.HOMEWORK,
+        task_type=TaskType.QUIZ,
+        action_kind=ActionKind.OTHER,
+        title_stem="Vocabulary",
+        confidence=Confidence.HIGH,
+    )
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="spanish",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[explicit, row_quiz],
+        today=date(2026, 5, 1),
+    )
+    assert not uncertain
+    assert [(task.title, task.due_date, task.task_type) for task in drafts] == [
+        ("[SPANISH] Crime and Punishment Exam", date(2026, 5, 29), TaskType.TEST),
+        ("[SPANISH] Vocabulary Quiz", date(2026, 5, 28), TaskType.QUIZ),
+    ]
+
+
+def test_numeric_explicit_date_takes_precedence_over_weekday_in_evidence(
+    spanish_capture, spanish_course
+):
+    task = ExtractedTask(
+        source_anchor="table:agenda_table:r2:c2",
+        source_text="Exam will be on Monday, 8/31.",
+        row_label="T",
+        classification=TaskClassification.CLASSWORK,
+        task_type=TaskType.TEST,
+        action_kind=ActionKind.COMPLETE,
+        title_stem="Crime and Punishment Exam",
+        due_relation=DueRelation.EXPLICIT_DATE,
+        explicit_due_date="Monday, 8/31",
+        confidence=Confidence.HIGH,
+    )
+
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="english",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[task],
+        today=date(2026, 5, 1),
+    )
+
+    assert not uncertain
+    assert drafts[0].due_date == date(2026, 8, 31)
+    assert drafts[0].due_basis == "Explicit date stated in source evidence"
+
+
+def test_undated_assessment_without_a_dated_row_is_imported_as_due_uncertain(
+    spanish_capture, spanish_course
+):
+    header = spanish_capture.blocks[0]
+    assessment = ExtractedTask(
+        source_anchor=header.anchor,
+        source_text="Course final exam",
+        classification=TaskClassification.HOMEWORK,
+        task_type=TaskType.TEST,
+        action_kind=ActionKind.OTHER,
+        title_stem="Course Final",
+        confidence=Confidence.HIGH,
+    )
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="spanish",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[assessment],
+        today=date(2026, 5, 1),
+    )
+    assert len(drafts) == 1
+    assert not uncertain
+    assert drafts[0].due_date is None
+    assert drafts[0].due_uncertain is True
+    assert "dated agenda row" in drafts[0].due_uncertain_reason
+
+
 def test_holidays_and_ordinary_in_class_activity_are_ignored(
     spanish_capture, spanish_course
 ):
@@ -144,7 +243,7 @@ def test_holidays_and_ordinary_in_class_activity_are_ignored(
     }
 
 
-def test_explicit_date_is_rejected_without_exact_source_evidence(
+def test_unsupported_explicit_date_is_imported_as_due_uncertain(
     spanish_capture, spanish_course
 ):
     task = ExtractedTask(
@@ -165,9 +264,11 @@ def test_explicit_date_is_rejected_without_exact_source_evidence(
         tasks=[task],
         today=date(2026, 5, 1),
     )
-    assert not drafts
-    assert len(uncertain) == 1
-    assert "not present" in uncertain[0].reason
+    assert len(drafts) == 1
+    assert not uncertain
+    assert drafts[0].due_date is None
+    assert drafts[0].due_uncertain is True
+    assert "not present" in drafts[0].due_uncertain_reason
 
 
 def test_duplicate_gemini_candidates_are_collapsed_by_application_code(
@@ -185,6 +286,180 @@ def test_duplicate_gemini_candidates_are_collapsed_by_application_code(
     assert not uncertain
     assert len(ignored) == 1
     assert "Duplicate extraction" in ignored[0].reason
+
+
+def test_repeated_homework_is_due_after_latest_consecutive_occurrence(spanish_course):
+    rows = [
+        (1, "Monday", "No School"),
+        (
+            2,
+            "Tuesday",
+            "Read chapter 3 in the text book, and sign up for AP Classroom Using the Join Codes.",
+        ),
+        (
+            3,
+            "Wednesday",
+            "Read chapter 3 in the text book, and sign up for AP Classroom Using the Join Codes",
+        ),
+        (
+            4,
+            "Thursday",
+            "Read chapter 2 in the text book, and sign up for AP Classroom Using the Join Codes",
+        ),
+        (
+            5,
+            "Friday",
+            "Read chapter 2 in the text book, and sign up for AP Classroom Using the Join Codes",
+        ),
+    ]
+    blocks = [
+        AgendaBlock(
+            anchor="header",
+            element_id="agenda",
+            kind="heading",
+            role=BlockRole.HEADER,
+            text="August 17-21, 2026",
+        )
+    ]
+    blocks.extend(
+        AgendaBlock(
+            anchor=f"table:agenda:r{row}:c2",
+            element_id="agenda",
+            kind="table_cell",
+            role=BlockRole.ASSIGNMENTS,
+            row_index=row,
+            column_index=2,
+            row_label=label,
+            text=text,
+            order=row,
+        )
+        for row, label, text in rows
+    )
+    capture = SourceCapture(
+        source_key="canvas:physics:week:2026-08-17",
+        source_url="https://canvas.example/physics",
+        page_hash="fixture",
+        transcript="\n".join(block.text for block in blocks),
+        blocks=blocks,
+    )
+    tasks = [
+        ExtractedTask(
+            source_anchor="table:agenda:r2:c2",
+            source_text="Read chapter 3 in the text book",
+            row_label="Tuesday",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.READ,
+            title_stem="Read chapter 3",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor="table:agenda:r2:c2",
+            source_text="sign up for AP Classroom Using the Join Codes",
+            row_label="Tuesday",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.OTHER,
+            title_stem="Sign up for AP Classroom",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor="table:agenda:r4:c2",
+            source_text="Read chapter 2 in the text book",
+            row_label="Thursday",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.READ,
+            title_stem="Read chapter 2",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+    ]
+
+    drafts, uncertain, ignored = build_draft_tasks(
+        course_id="physics",
+        course=spanish_course,
+        capture=capture,
+        tasks=tasks,
+        today=date(2026, 8, 17),
+    )
+
+    assert not uncertain
+    assert not ignored
+    assert [(draft.title, draft.source_date, draft.due_date) for draft in drafts] == [
+        ("[SPANISH] Read chapter 3", date(2026, 8, 19), date(2026, 8, 20)),
+        ("[SPANISH] Sign up for AP Classroom", date(2026, 8, 21), date(2026, 8, 24)),
+        ("[SPANISH] Read chapter 2", date(2026, 8, 21), date(2026, 8, 24)),
+    ]
+
+
+def test_repeated_candidates_collapse_to_latest_scheduled_occurrence(spanish_course):
+    blocks = [
+        AgendaBlock(
+            anchor="header",
+            element_id="agenda",
+            kind="heading",
+            role=BlockRole.HEADER,
+            text="August 17-21, 2026",
+        ),
+        AgendaBlock(
+            anchor="table:agenda:r2:c2",
+            element_id="agenda",
+            kind="table_cell",
+            role=BlockRole.ASSIGNMENTS,
+            row_index=2,
+            column_index=2,
+            row_label="Tuesday",
+            text="Read chapter 3 in the text book",
+        ),
+        AgendaBlock(
+            anchor="table:agenda:r3:c2",
+            element_id="agenda",
+            kind="table_cell",
+            role=BlockRole.ASSIGNMENTS,
+            row_index=3,
+            column_index=2,
+            row_label="Wednesday",
+            text="Read chapter 3 in the text book",
+        ),
+    ]
+    capture = SourceCapture(
+        source_key="canvas:physics:week:2026-08-17",
+        source_url="https://canvas.example/physics",
+        page_hash="fixture",
+        transcript="\n".join(block.text for block in blocks),
+        blocks=blocks,
+    )
+    tasks = [
+        ExtractedTask(
+            source_anchor=anchor,
+            source_text="Read chapter 3 in the text book",
+            row_label=label,
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.READ,
+            title_stem="Read chapter 3",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        )
+        for anchor, label in (
+            ("table:agenda:r2:c2", "Tuesday"),
+            ("table:agenda:r3:c2", "Wednesday"),
+        )
+    ]
+
+    drafts, uncertain, ignored = build_draft_tasks(
+        course_id="physics",
+        course=spanish_course,
+        capture=capture,
+        tasks=tasks,
+        today=date(2026, 8, 17),
+    )
+
+    assert not uncertain
+    assert len(drafts) == 1
+    assert drafts[0].source_date == date(2026, 8, 19)
+    assert drafts[0].due_date == date(2026, 8, 20)
+    assert len(ignored) == 1
+    assert "latest consecutive agenda row" in ignored[0].reason
 
 
 def test_statistics_agenda_classwork_default_due_and_explicit_thursday(

@@ -1,5 +1,17 @@
 import useSWR from 'swr'
-import type { ApiErrorShape, OverviewResponse } from '../types'
+import type { ApiErrorShape, OverviewResponse, WeekSelection } from '../types'
+
+const WEEK_OFFSETS: Record<WeekSelection, number> = {
+  previous_week: -7,
+  this_week: 0,
+  next_week: 7,
+}
+
+const WEEK_NAMES: Record<WeekSelection, string> = {
+  previous_week: 'Previous Week',
+  this_week: 'This Week',
+  next_week: 'Next Week',
+}
 
 export class ApiError extends Error {
   code: string
@@ -118,4 +130,46 @@ export function formatDuration(start?: string | null, finish?: string | null) {
 
 export function humanize(value: string) {
   return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+export function agendaWeekOptions(
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+  now = new Date(),
+) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).formatToParts(now)
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  const today = new Date(Date.UTC(Number(value.year), Number(value.month) - 1, Number(value.day)))
+  const daysSinceMonday = (today.getUTCDay() + 6) % 7
+  const currentMonday = new Date(today)
+  currentMonday.setUTCDate(today.getUTCDate() - daysSinceMonday)
+
+  return (Object.keys(WEEK_NAMES) as WeekSelection[]).map((selection) => {
+    const start = new Date(currentMonday)
+    start.setUTCDate(currentMonday.getUTCDate() + WEEK_OFFSETS[selection])
+    const end = new Date(start)
+    end.setUTCDate(start.getUTCDate() + 4)
+    return {
+      value: selection,
+      label: `${WEEK_NAMES[selection]} · ${formatAgendaWeekRange(start, end)}`,
+    }
+  })
+}
+
+function formatAgendaWeekRange(start: Date, end: Date) {
+  const month = new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' })
+  const startMonth = month.format(start)
+  const endMonth = month.format(end)
+  const year = end.getUTCFullYear()
+  if (start.getUTCFullYear() === year && startMonth === endMonth) {
+    return `${startMonth} ${start.getUTCDate()}–${end.getUTCDate()}, ${year}`
+  }
+  if (start.getUTCFullYear() !== year) {
+    return `${startMonth} ${start.getUTCDate()}, ${start.getUTCFullYear()}–${endMonth} ${end.getUTCDate()}, ${year}`
+  }
+  return `${startMonth} ${start.getUTCDate()}–${endMonth} ${end.getUTCDate()}, ${year}`
 }

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from canvas_task_sync.control_store import ControlStore, utc_now
 from canvas_task_sync.health import run_health_checks
@@ -29,6 +31,7 @@ from canvas_task_sync.web_models import (
     RunTrigger,
     ScheduleMode,
 )
+from canvas_task_sync.week import selected_week_start
 
 ACTIVE_STATUSES = {
     RunStatus.QUEUED,
@@ -62,6 +65,7 @@ class StoreProgressSink(ProgressSink):
         metadata: dict[str, Any] | None = None,
         duration_ms: int | None = None,
     ) -> None:
+        self.store.update_run(self.run_id, stage=stage)
         if event_type == "action_applied" and metadata and metadata.get("action"):
             run = self.store.get_run(self.run_id, include_events=False)
             counts = dict(run.applied_counts) if run else {}
@@ -115,14 +119,26 @@ class RunManager:
         request: RunCreate,
         *,
         trigger: RunTrigger = RunTrigger.MANUAL,
-        requested_mode: RunMode = RunMode.PREVIEW,
+        requested_mode: RunMode | None = None,
         schedule_id: int | None = None,
+        operation_id: str | None = None,
     ) -> int:
+        effective_mode = requested_mode or request.mode
+        operation_id = operation_id or str(uuid.uuid4())
+        course = self.service.settings.course(request.course_id)
+        target_week_start = selected_week_start(
+            datetime.now(ZoneInfo(course.timezone)).date(),
+            request.week_selection,
+        )
         run_id = self.store.create_run(
             course_id=request.course_id,
+            operation_id=operation_id,
             trigger=trigger,
-            requested_mode=requested_mode,
+            requested_mode=effective_mode,
             extraction_mode=request.extraction_mode,
+            week_selection=request.week_selection,
+            target_week_start=target_week_start,
+            acquisition_strategy=request.acquisition_strategy,
             include_past=request.include_past,
             test_rebase_week=request.test_rebase_week,
             schedule_id=schedule_id,
@@ -132,7 +148,13 @@ class RunManager:
             stage=RunStage.QUEUED,
             event_type="run_queued",
             message="Run added to the local FIFO queue.",
-            metadata={"trigger": trigger.value, "mode": requested_mode.value},
+            metadata={
+                "trigger": trigger.value,
+                "mode": effective_mode.value,
+                "week_selection": request.week_selection.value,
+                "target_week_start": target_week_start.isoformat(),
+                "acquisition_strategy": request.acquisition_strategy.value,
+            },
         )
         self._queued.add(run_id)
         self._queue.put_nowait(run_id)
@@ -142,6 +164,7 @@ class RunManager:
     def create_health(self, *, course_id: str | None = None) -> int:
         selected_course = course_id or next(iter(sorted(self.service.settings.courses)), "all")
         run_id = self.store.create_run(
+            operation_id=str(uuid.uuid4()),
             course_id=selected_course,
             trigger=RunTrigger.MANUAL,
             requested_mode=RunMode.HEALTH,
@@ -303,6 +326,8 @@ class RunManager:
             course_id=run.course_id,
             include_past=run.include_past,
             rebase_week=run.test_rebase_week,
+            target_week_start=run.target_week_start,
+            acquisition_strategy=run.acquisition_strategy,
             extraction_mode=run.extraction_mode,
             progress=sink,
             cancellation=token,
@@ -327,6 +352,7 @@ class RunManager:
                 SyncActionKind.HISTORICAL_BLOCKED,
             }
         )
+        attention_count += counts.get("due_uncertain", 0)
         if run.requested_mode == RunMode.AUTO_APPLY:
             self.store.update_run(
                 run_id,
@@ -349,9 +375,9 @@ class RunManager:
             (
                 "Preview is ready for review."
                 if final_status == RunStatus.AWAITING_APPROVAL
-                else "Scheduled run completed; items needing attention remain untouched."
+                else "Sync completed; items needing attention are recorded for review."
                 if final_status == RunStatus.REVIEW_NEEDED
-                else "Scheduled run completed successfully."
+                else "Sync completed successfully."
             ),
             metadata={"status": final_status.value, "counts": counts},
         )

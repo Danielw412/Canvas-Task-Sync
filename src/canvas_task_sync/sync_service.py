@@ -8,18 +8,19 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.configuration import CourseSettings, ProjectSettings
 from canvas_task_sync.gemini import EXTRACTOR_VERSION, GeminiExtractor, GoogleGenAIBackend
 from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.models import (
+    AcquisitionStrategy,
     ExtractionMode,
     ExtractionOutcome,
     RemoteTask,
@@ -29,7 +30,7 @@ from canvas_task_sync.models import (
 from canvas_task_sync.planner import SyncPlanner, apply_sync_plan
 from canvas_task_sync.redaction import sanitize
 from canvas_task_sync.scheduling import build_draft_tasks
-from canvas_task_sync.sources import create_source_adapter
+from canvas_task_sync.sources import create_course_source_adapter
 from canvas_task_sync.state import StateStore
 from canvas_task_sync.web_models import EventLevel, RunStage
 
@@ -78,16 +79,26 @@ class NullProgressSink:
         del stage, event_type, message, level, metadata, duration_ms
 
 
+class TaskListSnapshot(BaseModel):
+    id: str
+    title: str
+    remote_hash: str
+    task_count: int
+
+
 class PreparedPlan(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    version: int = 1
+    version: int = 2
     course_id: str
     course: CourseSettings
     source_key: str
-    tasklist_id: str
-    tasklist_title: str
+    tasklist_id: str = ""
+    tasklist_title: str = ""
+    tasklists: dict[str, TaskListSnapshot] = Field(default_factory=dict)
     configured_mode: ExtractionMode
+    target_week_start: date
+    acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO
     extraction_cache_key: str = ""
     config_hash: str
     page_hash: str
@@ -105,7 +116,9 @@ class AppliedPlanResult(BaseModel):
 
 def action_counts(plan: SyncPlan) -> dict[str, int]:
     counts = Counter(action.kind.value for action in plan.actions)
-    return {kind.value: counts.get(kind.value, 0) for kind in SyncActionKind}
+    result = {kind.value: counts.get(kind.value, 0) for kind in SyncActionKind}
+    result["due_uncertain"] = sum(action.due_uncertain for action in plan.actions)
+    return result
 
 
 def _stable_hash(value: Any) -> str:
@@ -131,23 +144,56 @@ def _remote_hash(tasks: list[RemoteTask]) -> str:
                 "completed": task.completed,
                 "deleted": task.deleted,
                 "hidden": task.hidden,
+                "tasklist_id": task.tasklist_id,
             }
-            for task in sorted(tasks, key=lambda item: item.id)
+            for task in sorted(tasks, key=lambda item: (item.tasklist_id or "", item.id))
         ]
     )
 
 
-def _recent_assignment_context(
+def _read_task_lists(
+    tasks_client: GoogleTasksClient,
+    course: CourseSettings,
+) -> tuple[dict[str, TaskListSnapshot], list[RemoteTask]]:
+    snapshots: dict[str, TaskListSnapshot] = {}
+    remote_tasks: list[RemoteTask] = []
+    for configured_title in dict.fromkeys([course.task_list, course.assessment_task_list]):
+        tasklist_id, tasklist_title = tasks_client.resolve_task_list(configured_title)
+        tasks = [
+            task.model_copy(
+                update={"tasklist_id": tasklist_id, "tasklist_title": tasklist_title}
+            )
+            for task in tasks_client.list_tasks(tasklist_id)
+        ]
+        snapshots[configured_title] = TaskListSnapshot(
+            id=tasklist_id,
+            title=tasklist_title,
+            remote_hash=_remote_hash(tasks),
+            task_count=len(tasks),
+        )
+        remote_tasks.extend(tasks)
+    return snapshots, remote_tasks
+
+
+def _is_course_task(title: str, prefix: str) -> bool:
+    header = f"[{prefix}]".casefold()
+    folded = title.casefold()
+    return folded == header or folded.startswith(f"{header} ")
+
+
+def _recent_course_tasks(
     remote_tasks: list[RemoteTask],
     course: CourseSettings,
     *,
     today: date,
-) -> list[str]:
-    prefix = f"[{course.prefix}]".casefold()
-    cutoff = datetime.combine(today, time.min, tzinfo=UTC) - timedelta(days=10.5)
-    context: list[str] = []
+) -> list[RemoteTask]:
+    cutoff = (
+        datetime.combine(today, time.min, tzinfo=ZoneInfo(course.timezone))
+        - timedelta(days=14)
+    ).astimezone(UTC)
+    selected: list[RemoteTask] = []
     for task in remote_tasks:
-        if task.deleted or task.hidden or not task.title.casefold().startswith(prefix):
+        if task.deleted or not _is_course_task(task.title, course.prefix):
             continue
         if task.status == "completed":
             try:
@@ -158,9 +204,16 @@ def _recent_assignment_context(
                 completed_at = completed_at.replace(tzinfo=UTC)
             if completed_at.astimezone(UTC) < cutoff:
                 continue
-        due = task.due[:10] if task.due else "no due date"
-        context.append(f"{task.title} | {task.status} | due {due}")
-    return sorted(context)[:200]
+        selected.append(task)
+    return sorted(selected, key=lambda task: (task.title.casefold(), task.id))
+
+
+def _assignment_context(tasks: list[RemoteTask]) -> list[str]:
+    return [
+        f"{task.title} | {task.status} | list {task.tasklist_title or 'unknown'} | "
+        f"due {task.due[:10] if task.due else 'no due date'}"
+        for task in tasks
+    ]
 
 
 class SyncService:
@@ -169,7 +222,7 @@ class SyncService:
         settings: ProjectSettings,
         *,
         credentials_loader: Callable[..., Any] = load_google_credentials,
-        source_factory: Callable[..., Any] = create_source_adapter,
+        source_factory: Callable[..., Any] = create_course_source_adapter,
         tasks_client_factory: Callable[[Any], GoogleTasksClient] = GoogleTasksClient,
         backend_factory: Callable[..., Any] = GoogleGenAIBackend,
     ) -> None:
@@ -186,6 +239,8 @@ class SyncService:
         course_id: str,
         include_past: bool,
         rebase_week: date | None,
+        target_week_start: date | None = None,
+        acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO,
         extraction_mode: ExtractionMode | None = None,
         progress: ProgressSink | None = None,
         cancellation: CancellationToken | None = None,
@@ -202,6 +257,9 @@ class SyncService:
             raise ValueError("The rebased week date must be a Monday.")
         if extraction_mode is not None:
             course.source.extraction.mode = extraction_mode
+        target_week_start = target_week_start or (
+            _today(course.timezone) - timedelta(days=_today(course.timezone).weekday())
+        )
         load_dotenv(self.settings.root_dir / ".env")
         config_hash = _stable_hash(course.model_dump(mode="json"))
         sink.emit(
@@ -219,17 +277,25 @@ class SyncService:
 
         stage_started = perf_counter()
         credentials = self.credentials_loader(self.settings.root_dir, interactive=False)
-        source = self.source_factory(course.source, credentials)
+        source = self.source_factory(
+            course,
+            credentials,
+            target_week_start=target_week_start,
+            acquisition_strategy=acquisition_strategy,
+        )
         tasks_client = self.tasks_client_factory(credentials)
-        tasklist_id, tasklist_title = tasks_client.resolve_task_list(course.task_list)
-        remote_tasks = tasks_client.list_tasks(tasklist_id)
-        existing_assignments = _recent_assignment_context(
+        tasklists, remote_tasks = _read_task_lists(tasks_client, course)
+        primary_snapshot = tasklists[course.task_list]
+        recent_course_tasks = _recent_course_tasks(
             remote_tasks,
             course,
             today=_today(course.timezone),
         )
+        existing_assignments = _assignment_context(recent_course_tasks)
         extraction_cache_key = (
-            f"{self.settings.gemini_cache_key}|context:{_stable_hash(existing_assignments)[:16]}"
+            f"{self.settings.gemini_cache_key}"
+            f"|instructions:{_stable_hash(course.ai_instructions)[:16]}"
+            f"|context:{_stable_hash(existing_assignments)[:16]}"
         )
         sink.emit(
             RunStage.AUTHENTICATE_SERVICES,
@@ -238,6 +304,8 @@ class SyncService:
             metadata={
                 "scopes": ["Google Tasks", "Google Slides readonly"],
                 "source_acquisition": course.source.type,
+                "acquisition_strategy": acquisition_strategy.value,
+                "target_week_start": target_week_start.isoformat(),
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -257,6 +325,7 @@ class SyncService:
                 "page_hash": capture.page_hash,
                 "selection": capture.selection,
                 "capture_warnings": capture.source_metadata.get("warnings", []),
+                "acquisition_fallback": capture.source_metadata.get("acquisition_fallback"),
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -275,13 +344,19 @@ class SyncService:
             state_records = state.records(course_id, capture.source_key)
         extraction_was_cached = outcome is not None
         if outcome is None:
-            needs_image = course.source.extraction.mode in {
+            effective_mode = course.source.extraction.mode
+            if capture.source_metadata.get("screenshot_available") is False and effective_mode in {
+                ExtractionMode.AUTO,
+                ExtractionMode.HYBRID,
+            }:
+                effective_mode = ExtractionMode.TEXT
+            needs_image = effective_mode in {
                 ExtractionMode.IMAGE,
                 ExtractionMode.HYBRID,
                 ExtractionMode.AUTO,
             }
             if (
-                course.source.extraction.mode == ExtractionMode.AUTO
+                effective_mode == ExtractionMode.AUTO
                 and capture.source_metadata.get("screenshot_available") is False
             ):
                 needs_image = False
@@ -297,11 +372,39 @@ class SyncService:
                 fallback_models=self.settings.gemini_fallback_models,
                 api_key=os.getenv("GEMINI_API_KEY"),
             )
+            if isinstance(backend, GoogleGenAIBackend):
+                def wait_for_gemini_retry(seconds: float, attempts: list[str]) -> None:
+                    sink.emit(
+                        RunStage.EXTRACT_ASSIGNMENTS,
+                        "gemini_retry_wait",
+                        (
+                            f"Two Gemini model attempts failed. Waiting {seconds:g} seconds "
+                            "before retrying."
+                        ),
+                        level=EventLevel.WARNING,
+                        metadata={"wait_seconds": seconds, "attempts": attempts},
+                    )
+                    deadline = perf_counter() + seconds
+                    while True:
+                        token.raise_if_cancelled()
+                        remaining = deadline - perf_counter()
+                        if remaining <= 0:
+                            return
+                        sleep(min(1.0, remaining))
+
+                backend.retry_waiter = wait_for_gemini_retry
+            extraction_course = course.model_copy(deep=True)
+            extraction_course.source.extraction.mode = effective_mode
             outcome = GeminiExtractor(backend).extract(
                 capture,
-                course,
+                extraction_course,
                 existing_assignments=existing_assignments,
             )
+            if effective_mode != course.source.extraction.mode:
+                outcome.fallback_reasons.insert(
+                    0,
+                    "Canvas supplied sufficient agenda text; image acquisition was not required.",
+                )
         sink.emit(
             RunStage.EXTRACT_ASSIGNMENTS,
             "stage_completed",
@@ -349,12 +452,13 @@ class SyncService:
 
         stage_started = perf_counter()
         remote_hash = _remote_hash(remote_tasks)
+        tasklist_titles = [snapshot.title for snapshot in tasklists.values()]
         sink.emit(
             RunStage.COMPARE_GOOGLE_TASKS,
             "stage_completed",
-            f"Read Google Tasks list '{tasklist_title}'.",
+            f"Read Google Tasks lists {', '.join(repr(title) for title in tasklist_titles)}.",
             metadata={
-                "task_list": tasklist_title,
+                "task_lists": tasklist_titles,
                 "remote_task_count": len(remote_tasks),
                 "remote_hash": remote_hash,
                 "mapping_count": len(state_records),
@@ -367,7 +471,9 @@ class SyncService:
         plan = SyncPlanner().plan(
             course_id=course_id,
             source_key=capture.source_key,
-            task_list=tasklist_title,
+            task_list=primary_snapshot.title,
+            assessment_task_list=tasklists[course.assessment_task_list].title,
+            tasklist_ids={snapshot.title: snapshot.id for snapshot in tasklists.values()},
             extraction_mode=outcome.used_mode,
             fallback_reasons=outcome.fallback_reasons,
             drafts=drafts,
@@ -375,12 +481,14 @@ class SyncService:
             ignored=ignored,
             state_records=state_records,
             remote_tasks=remote_tasks,
+            collision_remote_tasks=recent_course_tasks,
+            course_prefix=course.prefix,
             include_past=include_past,
             dry_run=True,
         )
         plan_hash = _stable_hash(
             {
-                "version": 1,
+                "version": 2,
                 "config_hash": config_hash,
                 "page_hash": capture.page_hash,
                 "remote_hash": remote_hash,
@@ -399,9 +507,12 @@ class SyncService:
             course_id=course_id,
             course=course,
             source_key=capture.source_key,
-            tasklist_id=tasklist_id,
-            tasklist_title=tasklist_title,
+            tasklist_id=primary_snapshot.id,
+            tasklist_title=primary_snapshot.title,
+            tasklists=tasklists,
             configured_mode=course.source.extraction.mode,
+            target_week_start=target_week_start,
+            acquisition_strategy=acquisition_strategy,
             extraction_cache_key=extraction_cache_key,
             config_hash=config_hash,
             page_hash=capture.page_hash,
@@ -420,6 +531,8 @@ class SyncService:
     ) -> None:
         sink = progress or NullProgressSink()
         stage_started = perf_counter()
+        if prepared.version != 2 or not prepared.tasklists:
+            raise ValueError("This preview predates multi-list sync; create a new preview.")
         current_course = self.settings.course(prepared.course_id).model_copy(deep=True)
         if prepared.configured_mode:
             current_course.source.extraction.mode = prepared.configured_mode
@@ -427,15 +540,28 @@ class SyncService:
         if current_config_hash != prepared.config_hash:
             raise ValueError("Course configuration changed after this preview.")
         credentials = self.credentials_loader(self.settings.root_dir, interactive=False)
-        source = self.source_factory(current_course.source, credentials)
+        source = self.source_factory(
+            current_course,
+            credentials,
+            target_week_start=prepared.target_week_start,
+            acquisition_strategy=prepared.acquisition_strategy,
+        )
         current_capture = source.capture(include_image=False)
         tasks_client = self.tasks_client_factory(credentials)
-        tasklist_id, _ = tasks_client.resolve_task_list(current_course.task_list)
-        current_remote_hash = _remote_hash(tasks_client.list_tasks(tasklist_id))
+        current_tasklists, current_remote_tasks = _read_task_lists(tasks_client, current_course)
+        current_remote_hash = _remote_hash(current_remote_tasks)
         if current_capture.page_hash != prepared.page_hash:
             raise ValueError("The source page changed after this preview.")
         if current_remote_hash != prepared.remote_hash:
             raise ValueError("Google Tasks changed after this preview.")
+        if {
+            key: (snapshot.id, snapshot.remote_hash)
+            for key, snapshot in current_tasklists.items()
+        } != {
+            key: (snapshot.id, snapshot.remote_hash)
+            for key, snapshot in prepared.tasklists.items()
+        }:
+            raise ValueError("A configured Google Tasks list changed after this preview.")
         sink.emit(
             RunStage.REVALIDATE_PREVIEW,
             "stage_completed",
@@ -444,6 +570,7 @@ class SyncService:
                 "config_hash": current_config_hash,
                 "page_hash": current_capture.page_hash,
                 "remote_hash": current_remote_hash,
+                "task_lists": [snapshot.title for snapshot in current_tasklists.values()],
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -471,27 +598,33 @@ class SyncService:
                         SyncActionKind.CREATE,
                         SyncActionKind.UPDATE,
                         SyncActionKind.UNCHANGED,
+                        SyncActionKind.NOTES_CLEANUP,
                     }
                 ]
             completed_indexes: list[int] = []
             applied_counts: Counter[str] = Counter()
             state_path = self.settings.resolved_state_path
+            snapshots_by_title = {
+                snapshot.title: snapshot for snapshot in prepared.tasklists.values()
+            }
             with StateStore(state_path, writable=True) as state:
-                remote_by_id = {
-                    task.id: task
-                    for task in tasks_client.list_tasks(prepared.tasklist_id)
-                    if not task.deleted
-                }
                 for index, action in enumerate(writable_plan.actions):
                     if action.kind not in {
                         SyncActionKind.CREATE,
                         SyncActionKind.UPDATE,
                         SyncActionKind.UNCHANGED,
+                        SyncActionKind.NOTES_CLEANUP,
                     }:
                         continue
+                    if not action.task_list or action.task_list not in snapshots_by_title:
+                        raise RuntimeError(
+                            f"Action for '{action.title}' has no resolved destination list."
+                        )
+                    destination = snapshots_by_title[action.task_list]
                     single = SyncPlan(
                         course_id=writable_plan.course_id,
                         task_list=writable_plan.task_list,
+                        task_lists=writable_plan.task_lists,
                         dry_run=False,
                         extraction_mode=writable_plan.extraction_mode,
                         fallback_reasons=writable_plan.fallback_reasons,
@@ -500,7 +633,7 @@ class SyncService:
                     stage_started = perf_counter()
                     apply_sync_plan(
                         single,
-                        tasklist_id=prepared.tasklist_id,
+                        tasklist_id=destination.id,
                         tasks_client=tasks_client,
                         state=state,
                     )
@@ -516,15 +649,17 @@ class SyncService:
                                 "title": action.title,
                                 "remote_task_id": action.remote_task_id,
                                 "action_index": index,
+                                "task_list": action.task_list,
+                                "due_date": (
+                                    action.due_date.isoformat() if action.due_date else None
+                                ),
+                                "due_uncertain": action.due_uncertain,
+                                "due_uncertain_reason": action.due_uncertain_reason,
+                                "due_verified": action.due_verified,
                             }
                         ),
                         duration_ms=int((perf_counter() - stage_started) * 1000),
                     )
-                    if action.remote_task_id and action.remote_task_id not in remote_by_id:
-                        remote_by_id[action.remote_task_id] = RemoteTask(
-                            id=action.remote_task_id,
-                            title=action.title,
-                        )
                 if not prepared.extraction_was_cached:
                     state.cache_extraction(
                         course_id=prepared.course_id,

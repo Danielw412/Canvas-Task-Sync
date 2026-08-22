@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from canvas_task_sync.models import ExtractionMode, SyncPlan
+from canvas_task_sync.models import AcquisitionStrategy, ExtractionMode, SyncPlan, WeekSelection
 from canvas_task_sync.redaction import redact_text, sanitize
 from canvas_task_sync.web_models import (
     EventLevel,
@@ -26,7 +27,7 @@ from canvas_task_sync.web_models import (
     ScheduleUpdate,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id TEXT NOT NULL,
     course_id TEXT NOT NULL,
     trigger TEXT NOT NULL,
     requested_mode TEXT NOT NULL,
@@ -45,6 +47,9 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at TEXT,
     finished_at TEXT,
     extraction_mode TEXT,
+    week_selection TEXT NOT NULL DEFAULT 'this_week',
+    target_week_start TEXT,
+    acquisition_strategy TEXT NOT NULL DEFAULT 'auto',
     include_past INTEGER NOT NULL DEFAULT 0,
     test_rebase_week TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
@@ -142,6 +147,22 @@ class ControlStore:
             self.connection.execute("PRAGMA journal_mode = WAL")
             self.connection.execute("PRAGMA busy_timeout = 5000")
             self.connection.executescript(SCHEMA)
+            columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
+            for name, definition in (
+                ("week_selection", "TEXT NOT NULL DEFAULT 'this_week'"),
+                ("target_week_start", "TEXT"),
+                ("acquisition_strategy", "TEXT NOT NULL DEFAULT 'auto'"),
+                ("operation_id", "TEXT"),
+            ):
+                if name not in columns:
+                    self.connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+            self.connection.execute(
+                "UPDATE runs SET operation_id = 'legacy-run-' || id "
+                "WHERE operation_id IS NULL OR operation_id = ''"
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS runs_operation ON runs(operation_id, id)"
+            )
             self.connection.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -163,9 +184,13 @@ class ControlStore:
         self,
         *,
         course_id: str,
+        operation_id: str | None = None,
         trigger: RunTrigger,
         requested_mode: RunMode,
         extraction_mode: ExtractionMode | None = None,
+        week_selection: WeekSelection = WeekSelection.CURRENT,
+        target_week_start: date | None = None,
+        acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO,
         include_past: bool = False,
         test_rebase_week: date | None = None,
         schedule_id: int | None = None,
@@ -175,11 +200,13 @@ class ControlStore:
             cursor = self.connection.execute(
                 """
                 INSERT INTO runs(
-                    course_id, trigger, requested_mode, schedule_id, status, stage,
-                    created_at, extraction_mode, include_past, test_rebase_week
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    operation_id, course_id, trigger, requested_mode, schedule_id, status, stage,
+                    created_at, extraction_mode, week_selection, target_week_start,
+                    acquisition_strategy, include_past, test_rebase_week
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    operation_id or str(uuid.uuid4()),
                     course_id,
                     trigger.value,
                     requested_mode.value,
@@ -188,6 +215,9 @@ class ControlStore:
                     RunStage.QUEUED.value,
                     created_at,
                     extraction_mode.value if extraction_mode else None,
+                    week_selection.value,
+                    target_week_start.isoformat() if target_week_start else None,
+                    acquisition_strategy.value,
                     int(include_past),
                     test_rebase_week.isoformat() if test_rebase_week else None,
                 ),
@@ -423,6 +453,52 @@ class ControlStore:
         runs = self.list_runs(limit=1, course_id=course_id)
         return runs[0] if runs else None
 
+    def runs_for_operation(self, operation_id: str) -> list[RunSummary]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT * FROM runs WHERE operation_id = ? ORDER BY id",
+                (operation_id,),
+            ).fetchall()
+        return [self._run_summary_from_row(row) for row in rows]
+
+    def operation_events_after(
+        self,
+        operation_id: str,
+        event_id: int = 0,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT e.id, e.run_id, e.sequence, e.created_at, e.stage,
+                       e.event_type, e.level, e.message, e.metadata_json,
+                       e.duration_ms, r.course_id
+                  FROM run_events AS e
+                  JOIN runs AS r ON r.id = e.run_id
+                 WHERE r.operation_id = ? AND e.id > ?
+                 ORDER BY e.id
+                 LIMIT ?
+                """,
+                (operation_id, event_id, limit),
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "sequence": row["sequence"],
+                "course_id": row["course_id"],
+                "created_at": row["created_at"],
+                "stage": row["stage"],
+                "event_type": row["event_type"],
+                "level": row["level"],
+                "message": row["message"],
+                "metadata": _loads(row["metadata_json"], {}),
+                "duration_ms": row["duration_ms"],
+            }
+            for row in rows
+        ]
+
     def create_schedule(
         self,
         schedule: ScheduleCreate,
@@ -523,6 +599,14 @@ class ControlStore:
                  WHERE course_id = ? AND enabled = 1
                 """,
                 (_iso(utc_now()), course_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount
+
+    def delete_schedules_for_course(self, course_id: str) -> int:
+        with self._lock:
+            cursor = self.connection.execute(
+                "DELETE FROM schedules WHERE course_id = ?", (course_id,)
             )
             self.connection.commit()
             return cursor.rowcount
@@ -737,6 +821,7 @@ class ControlStore:
     def _run_summary_from_row(row: sqlite3.Row) -> RunSummary:
         return RunSummary(
             id=row["id"],
+            operation_id=row["operation_id"] or f"legacy-run-{row['id']}",
             course_id=row["course_id"],
             trigger=RunTrigger(row["trigger"]),
             requested_mode=RunMode(row["requested_mode"]),
@@ -748,6 +833,9 @@ class ControlStore:
             extraction_mode=(
                 ExtractionMode(row["extraction_mode"]) if row["extraction_mode"] else None
             ),
+            week_selection=WeekSelection(row["week_selection"]),
+            target_week_start=row["target_week_start"],
+            acquisition_strategy=AcquisitionStrategy(row["acquisition_strategy"]),
             counts=_loads(row["counts_json"], {}),
             applied_counts=_loads(row["applied_counts_json"], {}),
             plan_hash=row["plan_hash"],

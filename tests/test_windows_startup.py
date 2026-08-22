@@ -36,6 +36,8 @@ def test_windows_startup_entrypoint_forces_no_browser_and_logs(tmp_path, monkeyp
             "web",
             "--port",
             "8790",
+            "--simple-port",
+            "8791",
             "--no-open",
         ]
     ]
@@ -67,6 +69,10 @@ def test_windows_installer_uses_a_hidden_windowless_task_and_is_idempotent():
     assert "-Hidden" in installer
     assert "-MultipleInstances IgnoreNew" in installer
     assert "Stop-ScheduledTask" in installer
+    assert "canvas_task_sync.windows_startup" in installer
+    assert "Get-NetTCPConnection" in installer
+    assert "Stop-Process -Id $staleServer.ProcessId" in installer
+    assert "$listenerIsReplacement" in installer
     assert "Register-ScheduledTask" in installer
     assert "-Force" in installer
     assert "powershell.exe" not in installer
@@ -79,7 +85,10 @@ def test_startup_keeps_desktop_shortcut_and_remove_script_removes_task_and_short
     launcher = START_SCRIPT.read_text(encoding="utf-8")
 
     assert "Canvas Task Sync.url" in installer
+    assert "Canvas Task Sync Simple.url" in installer
+    assert "8791" in installer
     assert "Canvas Task Sync.url" in remover
+    assert "Canvas Task Sync Simple.url" in remover
     assert "Unregister-ScheduledTask" in remover
     assert "Remove-Item" in remover
     assert "--log-path" in launcher

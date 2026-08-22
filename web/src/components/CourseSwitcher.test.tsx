@@ -8,6 +8,8 @@ const settings: CourseView['settings'] = {
   name: 'Honors Spanish IV',
   prefix: 'SPANISH',
   task_list: 'School',
+  assessment_task_list: 'Tests',
+  ai_instructions: '',
   timezone: 'America/New_York',
   meeting_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
   source: {

@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from canvas_task_sync.configuration import CourseSettings
-from canvas_task_sync.gemini import normalized_text
+from canvas_task_sync.gemini import normalized_text, token_similarity
 from canvas_task_sync.models import (
     AgendaBlock,
     BlockRole,
@@ -16,6 +16,7 @@ from canvas_task_sync.models import (
     IgnoredItem,
     SourceCapture,
     TaskClassification,
+    TaskType,
     UncertainItem,
 )
 
@@ -44,6 +45,9 @@ ISO_DATE_PATTERN = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 MONTH_DAY_PATTERN = re.compile(
     rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<day>\d{{1,2}})(?:\s*,\s*(?P<year>\d{{4}}))?\b",
     re.IGNORECASE,
+)
+NUMERIC_MONTH_DAY_PATTERN = re.compile(
+    r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2}|\d{4}))?\b"
 )
 
 DAY_ALIASES = {
@@ -92,6 +96,7 @@ WEEKDAY_PATTERN = re.compile(
     r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
     re.IGNORECASE,
 )
+CANVAS_ASSIGNMENT_PATH_PATTERN = re.compile(r"/courses/\d+/assignments/\d+(?:/|$)")
 
 
 class AgendaDateError(ValueError):
@@ -132,7 +137,19 @@ def find_agenda_range(capture: SourceCapture) -> tuple[date, date] | None:
         parsed = parse_agenda_range(block.text)
         if parsed:
             return parsed
-    return parse_agenda_range(capture.transcript)
+    parsed = parse_agenda_range(capture.transcript)
+    if parsed:
+        return parsed
+
+    selected_week = capture.selection.get("week_start")
+    if isinstance(selected_week, str):
+        try:
+            start = date.fromisoformat(selected_week)
+        except ValueError:
+            pass
+        else:
+            return start, start + timedelta(days=6)
+    return None
 
 
 def _parse_day_label(label: str) -> tuple[int, int] | None:
@@ -202,32 +219,67 @@ def next_class_day(after: date, meeting_weekdays: list[int]) -> date:
     raise AgendaDateError("Could not find the next configured class day.")
 
 
+def _date_for_month_day(
+    month: int,
+    day: int,
+    *,
+    year: int | None,
+    source_date: date | None,
+) -> date | None:
+    if year is not None:
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    if source_date is None:
+        return None
+
+    candidates: list[date] = []
+    for candidate_year in (source_date.year - 1, source_date.year, source_date.year + 1):
+        try:
+            candidates.append(date(candidate_year, month, day))
+        except ValueError:
+            continue
+    return min(candidates, key=lambda value: abs((value - source_date).days), default=None)
+
+
+def _calendar_dates_in_text(text: str, source_date: date | None) -> set[date]:
+    dates: set[date] = set()
+    for match in ISO_DATE_PATTERN.finditer(text):
+        try:
+            dates.add(date(*(int(value) for value in match.groups())))
+        except ValueError:
+            continue
+    for match in MONTH_DAY_PATTERN.finditer(text):
+        parsed = _date_for_month_day(
+            MONTHS[match.group("month").casefold()],
+            int(match.group("day")),
+            year=int(match.group("year")) if match.group("year") else None,
+            source_date=source_date,
+        )
+        if parsed is not None:
+            dates.add(parsed)
+    for match in NUMERIC_MONTH_DAY_PATTERN.finditer(text):
+        parsed = _date_for_month_day(
+            int(match.group("month")),
+            int(match.group("day")),
+            year=int(match.group("year")) if match.group("year") else None,
+            source_date=source_date,
+        )
+        if parsed is not None:
+            dates.add(parsed)
+    return dates
+
+
 def _explicit_date(task: ExtractedTask, source_date: date | None) -> date | None:
     if not task.explicit_due_date:
         return None
-    try:
-        parsed = date.fromisoformat(task.explicit_due_date)
-    except ValueError:
-        return None
-
-    iso_match = ISO_DATE_PATTERN.search(task.source_text)
-    if iso_match and date(*(int(value) for value in iso_match.groups())) == parsed:
-        return parsed
-
-    for match in MONTH_DAY_PATTERN.finditer(task.source_text):
-        year = int(match.group("year")) if match.group("year") else None
-        if year is None:
-            if source_date is None:
-                continue
-            year = source_date.year
-        evidence_date = date(
-            year,
-            MONTHS[match.group("month").casefold()],
-            int(match.group("day")),
-        )
-        if evidence_date == parsed:
-            return parsed
-    return None
+    proposed_dates = _calendar_dates_in_text(task.explicit_due_date, source_date)
+    evidence_dates = _calendar_dates_in_text(task.source_text, source_date)
+    supported = proposed_dates & evidence_dates
+    return min(supported) if len(supported) == 1 else None
 
 
 def _explicit_weekday_date(
@@ -258,9 +310,62 @@ def _fingerprint(task: ExtractedTask) -> str:
             normalized_text(task.source_text),
             task.action_kind.value,
             normalized_text(task.title_stem),
+            task.task_type.value,
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _is_canvas_assignment_url(value: str) -> bool:
+    return bool(CANVAS_ASSIGNMENT_PATH_PATTERN.search(value))
+
+
+def _assignment_url(
+    task: ExtractedTask,
+    block: AgendaBlock,
+    capture: SourceCapture,
+) -> str | None:
+    raw_links = block.metadata.get("assignment_links", [])
+    links = [
+        (str(link.get("url", "")), str(link.get("text", "")))
+        for link in raw_links
+        if isinstance(link, dict) and _is_canvas_assignment_url(str(link.get("url", "")))
+    ]
+    links = list(dict.fromkeys(links))
+    if len(links) == 1:
+        url, link_text = links[0]
+        score = max(
+            token_similarity(task.source_text, link_text),
+            token_similarity(task.title_stem, link_text),
+        )
+        if score >= 0.45:
+            return url
+    if len(links) > 1:
+        ranked = sorted(
+            (
+                (
+                    max(
+                        token_similarity(task.source_text, link_text),
+                        token_similarity(task.title_stem, link_text),
+                    ),
+                    url,
+                )
+                for url, link_text in links
+                if link_text.strip()
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        if ranked:
+            runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+            if ranked[0][0] >= 0.55 and ranked[0][0] - runner_up >= 0.10:
+                return ranked[0][1]
+
+    if (
+        capture.source_metadata.get("canvas_kind") == "assignment"
+        and _is_canvas_assignment_url(capture.source_url)
+    ):
+        return capture.source_url
+    return None
 
 
 def _clean_title(prefix: str, title_stem: str) -> str:
@@ -268,6 +373,102 @@ def _clean_title(prefix: str, title_stem: str) -> str:
     existing_prefix = re.compile(rf"^\[{re.escape(prefix)}\]\s*", re.IGNORECASE)
     stem = existing_prefix.sub("", stem)
     return f"[{prefix}] {stem}"
+
+
+def _latest_contiguous_occurrence_date(
+    task: ExtractedTask,
+    block: AgendaBlock,
+    *,
+    blocks: list[AgendaBlock],
+    dates: dict[tuple[str, int], tuple[date, date]],
+    meeting_weekdays: list[int],
+) -> date | None:
+    """Return the end of the consecutive row run containing the extracted task.
+
+    Gemini may collapse a repeated homework instruction to its first row. Exact atomic
+    evidence lets application code recover all consecutive occurrences from the source.
+    A missing configured class day breaks the run, so a later recurrence remains a
+    separate assignment.
+    """
+
+    if block.row_index is None or block.role != BlockRole.ASSIGNMENTS:
+        return None
+    current_range = dates.get((block.element_id, block.row_index))
+    needle = normalized_text(task.source_text)
+    if current_range is None or len(needle.split()) < 3:
+        return current_range[1] if current_range else None
+
+    occurrences: set[tuple[date, date]] = set()
+    for candidate in blocks:
+        if (
+            candidate.role != BlockRole.ASSIGNMENTS
+            or candidate.element_id != block.element_id
+            or candidate.row_index is None
+            or (
+                block.column_index is not None
+                and candidate.column_index is not None
+                and candidate.column_index != block.column_index
+            )
+        ):
+            continue
+        candidate_range = dates.get((candidate.element_id, candidate.row_index))
+        if candidate_range and needle in normalized_text(candidate.text):
+            occurrences.add(candidate_range)
+
+    ordered = sorted(occurrences)
+    try:
+        current_index = ordered.index(current_range)
+    except ValueError:
+        return current_range[1]
+
+    run_end = current_index
+    while run_end + 1 < len(ordered):
+        previous = ordered[run_end]
+        following = ordered[run_end + 1]
+        if next_class_day(previous[1], meeting_weekdays) != following[0]:
+            break
+        run_end += 1
+    return ordered[run_end][1]
+
+
+def _collapse_continuing_drafts(
+    drafts: list[DraftTask],
+) -> tuple[list[DraftTask], list[IgnoredItem]]:
+    """Collapse duplicate candidates that resolve to one title and deadline."""
+
+    selected: dict[tuple[str, date | None, str, str], DraftTask] = {}
+    order: list[tuple[str, date | None, str, str]] = []
+    ignored: list[IgnoredItem] = []
+    for draft in drafts:
+        key = (
+            normalized_text(draft.title),
+            draft.due_date,
+            draft.task_type.value,
+            draft.action_kind.value,
+        )
+        previous = selected.get(key)
+        if previous is None:
+            selected[key] = draft
+            order.append(key)
+            continue
+        ranked = sorted(
+            (previous, draft),
+            key=lambda item: (item.source_date or date.min, item.source_anchor, item.ordinal),
+        )
+        discard, keep = ranked
+        selected[key] = keep
+        ignored.append(
+            IgnoredItem(
+                title=discard.title,
+                evidence=discard.source_text,
+                reason=(
+                    "Repeated homework occurrence collapsed after scheduling from the latest "
+                    "consecutive agenda row."
+                ),
+                source_anchor=discard.source_anchor,
+            )
+        )
+    return [selected[key] for key in order], ignored
 
 
 def build_draft_tasks(
@@ -297,7 +498,7 @@ def build_draft_tasks(
         candidate_key = (
             task.source_anchor,
             normalized_text(task.source_text),
-            task.action_kind.value,
+            f"{task.action_kind.value}:{task.task_type.value}",
         )
         if candidate_key in seen_candidates:
             duplicate_ignored.append(
@@ -352,8 +553,9 @@ def build_draft_tasks(
             is_same_day_action = task.action_kind in course.source.extraction.same_day_action_kinds
             explicit_weekday = _explicit_weekday_date(task.source_text, row_range)
             relation = task.due_relation
-            if explicit_weekday is None:
-                if is_same_day_action:
+            is_assessment = task.task_type in {TaskType.QUIZ, TaskType.TEST}
+            if explicit_weekday is None and relation != DueRelation.EXPLICIT_DATE:
+                if is_assessment or is_same_day_action:
                     relation = DueRelation.SAME_DAY
                 elif is_assignment and relation in {DueRelation.NONE, DueRelation.SAME_DAY}:
                     relation = course.source.extraction.assignments_default_due
@@ -371,6 +573,7 @@ def build_draft_tasks(
             deadline_bearing_classwork = (
                 relation == DueRelation.EXPLICIT_DATE
                 or is_same_day_action
+                or is_assessment
                 or explicit_weekday is not None
             )
             if (
@@ -388,63 +591,73 @@ def build_draft_tasks(
                 continue
 
             source_date = row_range[1] if row_range else None
+            if relation == DueRelation.NEXT_CLASS:
+                latest_occurrence = _latest_contiguous_occurrence_date(
+                    task,
+                    block,
+                    blocks=capture.blocks,
+                    dates=dates,
+                    meeting_weekdays=course.meeting_weekdays,
+                )
+                if latest_occurrence is not None and (
+                    source_date is None or latest_occurrence > source_date
+                ):
+                    source_date = latest_occurrence
             due_date: date | None = None
             due_basis = "No supported due date"
-            if explicit_weekday is not None:
-                due_date = explicit_weekday
-                due_basis = "Weekday explicitly stated in source evidence"
-            elif relation == DueRelation.EXPLICIT_DATE:
+            due_uncertain = False
+            due_uncertain_reason: str | None = None
+            if relation == DueRelation.EXPLICIT_DATE:
                 due_date = _explicit_date(task, source_date)
                 if due_date is None:
-                    uncertain.append(
-                        UncertainItem(
-                            title=task.title_stem,
-                            evidence=task.source_text,
-                            reason=(
-                                "The proposed explicit date is not present in the exact "
-                                "source evidence."
-                            ),
-                            source_anchor=anchor,
-                        )
+                    due_uncertain = True
+                    due_uncertain_reason = (
+                        "The proposed explicit date is not present in the exact source evidence."
                     )
-                    continue
-                due_basis = "Explicit date stated in source evidence"
+                    due_basis = "Due date uncertain"
+                else:
+                    due_basis = "Explicit date stated in source evidence"
+            elif explicit_weekday is not None:
+                due_date = explicit_weekday
+                due_basis = "Weekday explicitly stated in source evidence"
             elif relation == DueRelation.SAME_DAY:
                 if source_date is None:
-                    uncertain.append(
-                        UncertainItem(
-                            title=task.title_stem,
-                            evidence=task.source_text,
-                            reason="Same-day action could not be tied to a dated agenda row.",
-                            source_anchor=anchor,
-                        )
+                    due_uncertain = True
+                    due_uncertain_reason = (
+                        "Same-day action could not be tied to a dated agenda row."
                     )
-                    continue
-                due_date = source_date
-                due_basis = f"{task.action_kind.value} action due on its agenda row"
+                    due_basis = "Due date uncertain"
+                else:
+                    due_date = source_date
+                    due_basis = (
+                        "Assessment scheduled on its agenda row"
+                        if is_assessment
+                        else f"{task.action_kind.value} action due on its agenda row"
+                    )
             elif relation == DueRelation.NEXT_CLASS:
                 if source_date is None:
-                    uncertain.append(
-                        UncertainItem(
-                            title=task.title_stem,
-                            evidence=task.source_text,
-                            reason="Next-class work could not be tied to a dated agenda row.",
-                            source_anchor=anchor,
+                    due_uncertain = True
+                    due_uncertain_reason = (
+                        "Next-class work could not be tied to a dated agenda row."
+                    )
+                    due_basis = "Due date uncertain"
+                else:
+                    due_date = next_class_day(source_date, course.meeting_weekdays)
+                    due_basis = "Work with no stated date due next configured school day"
+                    if row_range and source_date > row_range[1]:
+                        due_basis = (
+                            "Repeated work due after its latest consecutive agenda occurrence"
                         )
-                    )
-                    continue
-                due_date = next_class_day(source_date, course.meeting_weekdays)
-                due_basis = "Work with no stated date due next configured school day"
-            elif effective_classification == TaskClassification.HOMEWORK:
-                uncertain.append(
-                    UncertainItem(
-                        title=task.title_stem,
-                        evidence=task.source_text,
-                        reason="Homework has no supported due-date relation.",
-                        source_anchor=anchor,
-                    )
+            elif is_assessment:
+                due_uncertain = True
+                due_uncertain_reason = (
+                    "Assessment could not be tied to an explicit date or dated agenda row."
                 )
-                continue
+                due_basis = "Due date uncertain"
+            elif effective_classification == TaskClassification.HOMEWORK:
+                due_uncertain = True
+                due_uncertain_reason = "Homework has no supported due-date relation."
+                due_basis = "Due date uncertain"
 
             if rebase_delta is not None:
                 if source_date is not None:
@@ -453,24 +666,40 @@ def build_draft_tasks(
                     due_date += rebase_delta
                 due_basis = f"{due_basis}; test week rebased"
 
+            title_stem = task.title_stem.strip()
+            if task.task_type == TaskType.QUIZ and not normalized_text(title_stem).endswith(
+                " quiz"
+            ):
+                title_stem = f"{title_stem} Quiz"
+            elif task.task_type == TaskType.TEST and not re.search(
+                r"\b(test|exam|midterm|final)$", normalized_text(title_stem)
+            ):
+                title_stem = f"{title_stem} Test"
+
             drafts.append(
                 DraftTask(
                     course_id=course_id,
                     source_key=capture.source_key,
                     source_url=capture.source_url,
+                    assignment_url=_assignment_url(task, block, capture),
                     source_anchor=anchor,
                     source_text=task.source_text,
                     ordinal=ordinal,
-                    title=_clean_title(course.prefix, task.title_stem),
+                    title=_clean_title(course.prefix, title_stem),
                     details=task.details,
                     classification=effective_classification,
+                    task_type=task.task_type,
                     action_kind=task.action_kind,
                     due_date=due_date,
                     due_basis=due_basis,
+                    due_uncertain=due_uncertain,
+                    due_uncertain_reason=due_uncertain_reason,
                     source_date=source_date,
                     historical=bool(due_date and due_date < today),
                     fingerprint=_fingerprint(task),
                 )
             )
 
+    drafts, continuing_ignored = _collapse_continuing_drafts(drafts)
+    ignored.extend(continuing_ignored)
     return drafts, uncertain, ignored

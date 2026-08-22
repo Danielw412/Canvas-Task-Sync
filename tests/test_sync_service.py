@@ -62,16 +62,18 @@ class FakeSource:
 class FakeTasks:
     def __init__(self) -> None:
         self.tasks: list[RemoteTask] = []
+        self.test_tasks: list[RemoteTask] = []
         self.created: list[str] = []
         self.fail_on_create: int | None = None
 
-    def resolve_task_list(self, _title: str):
-        return "list-1", "School"
+    def resolve_task_list(self, title: str):
+        return ("list-2", "Tests") if title.casefold() == "tests" else ("list-1", "School")
 
-    def list_tasks(self, _tasklist_id: str):
-        return [task.model_copy(deep=True) for task in self.tasks]
+    def list_tasks(self, tasklist_id: str):
+        source = self.test_tasks if tasklist_id == "list-2" else self.tasks
+        return [task.model_copy(deep=True) for task in source]
 
-    def create_task(self, _tasklist_id: str, *, title: str, notes: str, due_date):
+    def create_task(self, tasklist_id: str, *, title: str, notes: str, due_date):
         if self.fail_on_create is not None and len(self.created) + 1 == self.fail_on_create:
             raise RuntimeError("provider rejected the second write")
         task = RemoteTask(
@@ -81,8 +83,19 @@ class FakeTasks:
             due=due_date.isoformat() if due_date else None,
         )
         self.created.append(title)
-        self.tasks.append(task)
+        (self.test_tasks if tasklist_id == "list-2" else self.tasks).append(task)
         return task
+
+    def verify_due(self, tasklist_id: str, task_id: str, due_date):
+        task = next(task for task in self.list_tasks(tasklist_id) if task.id == task_id)
+        assert task.due[:10] == due_date.isoformat() if due_date else task.due is None
+        return task
+
+    def update_notes(self, tasklist_id: str, task_id: str, notes: str):
+        source = self.test_tasks if tasklist_id == "list-2" else self.tasks
+        task = next(task for task in source if task.id == task_id)
+        task.notes = notes
+        return task.model_copy(deep=True)
 
     def update_task(self, *_args, **_kwargs):
         raise AssertionError("This fixture should not produce updates.")
@@ -147,6 +160,43 @@ def test_prepare_emits_stages_in_order_without_writing_state(
     assert len(prepared.plan_hash) == 64
     assert backend.calls == 1
     assert not service.settings.resolved_state_path.exists()
+
+
+def test_course_ai_instructions_change_prompt_and_extraction_cache_key(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, _tasks, backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    first = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    service.settings.courses["spanish"].ai_instructions = (
+        "Do not create homework tasks for reading assignments."
+    )
+    second = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+
+    assert first.extraction_cache_key != second.extraction_cache_key
+    assert "Do not create homework tasks for reading assignments." not in str(
+        backend.kwargs[0]["prompt"]
+    )
+    assert "Do not create homework tasks for reading assignments." in str(
+        backend.kwargs[1]["prompt"]
+    )
 
 
 def test_cancellation_takes_effect_between_stages(
@@ -268,6 +318,38 @@ def test_partial_failure_keeps_completed_identity_mapping(
     assert records[0].google_task_id == "remote-1"
 
 
+def test_failed_due_verification_keeps_new_remote_identity_mapping(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+
+    def fail_verification(*_args, **_kwargs):
+        raise RuntimeError("server omitted due date")
+
+    tasks.verify_due = fail_verification
+    with pytest.raises(RuntimeError, match="server omitted due date"):
+        service.apply(prepared)
+
+    with StateStore(service.settings.resolved_state_path, writable=False) as state:
+        records = state.records("spanish", prepared.source_key)
+    assert len(records) == 1
+    assert records[0].google_task_id == "remote-1"
+
+
 def test_prepare_feeds_unfinished_and_recent_completed_class_tasks_to_gemini(
     tmp_path,
     spanish_course,
@@ -287,15 +369,30 @@ def test_prepare_feeds_unfinished_and_recent_completed_class_tasks_to_gemini(
             id="recent",
             title="[SPANISH] Submit class activity",
             status="completed",
-            completed=(now - timedelta(days=10)).isoformat(),
+            completed=(now - timedelta(days=14) + timedelta(minutes=1)).isoformat(),
         ),
         RemoteTask(
             id="old",
             title="[SPANISH] Old worksheet",
             status="completed",
-            completed=(now - timedelta(days=11)).isoformat(),
+            completed=(now - timedelta(days=15)).isoformat(),
         ),
         RemoteTask(id="other", title="[MATH] VHL practice", status="needsAction"),
+        RemoteTask(id="near-prefix", title="[SPANISHISH] Wrong class", status="needsAction"),
+        RemoteTask(
+            id="hidden-recent",
+            title="[SPANISH] Hidden recent completion",
+            status="completed",
+            hidden=True,
+            completed=(now - timedelta(days=2)).isoformat(),
+        ),
+    ]
+    tasks.test_tasks = [
+        RemoteTask(
+            id="assessment",
+            title="[SPANISH] Preterite Quiz",
+            due="2026-08-21T00:00:00.000Z",
+        )
     ]
 
     service.prepare(
@@ -307,5 +404,10 @@ def test_prepare_feeds_unfinished_and_recent_completed_class_tasks_to_gemini(
     prompt = str(backend.kwargs[0]["prompt"])
     assert "[SPANISH] VHL practice" in prompt
     assert "[SPANISH] Submit class activity" in prompt
+    assert "[SPANISH] Preterite Quiz" in prompt
+    assert "[SPANISH] Hidden recent completion" in prompt
+    assert "list Tests" in prompt
+    assert "due 2026-08-21" in prompt
     assert "Old worksheet" not in prompt
     assert "[MATH]" not in prompt
+    assert "[SPANISHISH]" not in prompt

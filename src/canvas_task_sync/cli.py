@@ -10,11 +10,12 @@ from pathlib import Path
 from canvas_task_sync.app import authorize, default_config_path, run_doctor, run_sync
 from canvas_task_sync.configuration import load_settings
 from canvas_task_sync.models import ExtractionMode, SyncActionKind, SyncPlan
-from canvas_task_sync.web_constants import DEFAULT_WEB_PORT
+from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 
 DISPLAY_ORDER = [
     SyncActionKind.CREATE,
     SyncActionKind.UPDATE,
+    SyncActionKind.NOTES_CLEANUP,
     SyncActionKind.UNCHANGED,
     SyncActionKind.UNCERTAIN,
     SyncActionKind.IGNORED,
@@ -80,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Loopback port for the web control center (default: {DEFAULT_WEB_PORT}).",
     )
     web.add_argument(
+        "--simple-port",
+        type=int,
+        default=DEFAULT_SIMPLE_WEB_PORT,
+        help=f"Loopback port for the simple sync UI (default: {DEFAULT_SIMPLE_WEB_PORT}).",
+    )
+    web.add_argument(
         "--no-open",
         action="store_true",
         help="Do not open the control center in the default browser.",
@@ -97,7 +104,8 @@ def plan_as_json(plan: SyncPlan) -> str:
 def render_plan(plan: SyncPlan) -> str:
     operation = "DRY RUN (no writes)" if plan.dry_run else "APPLY"
     lines = [
-        f"{operation} — course={plan.course_id} list={plan.task_list} "
+        f"{operation} — course={plan.course_id} "
+        f"lists={','.join(plan.task_lists or [plan.task_list])} "
         f"extraction={plan.extraction_mode.value}"
     ]
     if plan.fallback_reasons:
@@ -111,7 +119,8 @@ def render_plan(plan: SyncPlan) -> str:
             continue
         for action in actions:
             due = action.due_date.isoformat() if action.due_date else "no due date"
-            lines.append(f"  - {action.title} — {due}")
+            destination = f" · {action.task_list}" if action.task_list else ""
+            lines.append(f"  - {action.title} — {due}{destination}")
             lines.append(f"    {action.reason}")
             if action.evidence and kind in {SyncActionKind.UNCERTAIN, SyncActionKind.IGNORED}:
                 evidence = " ".join(action.evidence.split())
@@ -150,9 +159,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "web":
             if not 1 <= args.port <= 65535:
                 parser.error("--port must be between 1 and 65535")
+            if not 1 <= args.simple_port <= 65535 or args.simple_port == args.port:
+                parser.error("--simple-port must be a different port between 1 and 65535")
             from canvas_task_sync.server import run_web_server
 
-            run_web_server(args.config, port=args.port, open_browser=not args.no_open)
+            run_web_server(
+                args.config,
+                port=args.port,
+                simple_port=args.simple_port,
+                open_browser=not args.no_open,
+            )
             return 0
     except (FileNotFoundError, RuntimeError, ValueError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

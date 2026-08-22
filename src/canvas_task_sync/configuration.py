@@ -140,8 +140,13 @@ class BrowserSourceSettings(BaseModel):
         return self
 
 
+class NoFallbackSourceSettings(BaseModel):
+    type: Literal["none"] = "none"
+    extraction: ExtractionSettings = Field(default_factory=ExtractionSettings)
+
+
 SourceSettings = Annotated[
-    GoogleSlidesSourceSettings | BrowserSourceSettings,
+    GoogleSlidesSourceSettings | BrowserSourceSettings | NoFallbackSourceSettings,
     Field(discriminator="type"),
 ]
 
@@ -151,9 +156,42 @@ class CourseSettings(BaseModel):
     name: str
     prefix: str
     task_list: str
+    assessment_task_list: str = "Tests"
+    ai_instructions: str = ""
     timezone: str = "America/New_York"
     meeting_days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
+    canvas_course_id: str | None = None
+    canvas_base_url: str | None = None
     source: SourceSettings
+
+    @model_validator(mode="after")
+    def validate_agenda_sources(self) -> CourseSettings:
+        if self.source.type == "none" and not self.canvas_course_id:
+            raise ValueError("canvas_course_id is required when no fallback source is configured")
+        return self
+
+    @field_validator("canvas_course_id")
+    @classmethod
+    def validate_canvas_course_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not re.fullmatch(r"\d+", normalized):
+            raise ValueError("canvas_course_id must contain only digits")
+        return normalized
+
+    @field_validator("canvas_base_url")
+    @classmethod
+    def validate_canvas_base_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("canvas_base_url must be an http(s) Canvas origin")
+        return normalized
 
     @field_validator("meeting_days")
     @classmethod
@@ -166,11 +204,16 @@ class CourseSettings(BaseModel):
             raise ValueError("meeting_days cannot be empty")
         return normalized
 
-    @field_validator("name", "prefix", "task_list")
+    @field_validator("name", "prefix", "task_list", "assessment_task_list")
     @classmethod
     def validate_required_text(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("value cannot be empty")
+        return value.strip()
+
+    @field_validator("ai_instructions")
+    @classmethod
+    def normalize_ai_instructions(cls, value: str) -> str:
         return value.strip()
 
     @field_validator("timezone")

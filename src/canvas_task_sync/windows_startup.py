@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from canvas_task_sync import cli
-from canvas_task_sync.web_constants import DEFAULT_WEB_PORT
+from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -21,6 +21,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--log-path", type=Path, required=True)
     parser.add_argument("--port", type=int, default=DEFAULT_WEB_PORT)
+    parser.add_argument("--simple-port", type=int, default=DEFAULT_SIMPLE_WEB_PORT)
     return parser
 
 
@@ -66,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
                     "web",
                     "--port",
                     str(args.port),
+                    "--simple-port",
+                    str(args.simple_port),
                     "--no-open",
                 ]
             )

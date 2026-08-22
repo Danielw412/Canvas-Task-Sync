@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import date, time
 from typing import Any
 
 REDACTED = "[REDACTED]"
@@ -48,6 +49,11 @@ def sanitize(value: Any, *, known_secrets: Sequence[str] = ()) -> Any:
         return output
     if isinstance(value, bytes):
         return f"[BINARY {len(value)} bytes]"
+    # Event metadata is persisted with json.dumps. Python date/datetime/time
+    # values are not JSON serializable, so normalize them at the same boundary
+    # where secrets are redacted.
+    if isinstance(value, (date, time)):
+        return value.isoformat()
     if isinstance(value, str):
         return redact_text(value, known_secrets=known_secrets)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

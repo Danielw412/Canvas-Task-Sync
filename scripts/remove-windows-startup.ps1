@@ -22,8 +22,12 @@ if ($null -ne $task) {
 }
 
 $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Canvas Task Sync.url"
+$simpleShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Canvas Task Sync Simple.url"
 if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
     Remove-Item -LiteralPath $shortcutPath -Force
+}
+if (Test-Path -LiteralPath $simpleShortcutPath -PathType Leaf) {
+    Remove-Item -LiteralPath $simpleShortcutPath -Force
 }
 
 Write-Host "Canvas Task Sync no longer starts automatically."

@@ -69,6 +69,15 @@ class ConfigurationService:
         self._write_and_validate(document)
         return self.load()
 
+    def delete_course(self, course_id: str) -> ProjectSettings:
+        document = self._document()
+        courses = document.setdefault("courses", {})
+        if course_id not in courses:
+            raise ValueError(f"Course '{course_id}' does not exist.")
+        del courses[course_id]
+        self._write_and_validate(document)
+        return self.load()
+
     def sanitized_document(self) -> dict[str, Any]:
         document = self._document()
         return json.loads(json.dumps(document))
@@ -146,7 +155,7 @@ class ConfigurationService:
 
 
 def _quote_env(value: str) -> str:
-    if not value or any(character.isspace() or character in {'#', '"', "'"} for character in value):
+    if not value or any(character.isspace() or character in {"#", '"', "'"} for character in value):
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     return value
@@ -157,6 +166,9 @@ def _merge_mapping(target: Any, source: dict[str, Any]) -> None:
     for key, value in source.items():
         existing = target.get(key) if hasattr(target, "get") else None
         if isinstance(value, dict) and hasattr(existing, "items"):
-            _merge_mapping(existing, value)
+            if "type" in value and existing.get("type") != value["type"]:
+                target[key] = value
+            else:
+                _merge_mapping(existing, value)
         else:
             target[key] = value

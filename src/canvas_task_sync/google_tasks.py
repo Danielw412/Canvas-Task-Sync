@@ -115,10 +115,12 @@ class GoogleTasksClient:
         tasklist_id: str,
         *,
         title: str,
-        notes: str,
+        notes: str = "",
         due_date: date | None,
     ) -> RemoteTask:
-        body: dict[str, Any] = {"title": title, "notes": notes}
+        body: dict[str, Any] = {"title": title}
+        if notes:
+            body["notes"] = notes
         if due_date:
             body["due"] = google_due(due_date)
         try:
@@ -132,6 +134,67 @@ class GoogleTasksClient:
         return RemoteTask(
             id=str(item["id"]),
             title=str(item.get("title", title)),
+            notes=str(item.get("notes", notes)),
+            due=item.get("due"),
+            status=str(item.get("status", "needsAction")),
+            completed=item.get("completed"),
+        )
+
+    def get_task(self, tasklist_id: str, task_id: str) -> RemoteTask:
+        try:
+            item = self.service.tasks().get(tasklist=tasklist_id, task=task_id).execute()
+        except Exception as error:
+            raise GoogleTasksError(f"Could not verify Google Task '{task_id}'.") from error
+        return RemoteTask(
+            id=str(item.get("id", task_id)),
+            title=str(item.get("title", "")),
+            notes=str(item.get("notes", "")),
+            due=item.get("due"),
+            status=str(item.get("status", "needsAction")),
+            completed=item.get("completed"),
+            deleted=bool(item.get("deleted", False)),
+            hidden=bool(item.get("hidden", False)),
+        )
+
+    def patch_due(self, tasklist_id: str, task_id: str, due_date: date | None) -> None:
+        try:
+            self.service.tasks().patch(
+                tasklist=tasklist_id,
+                task=task_id,
+                body={"due": google_due(due_date)},
+            ).execute()
+        except Exception as error:
+            raise GoogleTasksError(
+                f"Could not repair the due date for task '{task_id}'."
+            ) from error
+
+    def verify_due(self, tasklist_id: str, task_id: str, due_date: date | None) -> RemoteTask:
+        verified = self.get_task(tasklist_id, task_id)
+        if date_from_google_due(verified.due) == due_date:
+            return verified
+        self.patch_due(tasklist_id, task_id, due_date)
+        verified = self.get_task(tasklist_id, task_id)
+        if date_from_google_due(verified.due) != due_date:
+            expected = due_date.isoformat() if due_date else "no due date"
+            actual = date_from_google_due(verified.due)
+            raise GoogleTasksError(
+                f"Google Task '{task_id}' did not retain due date {expected}; "
+                f"server returned {actual.isoformat() if actual else 'no due date'}."
+            )
+        return verified
+
+    def update_notes(self, tasklist_id: str, task_id: str, notes: str) -> RemoteTask:
+        try:
+            item = self.service.tasks().patch(
+                tasklist=tasklist_id,
+                task=task_id,
+                body={"notes": notes},
+            ).execute()
+        except Exception as error:
+            raise GoogleTasksError(f"Could not clean notes for Google Task '{task_id}'.") from error
+        return RemoteTask(
+            id=str(item.get("id", task_id)),
+            title=str(item.get("title", "")),
             notes=str(item.get("notes", notes)),
             due=item.get("due"),
             status=str(item.get("status", "needsAction")),

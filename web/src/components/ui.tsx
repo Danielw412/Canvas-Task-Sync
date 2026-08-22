@@ -50,6 +50,7 @@ export function StatusLabel({ status }: { status: RunStatus }) {
 export function ActionMark({ kind }: { kind: SyncActionKind }) {
   if (kind === 'create') return <span className="action-mark action-mark--create"><span>+</span>Create</span>
   if (kind === 'update') return <span className="action-mark action-mark--update"><span>↗</span>Update</span>
+  if (kind === 'notes_cleanup') return <span className="action-mark action-mark--update"><span>↗</span>Clean notes</span>
   if (['uncertain', 'remote_missing', 'source_missing', 'historical_blocked'].includes(kind)) {
     return <span className="action-mark action-mark--attention"><AlertTriangle size={15} />Needs attention</span>
   }

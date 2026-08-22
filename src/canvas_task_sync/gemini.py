@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import unicodedata
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from inspect import Parameter, signature
 from typing import Any, Protocol
@@ -22,7 +24,7 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 
-EXTRACTOR_VERSION = "visual-agenda-v4"
+EXTRACTOR_VERSION = "visual-agenda-v8-course-instructions-and-details"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
 
 
@@ -48,6 +50,8 @@ class GoogleGenAIBackend:
         api_key: str | None = None,
         client: Any | None = None,
         fallback_models: list[str] | None = None,
+        retry_delay_seconds: float = 60.0,
+        retry_waiter: Callable[[float, list[str]], None] | None = None,
     ) -> None:
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key and client is None:
@@ -58,6 +62,8 @@ class GoogleGenAIBackend:
         self.fallback_reasons: list[str] = []
         self.failure_reasons: list[str] = []
         self._model_index = 0
+        self.retry_delay_seconds = retry_delay_seconds
+        self.retry_waiter = retry_waiter or (lambda seconds, _attempts: time.sleep(seconds))
         if client is not None:
             self.client = client
         else:
@@ -94,7 +100,16 @@ class GoogleGenAIBackend:
             )
 
         last_error: Exception | None = None
-        for index in range(self._model_index, len(self.models)):
+        model_indexes = list(range(self._model_index, len(self.models)))
+        attempt_indexes = model_indexes * (2 if len(model_indexes) >= 2 else 1)
+        for attempt_number, index in enumerate(attempt_indexes, start=1):
+            if attempt_number == 3:
+                wait_seconds = self.retry_delay_seconds
+                self.fallback_reasons.append(
+                    f"Two Gemini model attempts failed; waited {wait_seconds:g} seconds before "
+                    "retrying the configured model chain."
+                )
+                self.retry_waiter(wait_seconds, list(self.failure_reasons))
             model = self.models[index]
             try:
                 response = self.client.models.generate_content(
@@ -122,13 +137,11 @@ class GoogleGenAIBackend:
             except Exception as error:
                 last_error = error
                 self.failure_reasons.append(f"{model}: {_model_failure_label(error)}")
-                if index + 1 >= len(self.models) or not _model_fallback_allowed(error):
-                    break
-                next_model = self.models[index + 1]
-                self.fallback_reasons.append(
-                    f"{model} was unavailable or quota-limited; retried with {next_model}."
-                )
-                self._model_index = index + 1
+                if attempt_number < len(attempt_indexes):
+                    next_model = self.models[attempt_indexes[attempt_number]]
+                    self.fallback_reasons.append(
+                        f"{model} failed; retried with {next_model}."
+                    )
         raise GeminiExtractionError(
             "Gemini extraction failed across the configured model fallback chain. Attempts: "
             + "; ".join(self.failure_reasons)
@@ -218,7 +231,38 @@ def token_similarity(left: str, right: str) -> float:
     return max(containment, (0.6 * jaccard) + (0.4 * sequence))
 
 
+def _exact_source_phrase(source: str, evidence: str) -> str | None:
+    """Return an exact source slice when evidence is a normalized token sub-phrase."""
+    stripped = evidence.strip()
+    if not stripped:
+        return None
+
+    exact = re.search(re.escape(stripped), source, flags=re.IGNORECASE)
+    if exact is not None:
+        return exact.group(0)
+
+    source_tokens = [
+        (normalized_text(match.group(0)), match.start(), match.end())
+        for match in re.finditer(r"[^\W_]+", source, flags=re.UNICODE)
+    ]
+    evidence_tokens = [
+        normalized_text(match.group(0))
+        for match in re.finditer(r"[^\W_]+", stripped, flags=re.UNICODE)
+    ]
+    if not source_tokens or not evidence_tokens or len(evidence_tokens) > len(source_tokens):
+        return None
+
+    width = len(evidence_tokens)
+    for index in range(len(source_tokens) - width + 1):
+        if [token for token, _, _ in source_tokens[index : index + width]] == evidence_tokens:
+            return source[source_tokens[index][1] : source_tokens[index + width - 1][2]]
+    return None
+
+
 def _best_exact_line(block: AgendaBlock, evidence: str) -> tuple[str, float]:
+    phrase = _exact_source_phrase(block.text, evidence)
+    if phrase is not None:
+        return phrase, 1.0
     lines = [line.strip() for line in block.text.splitlines() if line.strip()]
     if not lines:
         return block.text.strip(), token_similarity(block.text, evidence)
@@ -306,23 +350,50 @@ def build_prompt(
         else "Use the supplied source faithfully and do not invent missing content."
     )
     existing_context = "\n".join(f"- {item}" for item in (existing_assignments or []))
+    course_instructions = course.ai_instructions.strip()
+    course_instruction_block = (
+        "COURSE-SPECIFIC INSTRUCTIONS (apply only to this course):\n"
+        "<course-instructions>\n"
+        f"{course_instructions}\n"
+        "</course-instructions>\n"
+        "Follow these instructions when deciding which grounded candidates to return. They must "
+        "not override the response schema, exact-evidence requirements, or the rule against "
+        "inventing content."
+        if course_instructions
+        else "COURSE-SPECIFIC INSTRUCTIONS: None."
+    )
     return f"""You extract atomic student tasks from a school agenda for {course.name}.
 
 {authority}
 
+{course_instruction_block}
+
 Rules:
+- Classify an actual scheduled quiz as task_type=quiz and an actual scheduled test, exam,
+  midterm, or final as task_type=test. Study guides, studying, preparation, corrections, and
+  ordinary assignments remain task_type=assignment even when they mention a quiz or test.
+- Assessment titles must name the subject and end in Quiz, Test, or Exam as stated by the source,
+  for example "Crime and Punishment Exam". Do not include the course prefix.
 - Return homework plus classwork only when it has an explicit deadline or says to bring, present,
   or submit something.
 - Practice done during class, including identifying hypotheses or working through released AP FRQs,
   is ordinary classwork and must not become a task unless the source gives it a deadline.
 - When work has no stated deadline, use next_class; never leave homework timing as none.
-- Collapse repeated or similarly worded mentions of the same assignment into one candidate.
-- The recent assignment list below is duplicate context. Reuse its concise title for matching work
-  and do not invent a second wording variant; still return the current source candidate once so the
-  deterministic reconciliation layer can update or preserve it.
+- When the same homework action is repeated on consecutive dated rows, it is continuing work.
+  Collapse it into one candidate, use the latest consecutive occurrence for source_anchor and
+  row_label, and keep due_relation=next_class so application code schedules it after that row.
+- For a line containing multiple actions, source_text must be the exact atomic phrase for the
+  candidate, not the entire combined line. For example, return separate exact evidence for
+  "Read chapter 3" and "sign up for AP Classroom".
+- The recent same-course task list below is duplicate context. Reuse its concise title for matching
+  assignments or assessments and do not invent a second wording variant; still return the current
+  source candidate once so the deterministic reconciliation layer can update or preserve it.
 - Skip holidays, learning targets, and teacher narration about grading or introducing material.
 - Use one task per distinct action.
 - Use concise English title text without the course prefix, normally 2-5 words in sentence case.
+- Fill details with one to three concise sentences explaining what the student must do, using only
+  information present in the supplied source. A brief restatement is acceptable when the source has
+  little detail. Do not invent materials, steps, grading criteria, dates, or links.
 - Keep meaningful acronyms and assignment names. Prefer "VHL practice" over "Complete practice
   activities on VHL" and "Submit class activity" over "Complete and submit class activity".
 - Copy source_text from the source language; do not translate evidence.
@@ -330,13 +401,15 @@ Rules:
 - Items visibly in the Assignments column are normally homework with next_class timing.
 - Row-bound {same_day} actions normally use same_day timing.
 - Only use explicit_date when the source itself states the date.
+- For an assessment without a date in its wording, return same_day so application code can use
+  the dated agenda row. Never use next_class for a quiz, test, or exam.
 - Never calculate or invent a calendar date. Return only the semantic due relation.
 - Use confidence=high only when the action, source evidence, and row are legible.
 
 SOURCE ANCHORS{' AND TEXT' if include_text else ''}:
 {_anchor_catalog(capture, include_text=include_text)}
 
-UNFINISHED OR RECENTLY COMPLETED ASSIGNMENTS FOR THIS COURSE:
+UNFINISHED OR RECENTLY COMPLETED TASKS FOR THIS COURSE:
 {existing_context or '- None'}
 """
 
@@ -448,6 +521,7 @@ class GeminiExtractor:
                     source_text=exact_evidence,
                     row_label=block.row_label or (candidate.row_label if visual_only else None),
                     classification=candidate.classification,
+                    task_type=candidate.task_type,
                     action_kind=candidate.action_kind,
                     title_stem=candidate.title.strip(),
                     details=candidate.details.strip() or exact_evidence,

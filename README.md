@@ -1,7 +1,7 @@
 # Canvas Task Sync
 
-Canvas Task Sync turns visually structured course agendas into deterministic Google Tasks. The
-first configured source is the Honors Spanish IV Google Slide. An optional Chrome extension can
+Canvas Task Sync turns Canvas and visually structured course agendas into deterministic Google Tasks.
+The first configured fallback source is the Honors Spanish IV Google Slide. An optional Chrome extension can
 also capture selected Google Slides, Docs, and Sheets through the user's existing browser session.
 Source capture, Gemini
 interpretation, deadline policy, identity, and Google reconciliation are separate modules so Canvas
@@ -12,15 +12,17 @@ is present.
 
 ## What it does
 
-- Reads only the configured Google Slides page with `presentations.pages.get`.
+- Searches Canvas course modules, pages, assignments, the syllabus, and home page first.
+- Reads only the configured Google Slides fallback page with `presentations.pages.get`.
 - Downloads a `LARGE` PNG with `presentations.pages.getThumbnail` when the selected mode needs it.
   The temporary URL is consumed immediately and is never logged or stored.
 - Sends an image, anchor-labeled exact page text, or both to Gemini using a structured response.
 - Uses application code—not Gemini—to calculate next-class and same-row deadlines.
-- Reconciles concise `[SPANISH] …` tasks against the existing `School` list.
-- Preserves exact Spanish evidence and useful assignment details in a delimited managed notes block.
-- Preserves completion state and notes written outside that block.
-- Uses UUIDv5 source identities, managed markers, and ignored SQLite state to make repeated runs safe.
+- Reconciles concise `[SPANISH] …` assignments against `School` and assessments against `Tests`.
+- Keeps sync identities and source evidence in ignored local SQLite state instead of task notes.
+- Preserves completion state and user-authored notes while removing legacy managed note blocks.
+- Uses UUIDv5 source identities, same-class history, and local state to make repeated runs safe.
+- Lets each web preview target Previous Week, This Week (default), or Next Week.
 - Never automatically deletes a task, recreates a remotely deleted task, or claims an unmanaged
   title/date collision.
 
@@ -69,6 +71,8 @@ courses:
     name: Honors Spanish IV
     prefix: SPANISH
     task_list: School
+    assessment_task_list: Tests
+    ai_instructions: Keep workbook and online practice as separate tasks.
     timezone: America/New_York
     meeting_days: [mon, tue, wed, thu, fri]
     source:
@@ -81,6 +85,42 @@ courses:
         assignments_default_due: next_class
         same_day_action_kinds: [bring, present, submit]
 ```
+
+A Canvas-only course needs no fallback URL:
+
+```yaml
+courses:
+  canvas12604:
+    name: AP English 4 Literature & Composition
+    prefix: ENGLISH
+    task_list: School
+    assessment_task_list: Tests
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    canvas_course_id: '12604'
+    source:
+      type: none
+      extraction:
+        mode: text
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]
+```
+
+`canvas_course_id` enables API-first agenda discovery. The app reads `CANVAS_BASE_URL` and
+`CANVAS_TOKEN` from `.env`; `source` can be a direct API fallback, a browser fallback, or
+`type: none` for Canvas-only acquisition. The example configuration uses Canvas course IDs
+`12604`, `11126`, `11517`, and `12506`. The run UI can force Canvas-only or the configured fallback
+when troubleshooting.
+
+`ai_instructions` is optional free-form guidance applied only to that course's Gemini extraction.
+For example, one course can say `Do not create homework tasks for reading assignments` without
+changing how any other course is interpreted. Editing the guidance invalidates that course's
+extraction cache.
+
+Week matching is start-date based. A target week beginning August 17 accepts headings such as
+`Week of August 17`, `August 17-21`, and `Week of August 17 to August 20`; an incorrect range end
+does not disqualify an otherwise strong match. Internal Canvas page and assignment links are
+followed through same-origin API endpoints, and the bearer token is never sent to external links.
 
 Extraction modes:
 
@@ -98,7 +138,7 @@ An unreconciled image/text disagreement is reported as uncertain and is never sy
 ## Usage
 
 ```powershell
-# Read source, call Gemini, reconcile all pages of School, and print zero-write actions.
+# Read source, call Gemini, reconcile School and Tests, and print zero-write actions.
 canvas-task-sync sync --course spanish
 
 # Same plan as JSON.
@@ -126,8 +166,8 @@ Start the single-user control center on the loopback interface:
 # Opens http://127.0.0.1:8790 in the default browser.
 canvas-task-sync web
 
-# Choose another loopback port or leave browser opening to yourself.
-canvas-task-sync web --port 8791 --no-open
+# Choose other loopback ports or leave browser opening to yourself.
+canvas-task-sync web --port 8890 --simple-port 8891 --no-open
 ```
 
 To start the control center automatically when you sign in to Windows and add a desktop website
@@ -137,20 +177,23 @@ shortcut, run this once from the project directory:
 powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1
 ```
 
-The installer registers a hidden per-user scheduled task, starts it immediately, and verifies that
-`http://127.0.0.1:8790/` is ready. The server runs in the background without a terminal or browser
-window, and it does not expose the site to the local network. To remove the scheduled task and
-desktop shortcut later:
+The installer registers one hidden per-user scheduled task, starts it immediately, and verifies both
+the full control center at `http://127.0.0.1:8790/` and the minimal sync console at
+`http://127.0.0.1:8791/`. Both desktop shortcuts use the same authoritative sync queue, scheduler,
+and databases. The servers run without a terminal or browser window and do not expose either site
+to the local network. To remove the scheduled task and both shortcuts later:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\remove-windows-startup.ps1
 ```
 
-The web app provides an overview, live run progress, immutable preview plans, guarded apply,
+The full web app provides an overview, live run progress, immutable preview plans, guarded apply,
 course and schedule management, connection setup, structured diagnostics, and sanitized support
-bundles. Schedules run only while this process is running. Previewing writes sanitized operational
-history to `.canvas-task-sync/control.sqlite3`, but it never changes Google Tasks or
-`.canvas-task-sync/state.sqlite3`. Operational history is retained for 90 days by default.
+bundles. Its normal **Sync all courses** and **Sync selected course** actions automatically apply the
+safe subset; Advanced Preview and preview-mode schedules retain the approval workflow. The minimal
+UI provides the two sync actions plus live JSON-lines output and historical operation replay.
+Schedules run only while this process is running. Operational history is written to
+`.canvas-task-sync/control.sqlite3` and retained for 90 days by default.
 
 The server always binds to `127.0.0.1`; it validates same-origin requests and requires a
 per-process CSRF token for every mutation. It is intended as a local control center, not a remotely
@@ -158,7 +201,9 @@ hosted multi-user service.
 
 Every report has `CREATE`, `UPDATE`, `UNCHANGED`, and `UNCERTAIN` sections plus ignored, remote
 missing, source missing, and historical-blocked sections. `--apply` never deletes a task. A task that
-disappeared remotely or from the source requires human review.
+disappeared remotely or from the source requires human review. When only the due date is uncertain,
+the task is created without a date and with the standalone note `Due date uncertain`; a later dated
+source updates that same task and removes the marker.
 
 The canonical page hash excludes temporary content URLs and revision metadata but includes meaningful
 text, table structure, geometry, and styles. A successful apply stores its structured extraction in
@@ -185,14 +230,14 @@ npm run build
    the displayed `extension\dist` directory.
 3. Open the extension's settings, paste the local server address and pairing token, then choose
    **Test connection**.
-4. Configure a course with `source.type: browser`. Starting its preview now queues the extension,
+4. Configure a course with `source.type: browser`. Starting its sync now queues the extension,
    which opens the Google file, captures it with the configured mode, closes only the temporary tab,
-   and lets the existing preview continue. The popup remains available for one-off manual captures
+   and lets the existing sync continue. The popup remains available for one-off manual captures
    and fine-grained selection.
-5. Use **Preview all courses** to start all enabled courses together. Non-browser capture and Gemini
+5. Use **Sync all courses** to start all enabled courses together. Non-browser capture and Gemini
    processing run in parallel; extension acquisition is deliberately FIFO to keep tab activation and
-   screenshot capture reliable. Applying remains a separate guarded action and automated tests never
-   create real Google Tasks.
+   screenshot capture reliable. Safe changes apply automatically; conflicting items remain available
+   for review, and automated tests never create real Google Tasks.
 
 Example browser-backed course source:
 
@@ -253,17 +298,20 @@ The target-page date heading and row labels are parsed deterministically:
 - Explicit dates are accepted only when the exact source evidence supports them.
 - Ordinary class activities, holidays, learning targets, and teacher narration are ignored.
 
-Gemini receives unfinished tasks for the same course plus completed tasks from the preceding 10.5
-days as duplicate context. It is instructed to reuse one concise assignment title while the existing
-deterministic identity and deduplication layers remain authoritative. The configured model chain is
+Gemini receives unfinished tasks for the same course plus completed tasks from the preceding 14
+days across the assignment and assessment lists as duplicate context. It is instructed to reuse one
+concise title while deterministic local identity and deduplication remain authoritative. The model chain is
 `gemini-3.7-flash`, `gemini-3.6-flash`, then `gemini-3.5-flash`; quota, rate-limit, unavailable-model,
 and unsupported-model errors advance to the next model, with high reasoning on every attempt.
 
 Initial logical IDs use course, presentation/page, page element, table row/column, and deterministic
 in-cell order—not model wording. Stored IDs survive wording and deadline edits. Reordered actions use
 unique normalized-token matching only at a score of at least `0.75` with a `0.15` margin; ambiguous
-duplicates are never guessed. Managed note metadata can recover mappings if SQLite is lost or a
-process stops after Google creation.
+duplicates are never guessed. Legacy managed-note metadata is recovered into SQLite once and then
+removed from Google Tasks; subsequent syncs use local mappings and same-class title/date collisions.
+Each synced task gets a managed AI-generated description section. An exact Canvas assignment link is
+included when it can be associated unambiguously; agenda and course-page links are not used as
+fallbacks. Later syncs refresh only this generated section and preserve user-written text outside it.
 
 ## Adding sources
 
@@ -276,7 +324,7 @@ validated configuration model.
 Canvas pages/assignments, PDFs, local images, and general URLs should do format-specific acquisition
 only. Browser formats register an extension adapter and reuse the generic local browser source
 adapter. They then reuse `GeminiExtractor`, `build_draft_tasks`,
-`SyncPlanner`, managed markers, and Google Tasks unchanged.
+`SyncPlanner`, private local identity state, and Google Tasks reconciliation unchanged.
 
 ## Tests
 

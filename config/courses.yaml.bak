@@ -1,60 +1,82 @@
 version: 1
 state_path: .canvas-task-sync/state.sqlite3
-gemini_model: gemini-3.6-flash
+gemini_model: gemini-3.7-flash
+gemini_fallback_models: [gemini-3.6-flash, gemini-3.5-flash]
 
 courses:
-  spanish:
-    name: Honors Spanish IV
-    prefix: SPANISH
+  canvas12604:
+    enabled: true
+    name: AP English 4 Literature & Composition
+    prefix: ENGLISH
     task_list: School
+    assessment_task_list: Tests
     timezone: America/New_York
     meeting_days: [mon, tue, wed, thu, fri]
+    canvas_course_id: '12604'
     source:
-      type: google_slides
-      url: 
-        https://docs.google.com/presentation/d/1QclyYz3XdeE4C6kHvnqznZ5KsUNHRFO2YHu9sYIzGdU/edit?slide=id.g8596fffd0c_4_6#slide=id.g8596fffd0c_4_6
-      page_id: g8596fffd0c_4_6
+      type: none
       extraction:
-        mode: hybrid
+        mode: text
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds: [bring, present, submit]
-  computerscience:
+
+  canvas11126:
     enabled: true
-    name: AP Computer Science
-    prefix: CS
+    name: AP Physics C
+    prefix: PHYSICS
     task_list: School
+    assessment_task_list: Tests
     timezone: America/New_York
-    meeting_days:
-    - mon
-    - tue
-    - wed
-    - thu
-    - fri
+    meeting_days: [mon, tue, wed, thu, fri]
+    canvas_course_id: '11126'
     source:
-      type: browser
-      url: 
-        https://docs.google.com/spreadsheets/d/18ngIjJOcG6UC5sig7NEv_l209WZpdrRLd8JtBIo1Img/edit?gid=0#gid=0
-      source_format: auto
-      freshness_seconds: 900
-      selection:
-        slide_ids: []
-        section_ids: []
-        sheets: []
+      type: none
       extraction:
-        mode: hybrid
+        mode: text
         thumbnail_size: large
         assignments_default_due: next_class
-        same_day_action_kinds:
-        - present
-        - submit
-        - bring
+        same_day_action_kinds: [bring, present, submit]
 
-  stats:
+  canvas11517:
     enabled: true
-    name: AP Statistics
-    prefix: STATS
+    name: Linear Algebra
+    prefix: LINALG
     task_list: School
+    assessment_task_list: Tests
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    canvas_course_id: '11517'
+    source:
+      type: none
+      extraction:
+        mode: text
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]
+
+  canvas12506:
+    enabled: true
+    name: AP Chemistry
+    prefix: CHEM
+    task_list: School
+    assessment_task_list: Tests
+    timezone: America/New_York
+    meeting_days: [mon, tue, wed, thu, fri]
+    canvas_course_id: '12506'
+    source:
+      type: none
+      extraction:
+        mode: text
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds: [bring, present, submit]
+  computerprogramming:
+    enabled: true
+    name: Computer Programming A
+    prefix: CPP
+    task_list: School
+    assessment_task_list: Tests
     timezone: America/New_York
     meeting_days:
     - mon
@@ -62,21 +84,40 @@ courses:
     - wed
     - thu
     - fri
+    canvas_course_id: '11334'
+    canvas_base_url:
     source:
-      type: browser
-      url: 
-        https://docs.google.com/document/d/15AiFpTcCfAy0cpXBsO3NTrXqjpkt3VqrHWeNJKyeQ4Q/edit?tab=t.0
-      source_format: google_docs
-      freshness_seconds: 900
-      selection:
-        slide_ids: []
-        section_ids: []
-        sheets: []
+      type: none
       extraction:
         mode: text
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
-        - bring
-        - present
         - submit
+        - present
+        - bring
+  psych:
+    enabled: true
+    name: AP Psychology
+    prefix: PSYCH
+    task_list: School
+    assessment_task_list: Tests
+    timezone: America/New_York
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+    canvas_course_id: '12477'
+    canvas_base_url:
+    source:
+      type: none
+      extraction:
+        mode: text
+        thumbnail_size: large
+        assignments_default_due: next_class
+        same_day_action_kinds:
+        - submit
+        - present
+        - bring
