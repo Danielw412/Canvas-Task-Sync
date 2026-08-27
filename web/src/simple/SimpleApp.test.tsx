@@ -71,6 +71,27 @@ describe('SimpleApp', () => {
       if (url.includes('/api/v1/runs?limit=50')) return response([run])
       if (url.endsWith('/api/v1/bootstrap')) return response({ csrf_token: 'csrf' })
       if (url.endsWith('/api/v1/runs/all')) return response({ operation_id: 'op-all', run_ids: [1] }, 202)
+      if (url.endsWith('/api/v1/runs/1')) return response({
+        ...run,
+        include_past: false,
+        cancel_requested: false,
+        plan: {
+          course_id: 'spanish',
+          task_list: 'School',
+          task_lists: ['School'],
+          dry_run: true,
+          extraction_mode: 'text',
+          fallback_reasons: [],
+          actions: [{
+            kind: 'ignored',
+            title: '[SPANISH] Workbook page 12',
+            due_date: '2026-08-20',
+            reason: 'A same-class task has the same title and due date; no duplicate will be made.',
+            task_list: 'School',
+          }],
+        },
+        events: [],
+      })
       if (url.endsWith('/api/v1/runs')) return response({ operation_id: 'op-one', run_id: 2 }, 202)
       return response({})
     }))
@@ -78,6 +99,11 @@ describe('SimpleApp', () => {
 
     expect(await screen.findByText('Run #1')).toBeVisible()
     expect(screen.getByText('In progress · Extract Assignments')).toBeVisible()
+
+    fireEvent.click(screen.getByText('Run #1').closest('button')!)
+    expect(await screen.findByText('[SPANISH] Workbook page 12')).toBeVisible()
+    expect(screen.getByText('Ignored')).toBeVisible()
+    expect(screen.getByText('A same-class task has the same title and due date; no duplicate will be made.')).toBeVisible()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Sync all courses' }))
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
@@ -121,5 +147,26 @@ describe('SimpleApp', () => {
     await waitFor(() => expect(requests.some((item) => item.url.endsWith('/api/v1/runs'))).toBe(true))
     expect(screen.getByLabelText('JSON log output')).not.toHaveTextContent('Create completed for')
     expect(screen.getByLabelText('JSON log output')).toHaveTextContent('No sync log selected')
+  })
+
+  it('shows completed warning-state runs with an outcome that matches the warning marker', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/runtime-config.json') return response({ api_base: 'http://127.0.0.1:8790' })
+      if (url.endsWith('/api/v1/courses')) return response([course])
+      if (url.includes('/api/v1/operations?')) return response([])
+      if (url.includes('/api/v1/runs?limit=50')) return response([
+        { ...run, id: 2, status: 'review_needed', stage: 'complete' },
+        { ...run, id: 3, status: 'stale', stage: 'complete', error_summary: 'The preview changed.' },
+      ])
+      return response({})
+    }))
+
+    render(<SimpleApp eventSourceFactory={(url) => new FakeEventSource(url) as unknown as EventSource} />)
+
+    expect(await screen.findAllByText('Complete')).toHaveLength(2)
+    expect(screen.getByText('Run #2').closest('button')).toHaveAccessibleName(/Review needed/)
+    expect(screen.getByText('Run #2').closest('button')).not.toHaveAccessibleName(/No errors/)
+    expect(screen.getByText('Run #3').closest('button')).toHaveAccessibleName(/The preview changed/)
   })
 })

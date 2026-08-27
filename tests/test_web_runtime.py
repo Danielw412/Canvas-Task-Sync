@@ -257,6 +257,12 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     course = service.load().course("spanish")
     course.name = "Updated Spanish"
     course.ai_instructions = "Skip optional reading tasks."
+    course.gemini_model = "gemini-3.5-flash"
+    course.gemini_fallback_models = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]
     from canvas_task_sync.web_models import CourseSave
 
     service.save_course(CourseSave(id="spanish", settings=course), creating=False)
@@ -265,6 +271,12 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     assert "# keep this course comment" in text
     assert "name: Updated Spanish" in text
     assert "ai_instructions: Skip optional reading tasks." in text
+    assert "gemini_model: gemini-3.5-flash" in text
+    assert service.load().course("spanish").gemini_fallback_models == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]
     assert service.load().course("spanish").ai_instructions == "Skip optional reading tasks."
     assert config.with_suffix(".yaml.bak").exists()
 

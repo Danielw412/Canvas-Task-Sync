@@ -105,6 +105,12 @@ def run_health_checks(
 ) -> list[HealthCheck]:
     load_dotenv(settings.root_dir / ".env")
     checks: list[HealthCheck] = []
+    selected_course = settings.course(course_id) if course_id else None
+    model_chain = (
+        settings.gemini_model_chain_for(selected_course)
+        if selected_course is not None
+        else settings.gemini_model_chain
+    )
     api_key = os.getenv("GEMINI_API_KEY")
     started = perf_counter()
     if not api_key:
@@ -125,7 +131,7 @@ def run_health_checks(
                 model = None
                 selected_model = None
                 model_errors: list[Exception] = []
-                for candidate in settings.gemini_model_chain:
+                for candidate in model_chain:
                     try:
                         model = client.models.get(model=candidate)
                         selected_model = candidate
@@ -141,7 +147,7 @@ def run_health_checks(
                     state=HealthState.HEALTHY,
                     summary=(
                         f"Model {selected_model} is available with high reasoning."
-                        if selected_model == settings.gemini_model
+                        if selected_model == model_chain[0]
                         else (
                             f"Fallback model {selected_model} is available; primary is unavailable."
                         )
@@ -149,7 +155,7 @@ def run_health_checks(
                     duration_ms=int((perf_counter() - started) * 1000),
                     details={
                         "model": getattr(model, "name", selected_model),
-                        "configured_chain": settings.gemini_model_chain,
+                        "configured_chain": model_chain,
                         "thinking_level": "high",
                     },
                 )

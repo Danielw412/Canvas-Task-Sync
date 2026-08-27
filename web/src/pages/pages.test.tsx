@@ -165,6 +165,41 @@ describe('operational pages', () => {
     })
   })
 
+  it('saves a unique per-course Gemini primary and fallback order', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      return jsonResponse(overview.courses)
+    }))
+    renderPage(<CoursesPage />)
+
+    fireEvent.change(await screen.findByLabelText('Primary model'), {
+      target: { value: 'gemini-3.5-flash' },
+    })
+    fireEvent.change(screen.getByLabelText('Fallback 1'), {
+      target: { value: 'gemini-3.5-flash-lite' },
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
+
+    await waitFor(() => {
+      const request = requests.find(
+        (item) => item.url === '/api/v1/courses/spanish' && item.init?.method === 'PUT',
+      )
+      expect(JSON.parse(String(request?.init?.body))).toMatchObject({
+        settings: {
+          gemini_model: 'gemini-3.5-flash',
+          gemini_fallback_models: [
+            'gemini-3.5-flash-lite',
+            'gemini-3.7-flash',
+            'gemini-3.6-flash',
+          ],
+        },
+      })
+    })
+  })
+
   it('renders desktop and mobile navigation from one route model', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview)))
     renderPage(<AppShell />)

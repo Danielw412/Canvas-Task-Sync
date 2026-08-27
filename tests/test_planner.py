@@ -196,7 +196,7 @@ def test_deadline_edit_is_update_with_same_identity():
     assert "due date" in plan.actions[0].reason
 
 
-def test_unmanaged_title_due_collision_is_uncertain_not_duplicate():
+def test_unmanaged_title_due_collision_is_ignored_without_duplicate_or_review():
     draft = _draft()
     remote = RemoteTask(
         id="unmanaged",
@@ -205,7 +205,7 @@ def test_unmanaged_title_due_collision_is_uncertain_not_duplicate():
         due="2026-08-12T00:00:00.000Z",
     )
     plan = _plan([draft], remotes=[remote])
-    assert [action.kind for action in plan.actions] == [SyncActionKind.UNCERTAIN]
+    assert [action.kind for action in plan.actions] == [SyncActionKind.IGNORED]
     assert plan.actions[0].evidence == "Completar actividad de la clase"
 
 
@@ -332,7 +332,7 @@ def test_same_class_collision_in_other_list_prevents_duplicate():
         include_past=True,
         dry_run=True,
     )
-    assert plan.actions[0].kind == SyncActionKind.UNCERTAIN
+    assert plan.actions[0].kind == SyncActionKind.IGNORED
     assert plan.actions[0].task_list == "Tests"
 
 

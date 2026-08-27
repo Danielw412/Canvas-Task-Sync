@@ -199,6 +199,52 @@ def test_course_ai_instructions_change_prompt_and_extraction_cache_key(
     )
 
 
+def test_course_model_preferences_override_project_chain_and_cache_key(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, _tasks, backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    captured: dict[str, object] = {}
+
+    def backend_factory(**kwargs):
+        captured.update(kwargs)
+        return backend
+
+    service.backend_factory = backend_factory
+    course = service.settings.courses["spanish"]
+    course.gemini_model = "gemini-3.5-flash"
+    course.gemini_fallback_models = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]
+
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+
+    assert captured["model"] == "gemini-3.5-flash"
+    assert captured["fallback_models"] == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+    ]
+    assert prepared.extraction_cache_key.startswith(
+        "gemini-3.5-flash -> gemini-3.5-flash-lite -> "
+        "gemini-3.7-flash -> gemini-3.6-flash|"
+    )
+
+
 def test_cancellation_takes_effect_between_stages(
     tmp_path,
     spanish_course,
@@ -258,6 +304,62 @@ def test_apply_rejects_stale_source_before_writes(
         service.apply(prepared)
     assert tasks.created == []
     assert not service.settings.resolved_state_path.exists()
+
+
+def test_apply_allows_unrelated_course_changes_in_shared_task_list(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    tasks.tasks.append(
+        RemoteTask(id="english-write", title="[ENGLISH] Revise paragraph")
+    )
+
+    result = service.apply(prepared)
+
+    assert result.applied_counts["create"] == len(tasks.created)
+    assert tasks.created
+
+
+def test_apply_rejects_same_course_change_in_shared_task_list(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    tasks.tasks.append(
+        RemoteTask(id="spanish-write", title="[SPANISH] Newly added task")
+    )
+
+    with pytest.raises(ValueError, match="Google Tasks changed"):
+        service.apply(prepared)
+
+    assert tasks.created == []
 
 
 def test_apply_exact_snapshot_persists_completed_mappings(

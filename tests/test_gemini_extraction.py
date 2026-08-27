@@ -186,14 +186,18 @@ def test_model_quota_fallback_chain_keeps_high_reasoning():
     class Models:
         def generate_content(self, *, model, contents, config):
             calls.append((model, contents, config))
-            if model != "gemini-3.5-flash":
+            if model != "gemini-3.5-flash-lite":
                 raise RuntimeError("429 RESOURCE_EXHAUSTED quota exceeded")
             return SimpleNamespace(parsed=[], text="[]")
 
     backend = GoogleGenAIBackend(
         "gemini-3.7-flash",
         client=SimpleNamespace(models=Models()),
-        fallback_models=["gemini-3.6-flash", "gemini-3.5-flash"],
+        fallback_models=[
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+        ],
         retry_waiter=lambda _seconds, _attempts: None,
     )
     assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
@@ -201,13 +205,37 @@ def test_model_quota_fallback_chain_keeps_high_reasoning():
         "gemini-3.7-flash",
         "gemini-3.6-flash",
         "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
     ]
     assert all(
         str(call[2].thinking_config.thinking_level).casefold().endswith("high")
         for call in calls
     )
-    assert backend.used_model == "gemini-3.5-flash"
-    assert len(backend.fallback_reasons) == 3
+    assert backend.used_model == "gemini-3.5-flash-lite"
+    assert len(backend.fallback_reasons) == 4
+
+
+def test_primary_model_failure_waits_before_first_fallback():
+    calls: list[str] = []
+    waits: list[tuple[float, list[str]]] = []
+
+    class Models:
+        def generate_content(self, *, model, **_kwargs):
+            calls.append(model)
+            if model == "gemini-3.7-flash":
+                raise RuntimeError("503 UNAVAILABLE")
+            return SimpleNamespace(parsed=[], text="[]")
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.7-flash",
+        client=SimpleNamespace(models=Models()),
+        fallback_models=["gemini-3.6-flash"],
+        retry_waiter=lambda seconds, attempts: waits.append((seconds, attempts)),
+    )
+
+    assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
+    assert calls == ["gemini-3.7-flash", "gemini-3.6-flash"]
+    assert waits == [(15.0, ["gemini-3.7-flash: service unavailable"])]
 
 
 def test_two_failed_models_wait_one_minute_then_retry_chain():
@@ -230,10 +258,16 @@ def test_two_failed_models_wait_one_minute_then_retry_chain():
 
     assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
     assert calls == ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.7-flash"]
-    assert waits == [(60.0, [
-        "gemini-3.7-flash: service unavailable",
-        "gemini-3.6-flash: service unavailable",
-    ])]
+    assert waits == [
+        (15.0, ["gemini-3.7-flash: service unavailable"]),
+        (
+            60.0,
+            [
+                "gemini-3.7-flash: service unavailable",
+                "gemini-3.6-flash: service unavailable",
+            ],
+        ),
+    ]
 
 
 def test_recent_assignment_context_is_included_in_gemini_prompt(

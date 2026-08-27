@@ -725,6 +725,9 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
 .form-field textarea { resize: vertical; }
 .form-field input:disabled { background: #f5f7fa; color: var(--muted); }
 .form-field small { font-size: 10px; font-style: italic; }
+.model-preferences { display: grid; gap: 10px; margin: 2px 0 0; padding: 13px; border: 1px solid var(--border); border-radius: 8px; }
+.model-preferences legend { padding: 0 5px; color: #344054; font-size: 12px; font-weight: 650; }
+.model-preferences > p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 .checkbox-grid { display: flex; flex-wrap: wrap; gap: 8px; }
 .checkbox-grid label { display: flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; }
 .editor-actions { display: flex; justify-content: space-between; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-subtle); }

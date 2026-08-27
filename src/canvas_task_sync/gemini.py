@@ -52,6 +52,7 @@ class GoogleGenAIBackend:
         fallback_models: list[str] | None = None,
         retry_delay_seconds: float = 60.0,
         retry_waiter: Callable[[float, list[str]], None] | None = None,
+        fallback_delay_seconds: float = 15.0,
     ) -> None:
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key and client is None:
@@ -62,6 +63,7 @@ class GoogleGenAIBackend:
         self.fallback_reasons: list[str] = []
         self.failure_reasons: list[str] = []
         self._model_index = 0
+        self.fallback_delay_seconds = fallback_delay_seconds
         self.retry_delay_seconds = retry_delay_seconds
         self.retry_waiter = retry_waiter or (lambda seconds, _attempts: time.sleep(seconds))
         if client is not None:
@@ -139,9 +141,19 @@ class GoogleGenAIBackend:
                 self.failure_reasons.append(f"{model}: {_model_failure_label(error)}")
                 if attempt_number < len(attempt_indexes):
                     next_model = self.models[attempt_indexes[attempt_number]]
-                    self.fallback_reasons.append(
-                        f"{model} failed; retried with {next_model}."
-                    )
+                    if model == "gemini-3.7-flash" and next_model == "gemini-3.6-flash":
+                        self.retry_waiter(
+                            self.fallback_delay_seconds,
+                            list(self.failure_reasons),
+                        )
+                        self.fallback_reasons.append(
+                            f"{model} failed; waited {self.fallback_delay_seconds:g} seconds "
+                            f"before retrying with {next_model}."
+                        )
+                    else:
+                        self.fallback_reasons.append(
+                            f"{model} failed; retried with {next_model}."
+                        )
         raise GeminiExtractionError(
             "Gemini extraction failed across the configured model fallback chain. Attempts: "
             + "; ".join(self.failure_reasons)

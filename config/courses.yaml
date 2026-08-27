@@ -1,7 +1,8 @@
 version: 1
 state_path: .canvas-task-sync/state.sqlite3
 gemini_model: gemini-3.7-flash
-gemini_fallback_models: [gemini-3.6-flash, gemini-3.5-flash]
+gemini_fallback_models: [gemini-3.6-flash, gemini-3.5-flash, 
+    gemini-3.5-flash-lite]
 
 courses:
   canvas12604:
@@ -55,7 +56,12 @@ courses:
     task_list: School
     assessment_task_list: Tests
     timezone: America/New_York
-    meeting_days: [mon, tue, wed, thu, fri]
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
     canvas_course_id: '11517'
     source:
       type: none
@@ -63,7 +69,18 @@ courses:
         mode: text
         thumbnail_size: large
         assignments_default_due: next_class
-        same_day_action_kinds: [bring, present, submit]
+        same_day_action_kinds:
+        - submit
+        - present
+        - bring
+    ai_instructions: Pearson assignments are always due 2 days after the 
+      assignment unless specified otherwise
+    canvas_base_url:
+    gemini_model: gemini-3.5-flash-lite
+    gemini_fallback_models:
+    - gemini-3.5-flash
+    - gemini-3.6-flash
+    - gemini-3.7-flash
 
   canvas12506:
     enabled: true
@@ -106,6 +123,12 @@ courses:
         - submit
         - present
         - bring
+    ai_instructions: ''
+    gemini_model: gemini-3.5-flash-lite
+    gemini_fallback_models:
+    - gemini-3.5-flash
+    - gemini-3.6-flash
+    - gemini-3.7-flash
   psych:
     enabled: true
     name: AP Psychology

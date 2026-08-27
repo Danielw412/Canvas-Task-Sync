@@ -301,8 +301,9 @@ The target-page date heading and row labels are parsed deterministically:
 Gemini receives unfinished tasks for the same course plus completed tasks from the preceding 14
 days across the assignment and assessment lists as duplicate context. It is instructed to reuse one
 concise title while deterministic local identity and deduplication remain authoritative. The model chain is
-`gemini-3.7-flash`, `gemini-3.6-flash`, then `gemini-3.5-flash`; quota, rate-limit, unavailable-model,
-and unsupported-model errors advance to the next model, with high reasoning on every attempt.
+`gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, then `gemini-3.5-flash-lite`; quota,
+rate-limit, unavailable-model, and unsupported-model errors advance to the next model, with high
+reasoning on every attempt.
 
 Initial logical IDs use course, presentation/page, page element, table row/column, and deterministic
 in-cell order—not model wording. Stored IDs survive wording and deadline edits. Reordered actions use

@@ -289,7 +289,7 @@ class SyncPlanner:
                     collision = collisions[0]
                     actions.append(
                         SyncAction(
-                            kind=SyncActionKind.UNCERTAIN,
+                            kind=SyncActionKind.IGNORED,
                             title=desired.title,
                             logical_id=desired.logical_id,
                             due_date=desired.due_date,

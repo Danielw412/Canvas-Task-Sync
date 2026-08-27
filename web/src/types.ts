@@ -29,6 +29,11 @@ export type RunStage =
 export type ExtractionMode = 'image' | 'text' | 'hybrid' | 'auto'
 export type WeekSelection = 'previous_week' | 'this_week' | 'next_week'
 export type AcquisitionStrategy = 'auto' | 'canvas_api' | 'configured_source'
+export type GeminiModel =
+  | 'gemini-3.7-flash'
+  | 'gemini-3.6-flash'
+  | 'gemini-3.5-flash'
+  | 'gemini-3.5-flash-lite'
 export type BrowserSourceFormat = 'auto' | 'google_slides' | 'google_docs' | 'google_sheets'
 export type SyncActionKind =
   | 'create'
@@ -80,6 +85,8 @@ export interface CourseSettings {
   task_list: string
   assessment_task_list: string
   ai_instructions: string
+  gemini_model?: GeminiModel | null
+  gemini_fallback_models?: GeminiModel[] | null
   timezone: string
   meeting_days: string[]
   canvas_course_id?: string | null

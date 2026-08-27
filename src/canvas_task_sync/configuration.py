@@ -27,6 +27,19 @@ GOOGLE_WORKSPACE_PATHS = {
     "google_sheets": re.compile(r"/spreadsheets/(?:u/\d+/)?d/"),
 }
 
+GEMINI_MODEL_OPTIONS = (
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+)
+GeminiModelName = Literal[
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+]
+
 
 def _google_workspace_source_type(value: str) -> str | None:
     parsed = urlparse(value)
@@ -158,6 +171,8 @@ class CourseSettings(BaseModel):
     task_list: str
     assessment_task_list: str = "Tests"
     ai_instructions: str = ""
+    gemini_model: GeminiModelName | None = None
+    gemini_fallback_models: list[GeminiModelName] | None = None
     timezone: str = "America/New_York"
     meeting_days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
     canvas_course_id: str | None = None
@@ -168,6 +183,16 @@ class CourseSettings(BaseModel):
     def validate_agenda_sources(self) -> CourseSettings:
         if self.source.type == "none" and not self.canvas_course_id:
             raise ValueError("canvas_course_id is required when no fallback source is configured")
+        has_primary = self.gemini_model is not None
+        has_fallbacks = self.gemini_fallback_models is not None
+        if has_primary != has_fallbacks:
+            raise ValueError(
+                "gemini_model and gemini_fallback_models must be configured together"
+            )
+        if self.gemini_model is not None and self.gemini_fallback_models is not None:
+            chain = [self.gemini_model, *self.gemini_fallback_models]
+            if len(chain) != len(set(chain)):
+                raise ValueError("The course Gemini model chain cannot contain duplicates")
         return self
 
     @field_validator("canvas_course_id")
@@ -235,7 +260,11 @@ class ProjectSettings(BaseModel):
     state_path: Path = Path(".canvas-task-sync/state.sqlite3")
     gemini_model: str = "gemini-3.7-flash"
     gemini_fallback_models: list[str] = Field(
-        default_factory=lambda: ["gemini-3.6-flash", "gemini-3.5-flash"]
+        default_factory=lambda: [
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+        ]
     )
     courses: dict[str, CourseSettings]
     root_dir: Path = Path(".")
@@ -259,6 +288,14 @@ class ProjectSettings(BaseModel):
     @property
     def gemini_cache_key(self) -> str:
         return " -> ".join(self.gemini_model_chain)
+
+    def gemini_model_chain_for(self, course: CourseSettings) -> list[str]:
+        if course.gemini_model is None or course.gemini_fallback_models is None:
+            return self.gemini_model_chain
+        return [course.gemini_model, *course.gemini_fallback_models]
+
+    def gemini_cache_key_for(self, course: CourseSettings) -> str:
+        return " -> ".join(self.gemini_model_chain_for(course))
 
     def course(self, course_id: str) -> CourseSettings:
         try:

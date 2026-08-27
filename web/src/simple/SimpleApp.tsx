@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { CourseView, OperationLogEvent, OperationSummary, RunStatus, RunSummary } from '../types'
+import type { CourseView, OperationLogEvent, OperationSummary, RunDetail, RunStatus, RunSummary } from '../types'
 
 interface RuntimeConfig {
   api_base: string
@@ -81,6 +81,36 @@ function humanizeStage(stage: string) {
   return stage.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
+function runProgressLabel(run: RunSummary) {
+  if (run.stage === 'complete' && ['succeeded', 'review_needed', 'stale'].includes(run.status)) {
+    return 'Complete'
+  }
+  return `${runStatusLabel(run.status)} · ${humanizeStage(run.stage)}`
+}
+
+function runOutcome(run: RunSummary) {
+  if (run.error_summary) return { message: run.error_summary, tone: 'error' }
+  const outcomes: Partial<Record<RunStatus, { message: string; tone: string }>> = {
+    awaiting_approval: { message: 'Approval required', tone: 'warning' },
+    review_needed: { message: 'Review needed', tone: 'warning' },
+    stale: { message: 'Preview changed — run again', tone: 'warning' },
+    cancelled: { message: 'Run cancelled', tone: 'muted' },
+    failed: { message: 'Run failed', tone: 'error' },
+    failed_partial: { message: 'Run partially applied', tone: 'error' },
+    succeeded: { message: 'No errors', tone: 'success' },
+  }
+  return outcomes[run.status] ?? { message: 'In progress', tone: 'muted' }
+}
+
+function dueDateLabel(dueDate?: string | null) {
+  if (!dueDate) return 'No due date'
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(`${dueDate}T12:00:00`))
+}
+
 function statusFromLog(entry: OperationLogEvent, current: RunStatus): RunStatus {
   if (entry.event_type === 'run_failed') return entry.metadata.partial ? 'failed_partial' : 'failed'
   if (entry.event_type === 'run_cancelled') return 'cancelled'
@@ -106,6 +136,10 @@ export function SimpleApp({
   const [logs, setLogs] = useState<OperationLogEvent[]>([])
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [busy, setBusy] = useState(false)
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null)
+  const [runDetail, setRunDetail] = useState<RunDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
 
   const refreshOperations = useCallback(async (base: string) => {
     setOperations(await getJson<OperationSummary[]>(base, '/api/v1/operations?limit=50'))
@@ -175,6 +209,31 @@ export function SimpleApp({
     return () => window.clearInterval(timer)
   }, [apiBase, busy, refreshRuns])
 
+  const selectedRun = runs.find((run) => run.id === selectedRunId)
+  const selectedRunStatus = selectedRun?.status
+  const selectedRunStage = selectedRun?.stage
+
+  useEffect(() => {
+    if (!apiBase || selectedRunId === null) return
+    let cancelled = false
+    setDetailLoading(true)
+    setDetailError('')
+    void getJson<RunDetail>(apiBase, `/api/v1/runs/${selectedRunId}`)
+      .then((detail) => {
+        if (!cancelled) setRunDetail(detail)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setRunDetail(null)
+          setDetailError(error instanceof Error ? error.message : 'Run details could not load.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [apiBase, selectedRunId, selectedRunStage, selectedRunStatus])
+
   const enabledCourses = useMemo(
     () => courses.filter((course) => course.settings.enabled),
     [courses],
@@ -207,6 +266,12 @@ export function SimpleApp({
     setActiveOperation(operationId)
   }
 
+  function toggleRun(runId: number) {
+    setRunDetail(null)
+    setDetailError('')
+    setSelectedRunId((current) => current === runId ? null : runId)
+  }
+
   return <main className="simple-shell">
     <header>
       <h1>Canvas Task Sync</h1>
@@ -235,13 +300,33 @@ export function SimpleApp({
     <section className="run-status-section" aria-labelledby="run-status-heading">
       <div className="run-status-heading"><strong id="run-status-heading">Course run status</strong><span>{runs.length} recent runs</span></div>
       {runs.length ? <div className="run-status-list">
-        {runs.map((run) => <div className="run-status-row" key={run.id}>
-          <span className={`run-marker run-marker--${run.status}`} aria-label={runStatusLabel(run.status)} />
-          <strong>{run.course_name ?? run.course_id}</strong>
-          <span>Run #{run.id}</span>
-          <span>{runStatusLabel(run.status)} · {humanizeStage(run.stage)}</span>
-          <span className={run.error_summary ? 'run-error' : 'run-no-error'}>{run.error_summary ?? 'No errors'}</span>
-        </div>)}
+        {runs.map((run) => {
+          const expanded = selectedRunId === run.id
+          const actions = expanded ? runDetail?.plan?.actions ?? [] : []
+          const outcome = runOutcome(run)
+          return <div className="run-status-item" key={run.id}>
+            <button className="run-status-row" type="button" aria-expanded={expanded} aria-controls={`run-plan-${run.id}`} onClick={() => toggleRun(run.id)}>
+              <span className={`run-marker run-marker--${run.status}`} aria-hidden="true" />
+              <strong>{run.course_name ?? run.course_id}</strong>
+              <span>Run #{run.id}</span>
+              <span>{runProgressLabel(run)}</span>
+              <span className={`run-outcome run-outcome--${outcome.tone}`}>{outcome.message}</span>
+              <span className="run-disclosure" aria-hidden="true">{expanded ? '▴' : '▾'}</span>
+            </button>
+            {expanded ? <section className="run-plan-details" id={`run-plan-${run.id}`} aria-label={`Suggested tasks for run ${run.id}`}>
+              <div className="run-plan-heading"><strong>Suggested tasks</strong>{!detailLoading && !detailError ? <span>{actions.length} items</span> : null}</div>
+              {detailLoading ? <p>Loading suggested tasks…</p> : detailError ? <p className="run-error">{detailError}</p> : actions.length ? <div className="run-plan-list">
+                {actions.map((action, index) => <div className="run-plan-row" key={`${action.logical_id ?? action.title}-${index}`}>
+                  <span className={`task-action task-action--${action.kind}`}>{humanizeStage(action.kind)}</span>
+                  <strong>{action.title}</strong>
+                  <span>{dueDateLabel(action.due_date)}</span>
+                  <span>{action.task_list ?? '—'}</span>
+                  <small>{action.reason}</small>
+                </div>)}
+              </div> : <p>{runDetail?.plan ? 'No tasks were suggested for this run.' : 'The suggested task plan is not available yet.'}</p>}
+            </section> : null}
+          </div>
+        })}
       </div> : <p className="run-status-empty">No runs yet.</p>}
     </section>
   </main>
