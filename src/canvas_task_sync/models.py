@@ -234,14 +234,26 @@ class StateRecord(BaseModel):
     logical_id: str
     course_id: str
     source_key: str
+    source_url: str | None = None
+    assignment_url: str | None = None
     anchor: str
     ordinal: int
     fingerprint: str
     source_text: str
     title: str
+    details: str = ""
+    classification: TaskClassification | None = None
+    task_type: TaskType | None = None
+    action_kind: ActionKind | None = None
     due_date: str | None = None
+    due_basis: str | None = None
+    due_uncertain: bool = False
+    due_uncertain_reason: str | None = None
+    source_date: str | None = None
+    historical: bool = False
     google_task_id: str | None = None
     tasklist_id: str | None = None
+    tasklist_title: str | None = None
     payload_hash: str | None = None
 
 

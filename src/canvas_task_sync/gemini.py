@@ -26,6 +26,7 @@ from canvas_task_sync.models import (
 
 EXTRACTOR_VERSION = "visual-agenda-v8-course-instructions-and-details"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
+MIN_GEMINI_DELAY_SECONDS = 10.0
 
 
 class GeminiExtractionError(RuntimeError):
@@ -63,8 +64,8 @@ class GoogleGenAIBackend:
         self.fallback_reasons: list[str] = []
         self.failure_reasons: list[str] = []
         self._model_index = 0
-        self.fallback_delay_seconds = fallback_delay_seconds
-        self.retry_delay_seconds = retry_delay_seconds
+        self.fallback_delay_seconds = max(MIN_GEMINI_DELAY_SECONDS, fallback_delay_seconds)
+        self.retry_delay_seconds = max(MIN_GEMINI_DELAY_SECONDS, retry_delay_seconds)
         self.retry_waiter = retry_waiter or (lambda seconds, _attempts: time.sleep(seconds))
         if client is not None:
             self.client = client
@@ -140,8 +141,13 @@ class GoogleGenAIBackend:
                 last_error = error
                 self.failure_reasons.append(f"{model}: {_model_failure_label(error)}")
                 if attempt_number < len(attempt_indexes):
-                    next_model = self.models[attempt_indexes[attempt_number]]
-                    if model == "gemini-3.7-flash" and next_model == "gemini-3.6-flash":
+                    next_index = attempt_indexes[attempt_number]
+                    next_model = self.models[next_index]
+                    # The third attempt already has the longer retry backoff above. For
+                    # every other forward move through the configured model chain, wait
+                    # before switching to the next fallback model. A lower index means
+                    # that the chain is being retried, rather than advancing to a fallback.
+                    if next_index > index and attempt_number + 1 != 3:
                         self.retry_waiter(
                             self.fallback_delay_seconds,
                             list(self.failure_reasons),

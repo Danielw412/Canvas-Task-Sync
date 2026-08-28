@@ -4,6 +4,9 @@ credentials.json
 token.json
 token.json.*
 .canvas-task-sync/
+.codex-pytest-*/
+.codex-test-*/
+.codex-week-tests/
 __pycache__/
 *.py[cod]
 .pytest_cache/

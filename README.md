@@ -199,6 +199,27 @@ The server always binds to `127.0.0.1`; it validates same-origin requests and re
 per-process CSRF token for every mutation. It is intended as a local control center, not a remotely
 hosted multi-user service.
 
+### Local JSON API
+
+The control center exposes a read-only API under `http://127.0.0.1:8790/api/v1` for local companion
+apps such as School Dashboard:
+
+```text
+GET /api/v1/bootstrap
+GET /api/v1/overview
+GET /api/v1/courses
+GET /api/v1/runs
+GET /api/v1/runs/{run_id}
+GET /api/v1/tasks?completed=false
+GET /api/v1/tasks/{logical_id}
+```
+
+The task routes expose Task Sync's durable logical identity together with course, title, due date,
+completion state, Google Task identity, source provenance, and Canvas identifiers/URLs when known.
+If Google Tasks authentication is temporarily unavailable, the route keeps the tracked task visible,
+sets `completed` to `null`, and reports `completion_status: "unavailable"` rather than guessing.
+Restart the local control center after updating the repository so the new routes are registered.
+
 Every report has `CREATE`, `UPDATE`, `UNCHANGED`, and `UNCERTAIN` sections plus ignored, remote
 missing, source missing, and historical-blocked sections. `--apply` never deletes a task. A task that
 disappeared remotely or from the source requires human review. When only the due date is uncertain,

@@ -12,7 +12,12 @@ courses:
     task_list: School
     assessment_task_list: Tests
     timezone: America/New_York
-    meeting_days: [mon, tue, wed, thu, fri]
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
     canvas_course_id: '12604'
     source:
       type: none
@@ -20,7 +25,17 @@ courses:
         mode: text
         thumbnail_size: large
         assignments_default_due: next_class
-        same_day_action_kinds: [bring, present, submit]
+        same_day_action_kinds:
+        - bring
+        - submit
+        - present
+    ai_instructions: ''
+    gemini_model: gemini-3.6-flash
+    gemini_fallback_models:
+    - gemini-3.5-flash
+    - gemini-3.5-flash-lite
+    - gemini-3.7-flash
+    canvas_base_url:
 
   canvas11126:
     enabled: true

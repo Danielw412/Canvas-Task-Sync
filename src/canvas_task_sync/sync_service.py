@@ -444,10 +444,15 @@ class SyncService:
                         RunStage.EXTRACT_ASSIGNMENTS,
                         "gemini_retry_wait",
                         (
-                            f"Waiting {seconds:g} seconds before the next Gemini model attempt."
+                            f"Gemini fallback is in use; waiting {seconds:g} seconds before "
+                            "the next model attempt."
                         ),
                         level=EventLevel.WARNING,
-                        metadata={"wait_seconds": seconds, "attempts": attempts},
+                        metadata={
+                            "wait_seconds": seconds,
+                            "attempts": attempts,
+                            "fallback_in_use": True,
+                        },
                     )
                     deadline = perf_counter() + seconds
                     while True:
@@ -470,14 +475,20 @@ class SyncService:
                     0,
                     "Canvas supplied sufficient agenda text; image acquisition was not required.",
                 )
+        fallback_model_used = bool(
+            outcome.model_name and outcome.model_name != gemini_model_chain[0]
+        )
+        extraction_status = (
+            f"Gemini extraction completed using fallback model {outcome.model_name}."
+            if fallback_model_used
+            else "Reused cached extraction."
+            if extraction_was_cached
+            else "Gemini extraction completed."
+        )
         sink.emit(
             RunStage.EXTRACT_ASSIGNMENTS,
             "stage_completed",
-            (
-                "Reused cached extraction."
-                if extraction_was_cached
-                else "Gemini extraction completed."
-            ),
+            extraction_status,
             metadata={
                 "cache": "hit" if extraction_was_cached else "miss",
                 "task_count": len(outcome.tasks),
@@ -487,6 +498,7 @@ class SyncService:
                 "model": outcome.model_name or gemini_model_chain[0],
                 "configured_model_chain": gemini_model_chain,
                 "model_fallback_reasons": outcome.model_fallback_reasons,
+                "fallback_used": fallback_model_used,
                 "existing_assignment_context_count": len(existing_assignments),
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),

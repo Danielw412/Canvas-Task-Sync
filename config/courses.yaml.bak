@@ -70,12 +70,17 @@ courses:
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
+        - submit
         - present
         - bring
-        - submit
     ai_instructions: Pearson assignments are always due 2 days after the 
       assignment unless specified otherwise
     canvas_base_url:
+    gemini_model: gemini-3.5-flash-lite
+    gemini_fallback_models:
+    - gemini-3.5-flash
+    - gemini-3.6-flash
+    - gemini-3.7-flash
 
   canvas12506:
     enabled: true

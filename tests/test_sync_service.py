@@ -162,6 +162,39 @@ def test_prepare_emits_stages_in_order_without_writing_state(
     assert not service.settings.resolved_state_path.exists()
 
 
+def test_prepare_status_reports_when_a_gemini_fallback_model_was_used(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, _tasks, backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    backend.used_model = "fallback-model"
+    backend.fallback_reasons = ["primary model failed"]
+    sink = RecordingSink()
+
+    service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+        progress=sink,
+    )
+
+    extraction_event = next(
+        event
+        for event in sink.events
+        if event[0] == RunStage.EXTRACT_ASSIGNMENTS and event[1] == "stage_completed"
+    )
+    assert "fallback model fallback-model" in extraction_event[2]
+    assert extraction_event[3]["fallback_used"] is True
+
+
 def test_course_ai_instructions_change_prompt_and_extraction_cache_key(
     tmp_path,
     spanish_course,

@@ -50,6 +50,7 @@ from canvas_task_sync.sources.browser_connector import (
     extension_selection,
 )
 from canvas_task_sync.sync_service import SyncService
+from canvas_task_sync.tracked_tasks import TrackedTaskReader
 from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
@@ -68,6 +69,7 @@ from canvas_task_sync.web_models import (
     Schedule,
     ScheduleCreate,
     ScheduleUpdate,
+    TrackedTaskView,
 )
 
 
@@ -87,6 +89,11 @@ class WebRuntime:
             self.settings,
             source_factory=self.create_source_adapter,
         )
+        self.tracked_tasks = TrackedTaskReader(
+            self.settings,
+            credentials_loader=self.sync_service.credentials_loader,
+            tasks_client_factory=self.sync_service.tasks_client_factory,
+        )
         self.runs = RunManager(self.store, self.sync_service)
         self.schedules = ScheduleManager(self.store, self.runs)
         self.csrf_token = secrets.token_urlsafe(32)
@@ -95,6 +102,7 @@ class WebRuntime:
     def reload_settings(self) -> ProjectSettings:
         self.settings = self.configuration.load()
         self.sync_service.settings = self.settings
+        self.tracked_tasks.settings = self.settings
         return self.settings
 
     def create_source_adapter(self, settings: Any, credentials: Any, **kwargs: Any) -> Any:
@@ -360,6 +368,21 @@ def create_web_app(
     @api.get("/courses", response_model=list[CourseView])
     def list_courses(request: Request) -> list[CourseView]:
         return _course_views(_runtime(request))
+
+    @api.get("/tasks", response_model=list[TrackedTaskView])
+    def list_tracked_tasks(
+        request: Request,
+        completed: bool | None = None,
+        course_id: str | None = None,
+    ) -> list[TrackedTaskView]:
+        return _runtime(request).tracked_tasks.list(completed=completed, course_id=course_id)
+
+    @api.get("/tasks/{logical_id}", response_model=TrackedTaskView)
+    def get_tracked_task(request: Request, logical_id: str) -> TrackedTaskView:
+        task = _runtime(request).tracked_tasks.get(logical_id)
+        if task is None:
+            raise _http_error(404, "task_not_found", "Tracked task was not found.")
+        return task
 
     @api.post("/courses", response_model=list[CourseView], status_code=201)
     def create_course(request: Request, payload: CourseSave) -> list[CourseView]:

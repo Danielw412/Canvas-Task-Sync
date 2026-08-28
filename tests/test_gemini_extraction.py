@@ -238,6 +238,37 @@ def test_primary_model_failure_waits_before_first_fallback():
     assert waits == [(15.0, ["gemini-3.7-flash: service unavailable"])]
 
 
+def test_every_forward_model_fallback_wait_is_at_least_ten_seconds():
+    calls: list[str] = []
+    waits: list[tuple[float, list[str]]] = []
+
+    class Models:
+        def generate_content(self, *, model, **_kwargs):
+            calls.append(model)
+            if model != "gemini-3.5-flash-lite":
+                raise RuntimeError("503 UNAVAILABLE")
+            return SimpleNamespace(parsed=[], text="[]")
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.7-flash",
+        client=SimpleNamespace(models=Models()),
+        fallback_models=["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"],
+        retry_delay_seconds=1.0,
+        fallback_delay_seconds=1.0,
+        retry_waiter=lambda seconds, attempts: waits.append((seconds, attempts)),
+    )
+
+    assert backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None) == []
+    assert calls == [
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+    ]
+    assert len(waits) == 3
+    assert all(seconds >= 10.0 for seconds, _attempts in waits)
+
+
 def test_two_failed_models_wait_one_minute_then_retry_chain():
     calls: list[str] = []
     waits: list[tuple[float, list[str]]] = []

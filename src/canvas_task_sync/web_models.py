@@ -10,8 +10,11 @@ from pydantic import BaseModel, Field, field_validator
 from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.models import (
     AcquisitionStrategy,
+    ActionKind,
     ExtractionMode,
     SyncPlan,
+    TaskClassification,
+    TaskType,
     WeekSelection,
 )
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
@@ -269,6 +272,63 @@ class OverviewResponse(BaseModel):
     latest_run: RunSummary | None = None
     recent_runs: list[RunSummary] = Field(default_factory=list)
     next_schedule: Schedule | None = None
+
+
+class TrackedTaskCourse(BaseModel):
+    id: str
+    name: str
+    prefix: str
+    canvas_course_id: str | None = None
+    canvas_base_url: str | None = None
+    canvas_url: str | None = None
+
+
+class TrackedTaskSource(BaseModel):
+    key: str
+    type: str
+    url: str | None = None
+    anchor: str
+    text: str
+    assignment_url: str | None = None
+
+
+class TrackedTaskGoogleIdentity(BaseModel):
+    task_id: str | None = None
+    tasklist_id: str | None = None
+    tasklist_title: str | None = None
+    status: str = "unknown"
+    completed_at: str | None = None
+    deleted: bool = False
+    hidden: bool = False
+
+
+class TrackedTaskCanvasIdentity(BaseModel):
+    course_id: str | None = None
+    assignment_id: str | None = None
+    course_url: str | None = None
+    assignment_url: str | None = None
+
+
+class TrackedTaskView(BaseModel):
+    logical_id: str
+    course: TrackedTaskCourse
+    title: str
+    display_title: str
+    details: str = ""
+    due_date: date | None = None
+    completed: bool | None = None
+    completion_status: str
+    classification: TaskClassification | None = None
+    task_type: TaskType | None = None
+    action_kind: ActionKind | None = None
+    due_basis: str | None = None
+    due_uncertain: bool = False
+    due_uncertain_reason: str | None = None
+    source_date: date | None = None
+    historical: bool = False
+    google_task: TrackedTaskGoogleIdentity
+    source: TrackedTaskSource
+    canvas: TrackedTaskCanvasIdentity
 
 
 class DiagnosticsResponse(BaseModel):
