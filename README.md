@@ -216,8 +216,10 @@ GET /api/v1/tasks/{logical_id}
 
 The task routes expose Task Sync's durable logical identity together with course, title, due date,
 completion state, Google Task identity, source provenance, and Canvas identifiers/URLs when known.
-If Google Tasks authentication is temporarily unavailable, the route keeps the tracked task visible,
-sets `completed` to `null`, and reports `completion_status: "unavailable"` rather than guessing.
+The `completed=false` feed is strict: it returns only tasks whose live Google status is
+`needsAction`. Unknown, missing, or unavailable Google status is excluded so a checked-off task can
+never reappear as unfinished. A detail request still reports `completed: null` and an explanatory
+`completion_status` when the live status cannot be established.
 Restart the local control center after updating the repository so the new routes are registered.
 
 Every report has `CREATE`, `UPDATE`, `UNCHANGED`, and `UNCERTAIN` sections plus ignored, remote

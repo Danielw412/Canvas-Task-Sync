@@ -50,9 +50,10 @@ class TrackedTaskReader:
             if completed:
                 views = [view for view in views if view.completed is True]
             else:
-                # An unavailable Google status is not presented as definitively incomplete,
-                # but remains visible in the unfinished-work feed until it is known complete.
-                views = [view for view in views if view.completed is not True]
+                # The unfinished-work feed is intentionally strict: only a live Google Task
+                # status of needsAction is proof that an item is still unfinished. Unknown,
+                # missing, or unavailable statuses must never resurrect a checked-off task.
+                views = [view for view in views if view.completed is False]
         return sorted(
             views,
             key=lambda view: (
