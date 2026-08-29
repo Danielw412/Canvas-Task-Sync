@@ -242,6 +242,15 @@ def find_week_matches(text: str, target_week_start: date) -> list[WeekTextMatch]
                 continue
             if found.group("week"):
                 score += 20
+            else:
+                # Canvas agenda tables often label their first cell as
+                # "Learning Targets for the Week: August 24" instead of the more
+                # conventional "Week of August 24".  Treat that date as a week
+                # heading so it outranks incidental due dates for the same Monday
+                # in an older table on the page.
+                prefix = text[max(0, found.start() - 80) : found.start()]
+                if re.search(r"(?:learning\s+targets\s+)?for\s+the\s+week\s*:?\s*$", prefix, re.I):
+                    score += 20
             if found.group("range"):
                 score += 8
             surrounding = text[max(0, found.start() - 180) : found.end() + 240].casefold()
@@ -266,6 +275,7 @@ def _agenda_node(
     parser: CanvasHtmlParser, target_week_start: date
 ) -> tuple[HtmlNode, WeekTextMatch]:
     candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
+    table_candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
     for node in [parser.root, *parser.root.descendants()]:
         text = node.text(" ")
         if len(text) < 25:
@@ -279,18 +289,26 @@ def _agenda_node(
         weekday_signals = sum(
             day in lowered for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
         )
-        tables = sum(1 for _ in node.descendants({"table"}))
+        tables = int(node.tag == "table") + sum(1 for _ in node.descendants({"table"}))
         score = (
             best.score + (agenda_signals * 13) + min(20, weekday_signals * 4) + min(15, tables * 8)
         )
         score -= min(35, max(0, len(text) - 2500) / 300)
-        candidates.append((score, -len(text), node, best))
+        candidate = (score, -len(text), node, best)
+        candidates.append(candidate)
+        if node.tag == "table" and _sufficient_agenda_content(node):
+            table_candidates.append(candidate)
     if not candidates:
         raise CanvasAgendaNotFound(
             "Canvas content did not contain a recognizable heading for the week of "
             f"{target_week_start.strftime('%B')} {target_week_start.day}."
         )
-    _, _, node, matched = max(candidates, key=lambda item: (item[0], item[1]))
+    # A Canvas page may retain several weekly agenda tables.  When the target
+    # date appears inside one table, that table is the authoritative scope; a
+    # shared ancestor would mix the target week with older weeks before Gemini
+    # ever sees the transcript.
+    scoped_candidates = table_candidates or candidates
+    _, _, node, matched = max(scoped_candidates, key=lambda item: (item[0], item[1]))
     return node, matched
 
 
@@ -298,6 +316,7 @@ def _relative_agenda_node(
     parser: CanvasHtmlParser, target_week_start: date
 ) -> tuple[HtmlNode, WeekTextMatch]:
     candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
+    table_candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
     for node in [parser.root, *parser.root.descendants()]:
         text = node.text(" ")
         found = THIS_WEEK_RE.search(text)
@@ -308,14 +327,18 @@ def _relative_agenda_node(
         weekday_signals = sum(
             day in lowered for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
         )
-        tables = sum(1 for _ in node.descendants({"table"}))
+        tables = int(node.tag == "table") + sum(1 for _ in node.descendants({"table"}))
         score = 120 + (agenda_signals * 13) + min(20, weekday_signals * 4) + min(15, tables * 8)
         score -= min(35, max(0, len(text) - 2500) / 300)
         matched = WeekTextMatch(target_week_start, 120, found.group(0), found.start())
-        candidates.append((score, -len(text), node, matched))
+        candidate = (score, -len(text), node, matched)
+        candidates.append(candidate)
+        if node.tag == "table" and _sufficient_agenda_content(node):
+            table_candidates.append(candidate)
     if not candidates:
         raise CanvasAgendaNotFound("Canvas content did not contain a current-week agenda heading.")
-    _, _, node, matched = max(candidates, key=lambda item: (item[0], item[1]))
+    scoped_candidates = table_candidates or candidates
+    _, _, node, matched = max(scoped_candidates, key=lambda item: (item[0], item[1]))
     return node, matched
 
 
@@ -384,7 +407,7 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
             )
         )
 
-    table_nodes = list(node.descendants({"table"}))
+    table_nodes = ([node] if node.tag == "table" else []) + list(node.descendants({"table"}))
     for table_index, table in enumerate(table_nodes):
         rows = list(table.descendants({"tr"}))
         headers: list[str] = []
@@ -457,7 +480,7 @@ def _sufficient_agenda_content(node: HtmlNode) -> bool:
     agenda_structure = any(
         term in lowered for term in ("learning activities", "assignments", "homework", "classwork")
     )
-    has_table = any(True for _ in node.descendants({"table"}))
+    has_table = node.tag == "table" or any(True for _ in node.descendants({"table"}))
     return len(text) >= 60 and (
         agenda_structure or weekday_count >= 2 or (has_table and weekday_count >= 1)
     )

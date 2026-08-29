@@ -76,7 +76,7 @@ def connection_status(
             label="Gemini API",
             state=HealthState.HEALTHY if gemini else HealthState.MISSING,
             summary=(
-                f"Configured · {' → '.join(settings.gemini_model_chain)} · high reasoning"
+                f"Configured · {' → '.join(settings.gemini_model_chain)} · per-course reasoning"
                 if gemini
                 else "Add a Gemini API key"
             ),
@@ -106,6 +106,7 @@ def run_health_checks(
     load_dotenv(settings.root_dir / ".env")
     checks: list[HealthCheck] = []
     selected_course = settings.course(course_id) if course_id else None
+    reasoning_level = selected_course.gemini_reasoning if selected_course else "medium"
     model_chain = (
         settings.gemini_model_chain_for(selected_course)
         if selected_course is not None
@@ -146,7 +147,7 @@ def run_health_checks(
                     label="Gemini API",
                     state=HealthState.HEALTHY,
                     summary=(
-                        f"Model {selected_model} is available with high reasoning."
+                        f"Model {selected_model} is available with {reasoning_level} reasoning."
                         if selected_model == model_chain[0]
                         else (
                             f"Fallback model {selected_model} is available; primary is unavailable."
@@ -156,7 +157,7 @@ def run_health_checks(
                     details={
                         "model": getattr(model, "name", selected_model),
                         "configured_chain": model_chain,
-                        "thinking_level": "high",
+                        "thinking_level": reasoning_level,
                     },
                 )
             )

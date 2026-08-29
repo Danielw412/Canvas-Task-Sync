@@ -360,6 +360,7 @@ class SyncService:
         gemini_model_chain = self.settings.gemini_model_chain_for(course)
         extraction_cache_key = (
             f"{self.settings.gemini_cache_key_for(course)}"
+            f"|reasoning:{course.gemini_reasoning}"
             f"|instructions:{_stable_hash(course.ai_instructions)[:16]}"
             f"|context:{_stable_hash(existing_assignments)[:16]}"
         )
@@ -437,6 +438,7 @@ class SyncService:
                 model=gemini_model_chain[0],
                 fallback_models=gemini_model_chain[1:],
                 api_key=os.getenv("GEMINI_API_KEY"),
+                thinking_level=course.gemini_reasoning,
             )
             if isinstance(backend, GoogleGenAIBackend):
                 def wait_for_gemini_retry(seconds: float, attempts: list[str]) -> None:
@@ -497,6 +499,7 @@ class SyncService:
                 "fallback_reasons": outcome.fallback_reasons,
                 "model": outcome.model_name or gemini_model_chain[0],
                 "configured_model_chain": gemini_model_chain,
+                "reasoning_level": course.gemini_reasoning,
                 "model_fallback_reasons": outcome.model_fallback_reasons,
                 "fallback_used": fallback_model_used,
                 "existing_assignment_context_count": len(existing_assignments),

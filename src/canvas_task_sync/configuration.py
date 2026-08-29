@@ -39,6 +39,7 @@ GeminiModelName = Literal[
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
 ]
+GeminiReasoningLevel = Literal["low", "medium", "high"]
 
 
 def _google_workspace_source_type(value: str) -> str | None:
@@ -173,6 +174,7 @@ class CourseSettings(BaseModel):
     ai_instructions: str = ""
     gemini_model: GeminiModelName | None = None
     gemini_fallback_models: list[GeminiModelName] | None = None
+    gemini_reasoning: GeminiReasoningLevel = "medium"
     timezone: str = "America/New_York"
     meeting_days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
     canvas_course_id: str | None = None

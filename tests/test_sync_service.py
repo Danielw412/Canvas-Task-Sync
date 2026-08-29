@@ -258,6 +258,7 @@ def test_course_model_preferences_override_project_chain_and_cache_key(
         "gemini-3.7-flash",
         "gemini-3.6-flash",
     ]
+    course.gemini_reasoning = "high"
 
     prepared = service.prepare(
         course_id="spanish",
@@ -272,9 +273,10 @@ def test_course_model_preferences_override_project_chain_and_cache_key(
         "gemini-3.7-flash",
         "gemini-3.6-flash",
     ]
+    assert captured["thinking_level"] == "high"
     assert prepared.extraction_cache_key.startswith(
         "gemini-3.5-flash -> gemini-3.5-flash-lite -> "
-        "gemini-3.7-flash -> gemini-3.6-flash|"
+        "gemini-3.7-flash -> gemini-3.6-flash|reasoning:high|"
     )
 
 

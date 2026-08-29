@@ -24,9 +24,11 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 
-EXTRACTOR_VERSION = "visual-agenda-v8-course-instructions-and-details"
+EXTRACTOR_VERSION = "visual-agenda-v10-multiday-assessments-and-reasoning"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
 MIN_GEMINI_DELAY_SECONDS = 10.0
+MAX_OUTPUT_TOKENS = 16_384
+DEFAULT_THINKING_LEVEL = "medium"
 
 
 class GeminiExtractionError(RuntimeError):
@@ -54,6 +56,7 @@ class GoogleGenAIBackend:
         retry_delay_seconds: float = 60.0,
         retry_waiter: Callable[[float, list[str]], None] | None = None,
         fallback_delay_seconds: float = 15.0,
+        thinking_level: str = DEFAULT_THINKING_LEVEL,
     ) -> None:
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key and client is None:
@@ -67,6 +70,11 @@ class GoogleGenAIBackend:
         self.fallback_delay_seconds = max(MIN_GEMINI_DELAY_SECONDS, fallback_delay_seconds)
         self.retry_delay_seconds = max(MIN_GEMINI_DELAY_SECONDS, retry_delay_seconds)
         self.retry_waiter = retry_waiter or (lambda seconds, _attempts: time.sleep(seconds))
+        if thinking_level not in {"low", "medium", "high"}:
+            raise GeminiExtractionError(
+                "Gemini reasoning must be one of: low, medium, or high."
+            )
+        self.thinking_level = thinking_level
         if client is not None:
             self.client = client
         else:
@@ -121,8 +129,12 @@ class GoogleGenAIBackend:
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=list[GeminiTaskCandidate],
-                        max_output_tokens=8192,
-                        thinking_config=types.ThinkingConfig(thinking_level="high"),
+                        # Gemini counts internal thinking against the output budget.  A high
+                        # thinking budget previously left AP Physics responses as truncated JSON.
+                        max_output_tokens=MAX_OUTPUT_TOKENS,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=self.thinking_level
+                        ),
                     ),
                 )
                 parsed = getattr(response, "parsed", None)
@@ -219,6 +231,11 @@ def _model_failure_label(error: Exception) -> str:
         return "model unavailable"
     if 503 in codes or "unavailable" in combined:
         return "service unavailable"
+    if any(
+        marker in combined
+        for marker in ("json_invalid", "eof while parsing", "invalid json")
+    ):
+        return "invalid or truncated JSON response"
     return "request rejected"
 
 
@@ -392,6 +409,9 @@ Rules:
   ordinary assignments remain task_type=assignment even when they mention a quiz or test.
 - Assessment titles must name the subject and end in Quiz, Test, or Exam as stated by the source,
   for example "Crime and Punishment Exam". Do not include the course prefix.
+- For multi-day assessments, return one candidate per dated section.
+  Include the section name or acronym in each title and copy only that section's
+  exact source phrase into source_text.
 - Return homework plus classwork only when it has an explicit deadline or says to bring, present,
   or submit something.
 - Practice done during class, including identifying hypotheses or working through released AP FRQs,

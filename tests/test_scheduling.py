@@ -155,6 +155,70 @@ def test_numeric_explicit_date_takes_precedence_over_weekday_in_evidence(
     assert drafts[0].due_basis == "Explicit date stated in source evidence"
 
 
+def test_header_numeric_date_uses_selected_agenda_week_for_year_context(
+    spanish_capture, spanish_course
+):
+    header = spanish_capture.blocks[0]
+    task = ExtractedTask(
+        source_anchor=header.anchor,
+        source_text="Exam will be on Monday, 8/31.",
+        classification=TaskClassification.HOMEWORK,
+        task_type=TaskType.TEST,
+        action_kind=ActionKind.OTHER,
+        title_stem="Crime and Punishment Exam",
+        due_relation=DueRelation.EXPLICIT_DATE,
+        explicit_due_date="2026-08-31",
+        confidence=Confidence.HIGH,
+    )
+
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="english",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[task],
+        today=date(2026, 5, 1),
+    )
+
+    assert not uncertain
+    assert drafts[0].due_date == date(2026, 8, 31)
+    assert drafts[0].due_uncertain is False
+
+
+def test_multi_day_exam_is_split_into_one_dated_task_per_section(
+    spanish_capture, spanish_course
+):
+    header = spanish_capture.blocks[0]
+    task = ExtractedTask(
+        source_anchor=header.anchor,
+        source_text=(
+            "Unit 1 Exam: Tuesday September 8: Free Response Question (FRQ) Section "
+            "Wednesday September 9: Multiple Choice Question (MCQ) Section"
+        ),
+        classification=TaskClassification.HOMEWORK,
+        task_type=TaskType.TEST,
+        action_kind=ActionKind.OTHER,
+        title_stem="Unit 1 Exam",
+        due_relation=DueRelation.EXPLICIT_DATE,
+        explicit_due_date="September 8 and September 9",
+        confidence=Confidence.HIGH,
+    )
+
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="physics",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[task],
+        today=date(2026, 5, 1),
+    )
+
+    assert not uncertain
+    assert sorted((draft.title, draft.due_date) for draft in drafts) == [
+        ("[SPANISH] Unit 1 FRQ Exam", date(2026, 9, 8)),
+        ("[SPANISH] Unit 1 MCQ Exam", date(2026, 9, 9)),
+    ]
+    assert all(not draft.due_uncertain for draft in drafts)
+
+
 def test_undated_assessment_without_a_dated_row_is_imported_as_due_uncertain(
     spanish_capture, spanish_course
 ):

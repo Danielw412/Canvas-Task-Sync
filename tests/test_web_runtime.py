@@ -16,6 +16,7 @@ from canvas_task_sync.redaction import REDACTED, redact_text, sanitize
 from canvas_task_sync.run_manager import (
     ScheduleManager,
     StoreProgressSink,
+    _review_attention_count,
     next_schedule_occurrence,
 )
 from canvas_task_sync.web_app import create_web_app
@@ -177,6 +178,21 @@ def test_progress_events_persist_the_current_run_stage(tmp_path):
         store.close()
 
 
+def test_informational_source_and_history_actions_do_not_require_review():
+    assert _review_attention_count(
+        {
+            "source_missing": 4,
+            "historical_blocked": 3,
+            "uncertain": 0,
+            "remote_missing": 0,
+            "due_uncertain": 0,
+        }
+    ) == 0
+    assert _review_attention_count({"uncertain": 1}) == 1
+    assert _review_attention_count({"remote_missing": 1}) == 1
+    assert _review_attention_count({"due_uncertain": 1}) == 1
+
+
 def test_next_occurrence_normalizes_spring_dst_gap_and_uses_first_fall_fold():
     spring = next_schedule_occurrence(
         weekdays=[6],
@@ -263,6 +279,7 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
         "gemini-3.7-flash",
         "gemini-3.6-flash",
     ]
+    course.gemini_reasoning = "high"
     from canvas_task_sync.web_models import CourseSave
 
     service.save_course(CourseSave(id="spanish", settings=course), creating=False)
@@ -272,12 +289,14 @@ def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     assert "name: Updated Spanish" in text
     assert "ai_instructions: Skip optional reading tasks." in text
     assert "gemini_model: gemini-3.5-flash" in text
+    assert "gemini_reasoning: high" in text
     assert service.load().course("spanish").gemini_fallback_models == [
         "gemini-3.5-flash-lite",
         "gemini-3.7-flash",
         "gemini-3.6-flash",
     ]
     assert service.load().course("spanish").ai_instructions == "Skip optional reading tasks."
+    assert service.load().course("spanish").gemini_reasoning == "high"
     assert config.with_suffix(".yaml.bak").exists()
 
 

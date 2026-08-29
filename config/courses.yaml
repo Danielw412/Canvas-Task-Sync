@@ -19,6 +19,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '12604'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -51,6 +52,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11126'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -58,12 +60,17 @@ courses:
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
-        - bring
         - present
+        - complete
         - submit
+        - bring
     ai_instructions: Do not create tasks for the readings.
     canvas_base_url:
-
+    gemini_model: gemini-3.6-flash
+    gemini_fallback_models:
+    - gemini-3.5-flash
+    - gemini-3.5-flash-lite
+    - gemini-3.7-flash
   canvas11517:
     enabled: true
     name: Linear Algebra
@@ -78,6 +85,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11517'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -104,15 +112,32 @@ courses:
     task_list: School
     assessment_task_list: Tests
     timezone: America/New_York
-    meeting_days: [mon, tue, wed, thu, fri]
+    meeting_days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
     canvas_course_id: '12506'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
         mode: text
         thumbnail_size: large
         assignments_default_due: next_class
-        same_day_action_kinds: [bring, present, submit]
+        same_day_action_kinds:
+        - present
+        - submit
+        - bring
+    ai_instructions: Ignore the watch AP classroom video assignments and Open 
+      Stax readings
+    gemini_model: gemini-3.7-flash
+    gemini_fallback_models:
+    - gemini-3.6-flash
+    - gemini-3.5-flash
+    - gemini-3.5-flash-lite
+    canvas_base_url:
   computerprogramming:
     enabled: true
     name: Computer Programming A
@@ -127,6 +152,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11334'
+    gemini_reasoning: medium
     canvas_base_url:
     source:
       type: none
@@ -158,6 +184,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '12477'
+    gemini_reasoning: medium
     canvas_base_url:
     source:
       type: none

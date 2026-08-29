@@ -49,6 +49,14 @@ TERMINAL_STATUSES = {
 }
 
 
+def _review_attention_count(counts: dict[str, int]) -> int:
+    return (
+        counts.get(SyncActionKind.UNCERTAIN.value, 0)
+        + counts.get(SyncActionKind.REMOTE_MISSING.value, 0)
+        + counts.get("due_uncertain", 0)
+    )
+
+
 class StoreProgressSink(ProgressSink):
     def __init__(self, store: ControlStore, run_id: int, notifier: threading.Condition) -> None:
         self.store = store
@@ -343,16 +351,10 @@ class RunManager:
             remote_hash=prepared.remote_hash,
             counts=counts,
         )
-        attention_count = sum(
-            counts.get(kind.value, 0)
-            for kind in {
-                SyncActionKind.UNCERTAIN,
-                SyncActionKind.REMOTE_MISSING,
-                SyncActionKind.SOURCE_MISSING,
-                SyncActionKind.HISTORICAL_BLOCKED,
-            }
-        )
-        attention_count += counts.get("due_uncertain", 0)
+        # Missing source mappings and past-due tasks are informational safeguards.
+        # They remain visible in the plan, but do not make an otherwise healthy
+        # auto-apply run report "review needed".
+        attention_count = _review_attention_count(counts)
         if run.requested_mode == RunMode.AUTO_APPLY:
             self.store.update_run(
                 run_id,

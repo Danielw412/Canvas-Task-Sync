@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from canvas_task_sync.configuration import CourseSettings
@@ -97,6 +98,21 @@ WEEKDAY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CANVAS_ASSIGNMENT_PATH_PATTERN = re.compile(r"/courses/\d+/assignments/\d+(?:/|$)")
+SECTION_ACRONYM_PATTERN = re.compile(
+    r"\((?P<acronym>[A-Z][A-Z0-9]{1,7})\)\s*(?:section|part)?",
+)
+SECTION_NAME_PATTERN = re.compile(
+    r"\b(?P<name>free\s+response|multiple\s+choice)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CalendarDateMention:
+    value: date
+    start: int
+    end: int
+    text: str
 
 
 class AgendaDateError(ValueError):
@@ -245,39 +261,70 @@ def _date_for_month_day(
     return min(candidates, key=lambda value: abs((value - source_date).days), default=None)
 
 
-def _calendar_dates_in_text(text: str, source_date: date | None) -> set[date]:
-    dates: set[date] = set()
+def _calendar_date_mentions(
+    text: str, source_date: date | None
+) -> list[CalendarDateMention]:
+    mentions: list[CalendarDateMention] = []
+
+    def append(match: re.Match[str], value: date | None) -> None:
+        if value is None:
+            return
+        mentions.append(
+            CalendarDateMention(
+                value=value,
+                start=match.start(),
+                end=match.end(),
+                text=match.group(0),
+            )
+        )
+
     for match in ISO_DATE_PATTERN.finditer(text):
         try:
-            dates.add(date(*(int(value) for value in match.groups())))
+            parsed = date(*(int(value) for value in match.groups()))
         except ValueError:
             continue
+        append(match, parsed)
     for match in MONTH_DAY_PATTERN.finditer(text):
-        parsed = _date_for_month_day(
-            MONTHS[match.group("month").casefold()],
-            int(match.group("day")),
-            year=int(match.group("year")) if match.group("year") else None,
-            source_date=source_date,
+        append(
+            match,
+            _date_for_month_day(
+                MONTHS[match.group("month").casefold()],
+                int(match.group("day")),
+                year=int(match.group("year")) if match.group("year") else None,
+                source_date=source_date,
+            ),
         )
-        if parsed is not None:
-            dates.add(parsed)
     for match in NUMERIC_MONTH_DAY_PATTERN.finditer(text):
-        parsed = _date_for_month_day(
-            int(match.group("month")),
-            int(match.group("day")),
-            year=int(match.group("year")) if match.group("year") else None,
-            source_date=source_date,
+        append(
+            match,
+            _date_for_month_day(
+                int(match.group("month")),
+                int(match.group("day")),
+                year=int(match.group("year")) if match.group("year") else None,
+                source_date=source_date,
+            ),
         )
-        if parsed is not None:
-            dates.add(parsed)
-    return dates
+    return sorted(mentions, key=lambda item: (item.start, item.end, item.value))
 
 
-def _explicit_date(task: ExtractedTask, source_date: date | None) -> date | None:
+def _calendar_dates_in_text(text: str, source_date: date | None) -> set[date]:
+    return {mention.value for mention in _calendar_date_mentions(text, source_date)}
+
+
+def _explicit_date(
+    task: ExtractedTask,
+    reference_date: date | None,
+    *,
+    supporting_text: str = "",
+    row_date: date | None = None,
+) -> date | None:
     if not task.explicit_due_date:
         return None
-    proposed_dates = _calendar_dates_in_text(task.explicit_due_date, source_date)
-    evidence_dates = _calendar_dates_in_text(task.source_text, source_date)
+    proposed_dates = _calendar_dates_in_text(task.explicit_due_date, reference_date)
+    evidence_dates = _calendar_dates_in_text(task.source_text, reference_date)
+    evidence_dates.update(_calendar_dates_in_text(supporting_text, reference_date))
+    if row_date is not None:
+        evidence_dates.add(row_date)
     supported = proposed_dates & evidence_dates
     return min(supported) if len(supported) == 1 else None
 
@@ -314,6 +361,86 @@ def _fingerprint(task: ExtractedTask) -> str:
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _assessment_part_label(segment: str, index: int) -> str:
+    acronym = SECTION_ACRONYM_PATTERN.search(segment)
+    if acronym is not None:
+        return acronym.group("acronym").upper()
+    named = SECTION_NAME_PATTERN.search(segment)
+    if named is not None:
+        return "FRQ" if named.group("name").casefold().startswith("free") else "MCQ"
+    section = re.search(r"\b(?:section|part)\s+([A-Za-z0-9]+)\b", segment, re.I)
+    if section is not None:
+        return f"Section {section.group(1).upper()}"
+    return f"Day {index + 1}"
+
+
+def _assessment_part_title(title: str, label: str, task_type: TaskType) -> str:
+    cleaned = " ".join(title.split()).strip(" -:[]")
+    terminal = "Quiz" if task_type == TaskType.QUIZ else "Test"
+    match = re.search(r"\b(quiz|test|exam|midterm|final)\s*$", cleaned, re.I)
+    if match is not None:
+        terminal = match.group(1).title()
+        cleaned = cleaned[: match.start()].rstrip(" -:")
+    return " ".join(part for part in (cleaned, label, terminal) if part)
+
+
+def _normalized_assessment_title(task: ExtractedTask) -> str:
+    title = " ".join(task.title_stem.split()).strip(" -:[]")
+    if task.task_type == TaskType.QUIZ:
+        return title if re.search(r"\bquiz$", title, re.I) else f"{title} Quiz"
+
+    acronym_match = SECTION_ACRONYM_PATTERN.search(task.source_text)
+    if acronym_match is not None:
+        label = acronym_match.group("acronym").upper()
+        terminal = "Exam" if re.search(r"\bexam\b", title, re.I) else "Test"
+        base = re.sub(
+            r"\b(?:free\s+response\s+question|multiple\s+choice\s+question|"
+            r"FRQ|MCQ|section|part|quiz|test|exam|midterm|final)\b",
+            " ",
+            title,
+            flags=re.IGNORECASE,
+        )
+        base = " ".join(base.split()).strip(" -:[]")
+        return " ".join(part for part in (base, label, terminal) if part)
+
+    if re.search(r"\b(test|exam|midterm|final)$", title, re.I):
+        return title
+    return f"{title} Test"
+
+
+def _split_multi_date_assessment(
+    task: ExtractedTask,
+    source_date: date | None,
+) -> list[ExtractedTask]:
+    if task.task_type not in {TaskType.QUIZ, TaskType.TEST}:
+        return [task]
+    mentions = _calendar_date_mentions(task.source_text, source_date)
+    if len({mention.value for mention in mentions}) < 2:
+        return [task]
+
+    parts: list[ExtractedTask] = []
+    for index, mention in enumerate(mentions):
+        segment_start = 0 if index == 0 else mention.start
+        segment_end = mentions[index + 1].start if index + 1 < len(mentions) else len(
+            task.source_text
+        )
+        evidence = task.source_text[segment_start:segment_end].strip(" ,;:-")
+        label = _assessment_part_label(evidence, index)
+        parts.append(
+            task.model_copy(
+                update={
+                    "source_text": evidence,
+                    "title_stem": _assessment_part_title(
+                        task.title_stem, label, task.task_type
+                    ),
+                    "due_relation": DueRelation.EXPLICIT_DATE,
+                    "explicit_due_date": mention.text,
+                }
+            )
+        )
+    return parts
 
 
 def _is_canvas_assignment_url(value: str) -> bool:
@@ -494,7 +621,13 @@ def build_draft_tasks(
     grouped: dict[str, list[ExtractedTask]] = defaultdict(list)
     seen_candidates: set[tuple[str, str, str]] = set()
     duplicate_ignored: list[IgnoredItem] = []
-    for task in tasks:
+    agenda_reference = agenda_range[0] if agenda_range is not None else None
+    expanded_tasks = [
+        part
+        for task in tasks
+        for part in _split_multi_date_assessment(task, agenda_reference)
+    ]
+    for task in expanded_tasks:
         candidate_key = (
             task.source_anchor,
             normalized_text(task.source_text),
@@ -591,6 +724,7 @@ def build_draft_tasks(
                 continue
 
             source_date = row_range[1] if row_range else None
+            calendar_reference = source_date or agenda_reference
             if relation == DueRelation.NEXT_CLASS:
                 latest_occurrence = _latest_contiguous_occurrence_date(
                     task,
@@ -608,7 +742,12 @@ def build_draft_tasks(
             due_uncertain = False
             due_uncertain_reason: str | None = None
             if relation == DueRelation.EXPLICIT_DATE:
-                due_date = _explicit_date(task, source_date)
+                due_date = _explicit_date(
+                    task,
+                    calendar_reference,
+                    supporting_text=block.text,
+                    row_date=source_date,
+                )
                 if due_date is None:
                     due_uncertain = True
                     due_uncertain_reason = (
@@ -667,14 +806,8 @@ def build_draft_tasks(
                 due_basis = f"{due_basis}; test week rebased"
 
             title_stem = task.title_stem.strip()
-            if task.task_type == TaskType.QUIZ and not normalized_text(title_stem).endswith(
-                " quiz"
-            ):
-                title_stem = f"{title_stem} Quiz"
-            elif task.task_type == TaskType.TEST and not re.search(
-                r"\b(test|exam|midterm|final)$", normalized_text(title_stem)
-            ):
-                title_stem = f"{title_stem} Test"
+            if task.task_type in {TaskType.QUIZ, TaskType.TEST}:
+                title_stem = _normalized_assessment_title(task)
 
             drafts.append(
                 DraftTask(

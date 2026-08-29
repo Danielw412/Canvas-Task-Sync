@@ -34,6 +34,7 @@ export type GeminiModel =
   | 'gemini-3.6-flash'
   | 'gemini-3.5-flash'
   | 'gemini-3.5-flash-lite'
+export type GeminiReasoning = 'low' | 'medium' | 'high'
 export type BrowserSourceFormat = 'auto' | 'google_slides' | 'google_docs' | 'google_sheets'
 export type SyncActionKind =
   | 'create'
@@ -87,6 +88,7 @@ export interface CourseSettings {
   ai_instructions: string
   gemini_model?: GeminiModel | null
   gemini_fallback_models?: GeminiModel[] | null
+  gemini_reasoning: GeminiReasoning
   timezone: string
   meeting_days: string[]
   canvas_course_id?: string | null

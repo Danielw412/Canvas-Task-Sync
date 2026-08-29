@@ -5,7 +5,7 @@ import uuid
 from collections import defaultdict
 
 from canvas_task_sync.gemini import token_similarity
-from canvas_task_sync.models import DraftTask, StateRecord
+from canvas_task_sync.models import DraftTask, StateRecord, TaskType
 
 IDENTITY_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "canvas-task-sync.openai")
 TABLE_ANCHOR_PATTERN = re.compile(r"^table:(?P<element>.+):r\d+:c(?P<column>\d+)$")
@@ -23,6 +23,24 @@ def initial_logical_id(draft: DraftTask) -> str:
         ]
     )
     return str(uuid.uuid5(IDENTITY_NAMESPACE, identity))
+
+
+def _unreserved_initial_logical_id(draft: DraftTask, reserved: set[str]) -> str:
+    candidate = initial_logical_id(draft)
+    collision_index = 0
+    while candidate in reserved:
+        collision_index += 1
+        identity = "|".join(
+            [
+                draft.course_id,
+                draft.source_key,
+                draft.source_anchor,
+                str(draft.ordinal),
+                f"inserted:{collision_index}",
+            ]
+        )
+        candidate = str(uuid.uuid5(IDENTITY_NAMESPACE, identity))
+    return candidate
 
 
 def _family(anchor: str) -> str | None:
@@ -112,6 +130,37 @@ def resolve_logical_ids(
             resolved[unresolved[0]] = candidates[0].logical_id
             available.pop(candidates[0].logical_id, None)
 
+    # When one legacy assessment is split into dated sections, preserve its remote task
+    # as the first section and allocate new IDs only for the remaining sections.
+    assessment_words = re.compile(r"\b(?:quiz|test|exam)\b", re.IGNORECASE)
+    for anchor, indexes in drafts_by_anchor.items():
+        unresolved = [index for index in indexes if index not in resolved]
+        candidates = [
+            record
+            for record in records_by_anchor.get(anchor, [])
+            if record.logical_id in available
+        ]
+        if (
+            len(unresolved) < 2
+            or len(candidates) != 1
+            or not assessment_words.search(candidates[0].title)
+            or not all(
+                drafts[index].task_type in {TaskType.QUIZ, TaskType.TEST}
+                for index in unresolved
+            )
+        ):
+            continue
+        first_section = min(
+            unresolved,
+            key=lambda index: (
+                drafts[index].due_date is None,
+                drafts[index].due_date or drafts[index].ordinal,
+                drafts[index].ordinal,
+            ),
+        )
+        resolved[first_section] = candidates[0].logical_id
+        available.pop(candidates[0].logical_id, None)
+
     # A unique high-confidence match in the same table column survives inserted table rows.
     records_by_family: dict[str, list[StateRecord]] = defaultdict(list)
     for record in available.values():
@@ -134,6 +183,14 @@ def resolve_logical_ids(
             resolved[index] = match.logical_id
             available.pop(match.logical_id, None)
 
+    # A newly inserted action can occupy an ordinal previously used by a matched
+    # record later in the same block. Reserve every stored/resolved ID so the new
+    # action cannot accidentally alias the existing remote task.
+    reserved = {record.logical_id for record in records} | set(resolved.values())
     for index, draft in enumerate(drafts):
-        resolved.setdefault(index, initial_logical_id(draft))
+        if index in resolved:
+            continue
+        logical_id = _unreserved_initial_logical_id(draft, reserved)
+        resolved[index] = logical_id
+        reserved.add(logical_id)
     return resolved

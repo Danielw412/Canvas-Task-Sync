@@ -29,6 +29,7 @@ const overview: OverviewResponse = {
       task_list: 'School',
       assessment_task_list: 'Tests',
       ai_instructions: '',
+      gemini_reasoning: 'medium',
       timezone: 'America/New_York',
       meeting_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
       source: {
@@ -190,6 +191,7 @@ describe('operational pages', () => {
       expect(JSON.parse(String(request?.init?.body))).toMatchObject({
         settings: {
           gemini_model: 'gemini-3.5-flash',
+          gemini_reasoning: 'medium',
           gemini_fallback_models: [
             'gemini-3.5-flash-lite',
             'gemini-3.7-flash',

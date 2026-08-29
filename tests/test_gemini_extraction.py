@@ -180,7 +180,7 @@ def test_auto_retries_when_anchor_or_row_context_is_missing(
     assert outcome.fallback_reasons
 
 
-def test_model_quota_fallback_chain_keeps_high_reasoning():
+def test_model_quota_fallback_chain_uses_bounded_reasoning_with_output_headroom():
     calls = []
 
     class Models:
@@ -208,9 +208,10 @@ def test_model_quota_fallback_chain_keeps_high_reasoning():
         "gemini-3.5-flash-lite",
     ]
     assert all(
-        str(call[2].thinking_config.thinking_level).casefold().endswith("high")
+        str(call[2].thinking_config.thinking_level).casefold().endswith("medium")
         for call in calls
     )
+    assert all(call[2].max_output_tokens == 16_384 for call in calls)
     assert backend.used_model == "gemini-3.5-flash-lite"
     assert len(backend.fallback_reasons) == 4
 
@@ -315,6 +316,7 @@ def test_recent_assignment_context_is_included_in_gemini_prompt(
     ]
     assert "task_type=quiz" in backend.calls[0]["prompt"]
     assert "Study guides, studying, preparation, corrections" in backend.calls[0]["prompt"]
+    assert "one candidate per dated section" in backend.calls[0]["prompt"]
     assert "latest consecutive occurrence" in backend.calls[0]["prompt"]
     assert "exact atomic phrase" in backend.calls[0]["prompt"]
     assert "one to three concise sentences" in backend.calls[0]["prompt"]
@@ -357,3 +359,19 @@ def test_exhausted_model_chain_reports_each_attempt_without_raw_provider_details
     assert "gemini-3.6-flash: quota or rate limit" in message
     assert "gemini-3.5-flash: quota or rate limit" in message
     assert "secret-provider-detail" not in message
+
+
+def test_truncated_structured_response_is_reported_distinctly():
+    class Models:
+        def generate_content(self, **_kwargs):
+            return SimpleNamespace(parsed=None, text='[{"source_anchor": "agenda:1"')
+
+    backend = GoogleGenAIBackend(
+        "gemini-3.6-flash",
+        client=SimpleNamespace(models=Models()),
+        retry_waiter=lambda _seconds, _attempts: None,
+    )
+    with pytest.raises(GeminiExtractionError) as caught:
+        backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None)
+
+    assert "gemini-3.6-flash: invalid or truncated JSON response" in str(caught.value)

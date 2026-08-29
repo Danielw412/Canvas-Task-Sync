@@ -4,7 +4,7 @@ import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
 import { Button, CheckRow, EmptyState, Modal } from '../components/ui'
 import { fetchJson, mutateJson } from '../lib/api'
-import type { CourseSettings, CourseView, GeminiModel } from '../types'
+import type { CourseSettings, CourseView, GeminiModel, GeminiReasoning } from '../types'
 
 const GEMINI_MODELS: GeminiModel[] = [
   'gemini-3.7-flash',
@@ -29,6 +29,7 @@ const blankCourse: CourseSettings = {
   ai_instructions: '',
   gemini_model: GEMINI_MODELS[0],
   gemini_fallback_models: GEMINI_MODELS.slice(1),
+  gemini_reasoning: 'medium',
   timezone: 'America/New_York',
   meeting_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
   source: {
@@ -47,6 +48,7 @@ function cloneCourse(value: CourseSettings): CourseSettings {
   const order = modelOrder(clone)
   clone.gemini_model = order[0]
   clone.gemini_fallback_models = order.slice(1)
+  clone.gemini_reasoning ??= 'medium'
   return clone
 }
 
@@ -234,8 +236,15 @@ function ModelPreferences({ settings, update }: { settings: CourseSettings; upda
 
   return <fieldset className="model-preferences">
     <legend>Model preference</legend>
-    <p>Gemini tries the primary model first, then each fallback in order. All models use high reasoning.</p>
+    <p>Gemini tries the primary model first, then each fallback in order.</p>
     <div className="form-grid form-grid--two">
+      <Field label="Reasoning budget" help="Higher reasoning can improve difficult layouts but takes longer and uses more output budget.">
+        <select value={settings.gemini_reasoning} onChange={(event) => update((value) => { value.gemini_reasoning = event.target.value as GeminiReasoning })}>
+          <option value="low">Low · fastest</option>
+          <option value="medium">Medium · recommended</option>
+          <option value="high">High · most thorough</option>
+        </select>
+      </Field>
       {order.map((model, index) => <Field key={`${index}-${model}`} label={index === 0 ? 'Primary model' : `Fallback ${index}`}>
         <select aria-label={index === 0 ? 'Primary model' : `Fallback ${index}`} value={model} onChange={(event) => selectModel(index, event.target.value as GeminiModel)}>
           {GEMINI_MODELS.map((option) => <option key={option} value={option}>{GEMINI_MODEL_LABELS[option]}</option>)}

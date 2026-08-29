@@ -74,6 +74,22 @@ def agenda_html(heading: str) -> str:
     """
 
 
+def physics_agenda_table(week_start: str, monday_text: str, friday_text: str) -> str:
+    return f"""
+    <table>
+      <tr><td>Learning Targets for the Week: {week_start}. Apply kinematics equations.
+        How to find the assignments in Canvas. All assignments are due on the date indicated.
+      </td></tr>
+      <tr><td></td><td></td><td>Assignments and learning activities</td></tr>
+      <tr><td>M</td><td></td><td>Monday {monday_text}</td></tr>
+      <tr><td>T</td><td></td><td>Tuesday Classwork: Unit 1 Lab</td></tr>
+      <tr><td>W</td><td></td><td>Wednesday Classwork: Unit 1 Lab</td></tr>
+      <tr><td>Th</td><td></td><td>Thursday Classwork: Unit 1 practice</td></tr>
+      <tr><td>F</td><td></td><td>Friday {friday_text}</td></tr>
+    </table>
+    """
+
+
 @pytest.mark.parametrize(
     "heading",
     [
@@ -373,6 +389,53 @@ def test_canvas_discovery_uses_module_week_context_for_a_linked_undated_agenda()
 
     assert capture.page_id == "current-agenda"
     assert capture.selection["matched_text"] == "Week of August 17"
+
+
+def test_canvas_capture_scopes_a_multi_week_page_to_the_target_table():
+    course_id = "11126"
+    prefix = f"/api/v1/courses/{course_id}"
+    body = (
+        "<div class='agenda-history'>"
+        + physics_agenda_table(
+            "August 24",
+            "Due on Monday August 24: Unit 1 Assignment 1",
+            "Classwork: Unit 1 Assignment 3",
+        )
+        + physics_agenda_table(
+            "August 17",
+            "No School",
+            "Due on Monday August 24: stale Unit 1 Assignment 1; Read chapter 3",
+        )
+        + "</div>"
+    )
+    session = FakeSession(
+        {
+            f"{prefix}/front_page": {
+                "url": "physics-agenda",
+                "title": "AP Physics C agenda",
+                "html_url": f"https://canvas.example/courses/{course_id}/pages/physics-agenda",
+                "body": body,
+            },
+            prefix: {},
+            f"{prefix}/modules": [],
+            f"{prefix}/pages": [],
+            f"{prefix}/assignments": [],
+        }
+    )
+
+    capture = CanvasAgendaSource(
+        course_id=course_id,
+        target_week_start=date(2026, 8, 24),
+        base_url="https://canvas.example",
+        token="test-token",
+        session=session,
+    ).capture(include_image=False)
+
+    assert "Learning Targets for the Week: August 24" in capture.transcript
+    assert "Learning Targets for the Week: August 17" not in capture.transcript
+    assert "Read chapter 3" not in capture.transcript
+    assert len(capture.blocks) == 12
+    assert {block.metadata["table_index"] for block in capture.blocks} == {0}
 
 
 def test_relative_this_week_heading_requires_current_target_and_current_canvas_update():

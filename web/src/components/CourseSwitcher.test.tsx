@@ -10,6 +10,7 @@ const settings: CourseView['settings'] = {
   task_list: 'School',
   assessment_task_list: 'Tests',
   ai_instructions: '',
+  gemini_reasoning: 'medium',
   timezone: 'America/New_York',
   meeting_days: ['mon', 'tue', 'wed', 'thu', 'fri'],
   source: {
