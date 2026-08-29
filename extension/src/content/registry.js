@@ -30,13 +30,13 @@
 
   function blockedPageError(doc = document, locationValue = location) {
     const text = cleanText(doc.body?.innerText).toLowerCase()
-    if (/\/accounts\//.test(locationValue.pathname) || /sign in to continue|choose an account/.test(text)) {
-      return Object.assign(new Error('Sign in to this Google file in Chrome, then retry.'), {
+    if (/\/accounts\//.test(locationValue.pathname) || /sign in(?: to continue)?|choose an account|log in|authentication required/.test(text)) {
+      return Object.assign(new Error('Sign in to this resource in Chrome, then retry.'), {
         code: 'sign_in_required',
       })
     }
-    if (/you need access|request access|access denied|permission denied|file does not exist/.test(text)) {
-      return Object.assign(new Error('The current Chrome session cannot access this file.'), {
+    if (/you need access|request access|access denied|permission denied|forbidden|unauthorized|file does not exist/.test(text)) {
+      return Object.assign(new Error('The current Chrome session cannot access this resource.'), {
         code: 'access_denied',
       })
     }

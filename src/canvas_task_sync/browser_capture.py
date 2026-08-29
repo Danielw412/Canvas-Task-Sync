@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import re
 import threading
@@ -32,6 +33,7 @@ RESOURCE_PATTERNS = {
     "google_docs": re.compile(r"/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)"),
     "google_sheets": re.compile(r"/spreadsheets/(?:u/\d+/)?d/([A-Za-z0-9_-]+)"),
 }
+SUPPORTED_SOURCE_TYPES = {*RESOURCE_PATTERNS, "web_page"}
 SENSITIVE_METADATA_PARTS = (
     "authorization",
     "cookie",
@@ -71,20 +73,45 @@ class BrowserCaptureError(RuntimeError):
 
 def source_type_from_url(url: str) -> str:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "docs.google.com":
-        raise ValueError("Only supported docs.google.com editor URLs may be captured.")
-    for source_type, pattern in RESOURCE_PATTERNS.items():
-        if pattern.search(parsed.path):
-            return source_type
-    raise ValueError("The URL is not a supported Google Slides, Docs, or Sheets editor URL.")
+    _validate_capture_url(parsed)
+    if parsed.hostname == "docs.google.com":
+        for source_type, pattern in RESOURCE_PATTERNS.items():
+            if pattern.search(parsed.path):
+                return source_type
+    return "web_page"
 
 
 def resource_id_from_url(url: str) -> str:
     source_type = source_type_from_url(url)
-    match = RESOURCE_PATTERNS[source_type].search(urlparse(url).path)
-    if not match:  # Defensive: source_type_from_url already checked the same pattern.
-        raise ValueError("The Google Workspace resource ID is missing from the URL.")
-    return match.group(1)
+    if source_type in RESOURCE_PATTERNS:
+        match = RESOURCE_PATTERNS[source_type].search(urlparse(url).path)
+        if not match:  # Defensive: source_type_from_url already checked the same pattern.
+            raise ValueError("The Google Workspace resource ID is missing from the URL.")
+        return match.group(1)
+    normalized = normalized_capture_url(url)
+    return f"web_{hashlib.sha256(normalized.encode('utf-8')).hexdigest()[:40]}"
+
+
+def normalized_capture_url(url: str) -> str:
+    parsed = urlparse(url)
+    _validate_capture_url(parsed)
+    return parsed._replace(fragment="").geturl()
+
+
+def _validate_capture_url(parsed: Any) -> None:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError(
+            "Browser resource URLs must be public HTTPS links without embedded credentials."
+        )
+    hostname = parsed.hostname.casefold().rstrip(".")
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("Browser resource URLs must not target localhost.")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise ValueError("Browser resource URLs must not target private or local addresses.")
 
 
 def _validate_metadata(value: Any, path: str = "metadata") -> None:
@@ -210,8 +237,10 @@ class BrowserCaptureEnvelope(BaseModel):
     @field_validator("source_type")
     @classmethod
     def validate_source_type(cls, value: str) -> str:
-        if value not in RESOURCE_PATTERNS:
-            raise ValueError("source_type must be google_slides, google_docs, or google_sheets")
+        if value not in SUPPORTED_SOURCE_TYPES:
+            raise ValueError(
+                "source_type must be google_slides, google_docs, google_sheets, or web_page"
+            )
         return value
 
     @field_validator("selection", "metadata")
@@ -428,24 +457,29 @@ class BrowserCaptureBroker:
             self._condition.notify_all()
             return request.as_dict()
 
-    def claim_capture_request(self) -> dict[str, Any] | None:
-        now = datetime.now(UTC)
+    def claim_capture_request(self, *, wait_seconds: int = 0) -> dict[str, Any] | None:
+        deadline = time.monotonic() + max(0, min(wait_seconds, 25))
         with self._condition:
-            self._prune_requests(now)
-            queued = sorted(
-                (
-                    request
-                    for request in self._requests.values()
-                    if request.state == CaptureRequestState.QUEUED
-                ),
-                key=lambda request: (request.created_at, request.request_id),
-            )
-            if not queued:
-                return None
-            request = queued[0]
-            request.state = CaptureRequestState.LEASED
-            request.leased_at = now
-            return request.as_dict()
+            while True:
+                now = datetime.now(UTC)
+                self._prune_requests(now)
+                queued = sorted(
+                    (
+                        request
+                        for request in self._requests.values()
+                        if request.state == CaptureRequestState.QUEUED
+                    ),
+                    key=lambda request: (request.created_at, request.request_id),
+                )
+                if queued:
+                    request = queued[0]
+                    request.state = CaptureRequestState.LEASED
+                    request.leased_at = now
+                    return request.as_dict()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._condition.wait(timeout=remaining)
 
     def fail_capture_request(
         self,

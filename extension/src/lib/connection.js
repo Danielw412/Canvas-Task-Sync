@@ -64,8 +64,14 @@ export function discardCaptures(config, fetchImpl) {
   return request(config, '/api/v1/extension/captures', { method: 'DELETE' }, fetchImpl)
 }
 
-export function claimCaptureRequest(config, fetchImpl) {
-  return request(config, '/api/v1/extension/capture-requests/next', {}, fetchImpl)
+export function claimCaptureRequest(config, fetchImpl, waitSeconds = 0) {
+  const boundedWait = Math.max(0, Math.min(Number(waitSeconds) || 0, 25))
+  return request(
+    config,
+    `/api/v1/extension/capture-requests/next?wait_seconds=${boundedWait}`,
+    {},
+    fetchImpl,
+  )
 }
 
 export function reportCaptureFailure(config, requestId, error, fetchImpl) {

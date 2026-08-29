@@ -121,6 +121,11 @@ class CaptureFailure(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
 
 
+class BrowserResourceRead(BaseModel):
+    url: str = Field(min_length=8, max_length=4096)
+    timeout_seconds: int = Field(default=75, ge=5, le=120)
+
+
 class RunApply(BaseModel):
     plan_hash: str = Field(min_length=64, max_length=64)
 

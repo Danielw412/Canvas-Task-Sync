@@ -31,14 +31,20 @@ The default permissions are deliberately narrow:
   authorization already present in the Chrome session.
 
 No cookie permission, downloads permission, clipboard permission, or Google OAuth token is requested.
-Chrome requires `<all_urls>` specifically for `captureVisibleTab` outside an extension-button click;
-the connector declares it as optional and requests it only when the user clicks **Enable automatic
-screenshots** in settings. Text-only automation does not require that optional grant.
+Chrome requires `<all_urls>` for `captureVisibleTab` outside an extension-button click and for
+automatic extraction from non-Google linked course pages. The connector declares it as optional and
+requests it only when the user clicks **Enable linked-resource access** in settings. Google Workspace
+text extraction continues to use the narrower built-in `docs.google.com` grant.
 
 Starting a browser-backed preview in the website automatically creates a capture request. The
-extension processes those requests one at a time, opens a temporary Google tab, waits for it to load,
+extension processes those requests one at a time, opens a temporary resource tab, waits for it to load,
 captures the configured screenshot/text mode, submits the normalized envelope, closes only that tab,
 and restores the previously active tab. Manual popup capture remains supported.
+
+Assignment agents may also queue a known HTTPS resource link through the same broker. Google files use
+their format-specific adapters; other pages use a permission-gated readable-page adapter that returns
+the title, metadata, ordered readable text, and outbound links. Authentication and access failures are
+reported explicitly, and the extension does not expose cookies or credentials.
 
 ## Source adapters and normalized output
 

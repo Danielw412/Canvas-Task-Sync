@@ -17,11 +17,13 @@ await import('../src/content/registry.js')
 await import('../src/content/adapters/slides.js')
 await import('../src/content/adapters/docs.js')
 await import('../src/content/adapters/sheets.js')
+await import('../src/content/adapters/readable-page.js')
 
 const registry = globalThis.CanvasTaskSyncConnector
 const slides = registry.adapters.find((adapter) => adapter.sourceType === 'google_slides')
 const docs = registry.adapters.find((adapter) => adapter.sourceType === 'google_docs')
 const sheets = registry.adapters.find((adapter) => adapter.sourceType === 'google_sheets')
+const readablePage = registry.adapters.find((adapter) => adapter.sourceType === 'web_page')
 
 test('Manifest V3 background worker parses and registers its listeners', async () => {
   const listeners = []
@@ -188,7 +190,7 @@ test('Automatic capture queue claims work and reports a structured failure', asy
   const observed = []
   const fetchImpl = async (url, options) => {
     observed.push({ url, options })
-    if (url.endsWith('/next')) {
+    if (url.includes('/next?wait_seconds=')) {
       return {
         ok: true,
         status: 200,
@@ -200,6 +202,7 @@ test('Automatic capture queue claims work and reports a structured failure', asy
   const config = { serverUrl: 'http://127.0.0.1:8790', pairingToken: 'pair-token' }
   const request = await claimCaptureRequest(config, fetchImpl)
   assert.equal(request.request_id, 'request-1')
+  assert.match(observed[0].url, /wait_seconds=0$/)
   const error = Object.assign(new Error('No access.'), { code: 'access_denied' })
   await reportCaptureFailure(config, 'request-1', error, fetchImpl)
   assert.match(observed[1].url, /capture-requests\/request-1\/failed$/)
@@ -233,5 +236,26 @@ test('Page errors distinguish access denial, sign-in, and unsupported URLs', () 
     { pathname: '/accounts/signin' },
   )
   assert.equal(signedOut.code, 'sign_in_required')
-  assert.equal(registry.adapterFor('https://example.com/not-supported'), null)
+  const genericDenied = registry.utils.blockedPageError(
+    { body: { innerText: '403 Forbidden: authentication required' } },
+    { pathname: '/course/revision-guide' },
+  )
+  assert.equal(genericDenied.code, 'sign_in_required')
+  assert.equal(registry.adapterFor('https://example.com/course-resource'), readablePage)
+  assert.equal(registry.adapterFor('ftp://example.com/not-supported'), null)
+})
+
+test('Generic readable-page adapter bounds and normalizes authenticated page blocks', () => {
+  const longText = 'course instructions '.repeat(30_000)
+  const items = readablePage.normalize({
+    blocks: [
+      { kind: 'heading', text: 'Revision instructions', role: 'header', sectionId: 'revision' },
+      { kind: 'paragraph', text: 'Use evidence, revise the claim, and submit the final paragraph.' },
+      { kind: 'paragraph', text: longText },
+    ],
+  })
+  assert.equal(items[0].text, 'Revision instructions')
+  assert.equal(items[1].section_id, null)
+  assert.ok(items.reduce((total, item) => total + item.text.length, 0) <= 300_000)
+  assert.ok(items.every((item) => item.id && item.kind))
 })

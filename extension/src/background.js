@@ -13,11 +13,12 @@ const CONTENT_FILES = [
   'content/adapters/slides.js',
   'content/adapters/docs.js',
   'content/adapters/sheets.js',
+  'content/adapters/readable-page.js',
   'content/runtime.js',
 ]
 const MAX_SCREENSHOTS = 30
 const SCREENSHOT_INTERVAL_MS = 650
-const AUTOMATIC_SCREENSHOT_PERMISSION = { origins: ['<all_urls>'] }
+const LINKED_RESOURCE_PERMISSION = { origins: ['<all_urls>'] }
 let lastVisibleCaptureAt = 0
 let automaticQueuePromise = null
 
@@ -138,6 +139,17 @@ async function captureAndSend({ selection = {}, mode: oneTimeMode } = {}) {
 }
 
 async function captureTabAndSend(tab, { selection = {}, mode: oneTimeMode, automatic = false } = {}) {
+  if (
+    automatic
+    && new URL(tab.url).hostname !== 'docs.google.com'
+    && !await chrome.permissions.contains(LINKED_RESOURCE_PERMISSION)
+  ) {
+    const error = new Error(
+      'Reading this linked course resource needs the optional website access permission in the extension settings.',
+    )
+    error.code = 'host_permission_required'
+    throw error
+  }
   await ensureInjected(tab.id)
   const discovery = await discover(tab)
   const config = await loadConfig()
@@ -145,7 +157,7 @@ async function captureTabAndSend(tab, { selection = {}, mode: oneTimeMode, autom
   const acquisition = await acquireWithMode(requestedMode, {
     text: () => captureText(tab, selection),
     screenshot: async () => {
-      if (automatic && !await chrome.permissions.contains(AUTOMATIC_SCREENSHOT_PERMISSION)) {
+      if (automatic && !await chrome.permissions.contains(LINKED_RESOURCE_PERMISSION)) {
         const error = new Error(
           'Automatic screenshots need the optional permission in the extension settings. Text-only automatic capture remains available.',
         )
@@ -164,7 +176,7 @@ async function waitForTabReady(tabId, timeoutMs = 45_000) {
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener)
-      reject(new Error('The automatic Google file tab did not finish loading.'))
+      reject(new Error('The automatic resource tab did not finish loading.'))
     }, timeoutMs)
     function listener(updatedTabId, changeInfo) {
       if (updatedTabId !== tabId || changeInfo.status !== 'complete') return
@@ -192,7 +204,9 @@ async function processAutomaticQueue() {
   if (!config.pairingToken) return { processed: 0 }
   let processed = 0
   while (true) {
-    const request = await claimCaptureRequest(config)
+    // Long-poll most of the interval between Chrome alarms so a Luna request wakes the existing
+    // extension queue promptly instead of waiting for the next 30-second alarm.
+    const request = await claimCaptureRequest(config, undefined, 25)
     if (!request) return { processed }
     const [previousTab] = await chrome.tabs.query({ active: true, currentWindow: true })
     let temporaryTab = null

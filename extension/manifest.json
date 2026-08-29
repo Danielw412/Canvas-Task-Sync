@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Canvas Task Sync Source Connector",
   "version": "0.3.0",
-  "description": "Captures selected Google Slides, Docs, and Sheets content for the local Canvas Task Sync app.",
+  "description": "Captures selected course resources for the local Canvas Task Sync app.",
   "permissions": [
     "activeTab",
     "alarms",

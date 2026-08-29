@@ -23,8 +23,10 @@ from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.browser_capture import (
     MAX_CAPTURE_BYTES,
     MAX_CAPTURE_TEXT_BYTES,
+    AcquisitionMode,
     BrowserCaptureBroker,
     BrowserCaptureEnvelope,
+    BrowserCaptureError,
     resource_id_from_url,
     source_type_from_url,
 )
@@ -54,6 +56,7 @@ from canvas_task_sync.tracked_tasks import TrackedTaskReader
 from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
+    BrowserResourceRead,
     CaptureFailure,
     CourseSave,
     CourseView,
@@ -789,7 +792,7 @@ def create_web_app(
             "server_url": f"http://127.0.0.1:{runtime.port}",
             "pairing_token": runtime.extension_pairing_token,
             "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
-            "supported_sources": ["google_slides", "google_docs", "google_sheets"],
+            "supported_sources": ["google_slides", "google_docs", "google_sheets", "web_page"],
             "load_unpacked_path": str(runtime.settings.root_dir / "extension" / "dist"),
             "captures": [
                 status.as_dict() for status in runtime.capture_broker.list_statuses()
@@ -818,16 +821,78 @@ def create_web_app(
             "connected": True,
             "api_version": 1,
             "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
-            "supported_sources": ["google_slides", "google_docs", "google_sheets"],
+            "supported_sources": ["google_slides", "google_docs", "google_sheets", "web_page"],
             "captures": [
                 status.as_dict() for status in runtime.capture_broker.list_statuses()
             ],
             "capture_requests": runtime.capture_broker.list_capture_requests(),
         }
 
+    @api.post("/agent/browser-resources/read")
+    def read_browser_resource(
+        request: Request,
+        payload: BrowserResourceRead,
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        try:
+            source_type = source_type_from_url(payload.url)
+            resource_id = resource_id_from_url(payload.url)
+            try:
+                capture = runtime.capture_broker.get(source_type, resource_id)
+                capture_status = "cached"
+            except BrowserCaptureError as cache_error:
+                if cache_error.code not in {"capture_missing", "capture_stale"}:
+                    raise
+                capture_request = runtime.capture_broker.request_capture(
+                    payload.url,
+                    AcquisitionMode.TEXT,
+                    {},
+                )
+                capture = runtime.capture_broker.wait_for_capture(
+                    source_type,
+                    resource_id,
+                    request_id=capture_request["request_id"],
+                    timeout_seconds=payload.timeout_seconds,
+                )
+                capture_status = "captured"
+        except ValueError as error:
+            raise _http_error(422, "browser_resource_url_invalid", str(error)) from None
+        except BrowserCaptureError as error:
+            status = 504 if error.code == "automatic_capture_timeout" else 409
+            raise _http_error(status, error.code, str(error)) from None
+
+        readable_items = [
+            item.model_dump(mode="json", exclude_none=True)
+            for item in capture.items
+            if item.text.strip() or item.structured_data is not None
+        ]
+        content = "\n\n".join(
+            item.text.strip() for item in capture.items if item.text.strip()
+        )
+        return {
+            "ok": True,
+            "source_type": capture.source_type,
+            "source_url": capture.source_url,
+            "resource_id": capture.resource_id,
+            "title": capture.title,
+            "captured_at": capture.captured_at.isoformat(),
+            "content": content[:500_000],
+            "content_truncated": len(content) > 500_000,
+            "items": readable_items[:2_000],
+            "items_truncated": len(readable_items) > 2_000,
+            "metadata": capture.metadata,
+            "warnings": capture.warnings,
+            "capture_status": capture_status,
+        }
+
     @api.get("/extension/capture-requests/next", response_model=None)
-    def next_extension_capture_request(request: Request) -> Response | dict[str, Any]:
-        capture_request = _runtime(request).capture_broker.claim_capture_request()
+    def next_extension_capture_request(
+        request: Request,
+        wait_seconds: int = 0,
+    ) -> Response | dict[str, Any]:
+        capture_request = _runtime(request).capture_broker.claim_capture_request(
+            wait_seconds=max(0, min(wait_seconds, 25))
+        )
         if capture_request is None:
             return Response(status_code=204)
         return capture_request

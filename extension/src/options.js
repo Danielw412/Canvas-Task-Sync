@@ -15,12 +15,12 @@ async function updateScreenshotAccess() {
   const button = document.querySelector('#screenshot-access')
   const result = document.querySelector('#screenshot-access-result')
   button.textContent = enabled
-    ? 'Remove automatic screenshot access'
-    : 'Enable automatic screenshots'
+    ? 'Remove linked-resource access'
+    : 'Enable linked-resource access'
   button.dataset.enabled = String(enabled)
   result.textContent = enabled
-    ? 'Enabled for website-started captures.'
-    : 'Text-only automation is still available.'
+    ? 'Enabled for authenticated linked pages and website-started screenshots.'
+    : 'Google Workspace text capture remains available without this optional permission.'
 }
 
 function fillModes(select, inherit = false) {

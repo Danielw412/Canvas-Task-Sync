@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Thread
+from time import sleep
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +16,8 @@ from canvas_task_sync.browser_capture import (
     BrowserCaptureItem,
     BrowserCaptureScreenshot,
     CaptureMethod,
+    resource_id_from_url,
+    source_type_from_url,
 )
 from canvas_task_sync.configuration import BrowserSourceSettings, CourseSettings
 from canvas_task_sync.gemini import GeminiExtractor
@@ -25,6 +29,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 SLIDES_URL = "https://docs.google.com/presentation/d/slides_fixture/edit?slide=id.slide-a"
 DOCS_URL = "https://docs.google.com/document/d/docs_fixture/edit?tab=t.0"
 SHEETS_URL = "https://docs.google.com/spreadsheets/d/sheets_fixture/edit?gid=0"
+LINKED_PAGE_URL = "https://course-resource.example.edu/revision/instructions?week=3#details"
 
 
 def _png_data_url() -> str:
@@ -127,6 +132,17 @@ def test_browser_configuration_accepts_google_multi_account_urls():
     assert settings.source_format == "google_docs"
 
 
+def test_generic_browser_resources_use_stable_ids_and_reject_unsafe_urls():
+    assert source_type_from_url(LINKED_PAGE_URL) == "web_page"
+    assert resource_id_from_url(LINKED_PAGE_URL) == resource_id_from_url(
+        LINKED_PAGE_URL.replace("#details", "#another-section")
+    )
+    with pytest.raises(ValueError, match="public HTTPS"):
+        source_type_from_url("http://course-resource.example.edu/instructions")
+    with pytest.raises(ValueError, match="localhost|private or local"):
+        source_type_from_url("https://127.0.0.1/private")
+
+
 def test_broker_is_bounded_ephemeral_and_reports_missing_or_stale_captures():
     broker = BrowserCaptureBroker(ttl_seconds=60, max_records=1)
     slides = _envelope(
@@ -201,6 +217,22 @@ def test_automatic_capture_queue_is_fifo_deduplicated_and_reports_failures():
             request_id=second["request_id"],
             timeout_seconds=1,
         )
+
+
+def test_extension_queue_long_poll_wakes_when_an_agent_request_arrives():
+    broker = BrowserCaptureBroker()
+    claimed: list[dict[str, object] | None] = []
+    worker = Thread(
+        target=lambda: claimed.append(broker.claim_capture_request(wait_seconds=2)),
+        daemon=True,
+    )
+    worker.start()
+    sleep(0.05)
+    queued = broker.request_capture(DOCS_URL, AcquisitionMode.TEXT)
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert claimed[0]["request_id"] == queued["request_id"]
 
 
 def test_slides_browser_adapter_preserves_selection_order_metadata_and_multiple_images():
@@ -524,6 +556,98 @@ def test_extension_bridge_pairs_accepts_and_clears_without_persisting_content(tm
         if path.is_file()
     )
     assert unique_content.encode() not in persisted
+
+
+def test_agent_browser_resource_endpoint_returns_compact_content_and_access_failures(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_web_app(_write_browser_project(tmp_path))
+    capture = _envelope(
+        source_type="web_page",
+        source_url=LINKED_PAGE_URL,
+        resource_id=resource_id_from_url(LINKED_PAGE_URL),
+        items=[
+            BrowserCaptureItem(
+                id="page:heading",
+                kind="heading",
+                text="Revision instructions",
+                role="header",
+            ),
+            BrowserCaptureItem(
+                id="page:paragraph",
+                kind="paragraph",
+                text="Highlight the claim and submit the revised paragraph.",
+                structured_data={"links": [{"text": "Rubric", "url": "https://example.edu/rubric"}]},
+            ),
+        ],
+    )
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        monkeypatch.setattr(
+            runtime.capture_broker,
+            "request_capture",
+            lambda *_args, **_kwargs: {"request_id": "agent-resource-request"},
+        )
+        monkeypatch.setattr(
+            runtime.capture_broker,
+            "wait_for_capture",
+            lambda *_args, **_kwargs: capture,
+        )
+        csrf = client.get("/api/v1/bootstrap").json()["csrf_token"]
+        response = client.post(
+            "/api/v1/agent/browser-resources/read",
+            headers={"x-csrf-token": csrf},
+            json={"url": LINKED_PAGE_URL, "timeout_seconds": 10},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["source_type"] == "web_page"
+        assert response.json()["capture_status"] == "captured"
+        assert "submit the revised paragraph" in response.json()["content"]
+        assert response.json()["items"][1]["structured_data"]["links"][0]["text"] == "Rubric"
+
+        def access_denied(*_args, **_kwargs):
+            raise BrowserCaptureError(
+                "access_denied",
+                "The current Chrome session cannot access this file.",
+            )
+
+        monkeypatch.setattr(runtime.capture_broker, "wait_for_capture", access_denied)
+        denied = client.post(
+            "/api/v1/agent/browser-resources/read",
+            headers={"x-csrf-token": csrf},
+            json={"url": LINKED_PAGE_URL, "timeout_seconds": 10},
+        )
+        assert denied.status_code == 409
+        assert denied.json()["error"]["code"] == "access_denied"
+
+
+def test_agent_browser_resource_endpoint_reuses_a_recent_extension_capture(tmp_path, monkeypatch):
+    app = create_web_app(_write_browser_project(tmp_path))
+    capture = _envelope(
+        source_type="web_page",
+        source_url=LINKED_PAGE_URL,
+        resource_id=resource_id_from_url(LINKED_PAGE_URL),
+        items=[BrowserCaptureItem(id="page:content", kind="paragraph", text="Cached directions")],
+    )
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        runtime.capture_broker.put(capture)
+
+        def unexpected_request(*_args, **_kwargs):
+            raise AssertionError("A recent capture must not queue another Chrome tab")
+
+        monkeypatch.setattr(runtime.capture_broker, "request_capture", unexpected_request)
+        csrf = client.get("/api/v1/bootstrap").json()["csrf_token"]
+        response = client.post(
+            "/api/v1/agent/browser-resources/read",
+            headers={"x-csrf-token": csrf},
+            json={"url": LINKED_PAGE_URL, "timeout_seconds": 10},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["capture_status"] == "cached"
+        assert response.json()["content"] == "Cached directions"
 
 
 def test_run_all_dispatches_courses_together_and_queues_browser_capture_fifo(tmp_path):
