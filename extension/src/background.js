@@ -26,6 +26,155 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+function googleDocsTextInfo(url) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.hostname !== 'docs.google.com') return null
+    const match = parsed.pathname.match(/^\/document(\/u\/\d+)?\/d\/([^/]+)/)
+    if (!match) return null
+    const accountPath = match[1] || ''
+    const resourceId = decodeURIComponent(match[2])
+    return {
+      resourceId,
+      exportUrl: new URL(
+        `/document${accountPath}/d/${encodeURIComponent(resourceId)}/export?format=txt`,
+        parsed.origin,
+      ).toString(),
+    }
+  } catch {
+    return null
+  }
+}
+
+function textItems(lines, extractionMethod) {
+  return lines.map((text, order) => ({
+    id: `document-start:text-line-${order}`,
+    kind: 'paragraph',
+    order,
+    text,
+    role: 'unknown',
+    row_index: null,
+    column_index: null,
+    row_label: null,
+    slide_id: null,
+    section_id: 'document-start',
+    sheet_id: null,
+    sheet_name: null,
+    range_a1: null,
+    structured_data: null,
+    metadata: { extraction_method: extractionMethod },
+  }))
+}
+
+function normalizedTextLines(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
+function automaticGoogleDocsDiscovery(tab) {
+  const info = googleDocsTextInfo(tab.url)
+  if (!info) throw new Error('The queued Google Docs URL is invalid.')
+  return {
+    adapterId: 'google-docs-text-v1',
+    sourceType: 'google_docs',
+    resourceId: info.resourceId,
+    url: tab.url,
+    title: String(tab.title || 'Google Doc').replace(/\s+-\s+Google Docs.*$/i, ''),
+    readyState: 'complete',
+    targets: [{ id: 'document-start', label: 'Entire document', order: 0, current: true }],
+    selectionKind: 'sections',
+    warnings: ['Automatic linked-resource capture uses plain text only.'],
+  }
+}
+
+async function fetchGoogleDocsPlainText(tab) {
+  const info = googleDocsTextInfo(tab.url)
+  if (!info) throw new Error('The queued Google Docs URL is invalid.')
+  const response = await fetch(info.exportUrl, {
+    credentials: 'include',
+    redirect: 'follow',
+    cache: 'no-store',
+  })
+  const responsePath = (() => {
+    try { return new URL(response.url).pathname } catch { return '' }
+  })()
+  if (!response.ok || responsePath.startsWith('/accounts/')) {
+    throw new Error(`Google Docs text export returned ${response.status || 'a sign-in page'}.`)
+  }
+  const lines = normalizedTextLines(await response.text())
+  if (!lines.length) throw new Error('The Google Docs text export was empty.')
+  return {
+    items: textItems(lines, 'background_plain_text_export'),
+    metadata: { section_ids: [], section_count: 1, extraction_method: 'background_plain_text_export' },
+    warnings: [],
+  }
+}
+
+async function captureGoogleDocsRenderedText(tab) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: () => {
+      const editor = document.querySelector(
+        '.kix-appview-editor, .docs-editor-container, [data-document-editor], [role="main"]',
+      ) || document.body
+      const candidates = editor
+        ? [...editor.querySelectorAll(
+          'h1, h2, h3, h4, h5, h6, [role="heading"], p, [role="paragraph"], .kix-lineview-text-block',
+        )]
+        : []
+      const seen = new Set()
+      const lines = []
+      for (const node of candidates) {
+        const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim()
+        if (!text || seen.has(text)) continue
+        seen.add(text)
+        lines.push(text)
+      }
+      if (!lines.length && editor) {
+        for (const line of String(editor.innerText || '').split(/\r?\n/)) {
+          const text = line.replace(/\s+/g, ' ').trim()
+          if (!text || seen.has(text)) continue
+          seen.add(text)
+          lines.push(text)
+        }
+      }
+      return lines
+    },
+  })
+  const lines = normalizedTextLines(results?.[0]?.result || [])
+  if (!lines.length) throw new Error('Google Docs exposed no readable rendered text.')
+  return {
+    items: textItems(lines, 'rendered_dom_fallback'),
+    metadata: { section_ids: [], section_count: 1, extraction_method: 'rendered_dom_fallback' },
+    warnings: [],
+  }
+}
+
+async function captureAutomaticGoogleDocsText(tab) {
+  try {
+    return await fetchGoogleDocsPlainText(tab)
+  } catch (exportError) {
+    try {
+      const fallback = await captureGoogleDocsRenderedText(tab)
+      return {
+        ...fallback,
+        warnings: [
+          `Authenticated Google Docs text export was unavailable; used rendered text instead: ${exportError.message}`,
+          ...(fallback.warnings || []),
+        ],
+      }
+    } catch (domError) {
+      const error = new Error(
+        `Google Docs text extraction failed. Text export: ${exportError.message}; rendered page: ${domError.message}`,
+      )
+      error.code = 'text_failed'
+      throw error
+    }
+  }
+}
+
 async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id || !tab.url) throw new Error('No active Chrome tab is available.')
@@ -89,7 +238,8 @@ async function inspectScreenshot(dataUrl) {
   return dimensions
 }
 
-async function captureText(tab, selection) {
+async function captureText(tab, selection, { automaticGoogleDocsText = false } = {}) {
+  if (automaticGoogleDocsText) return captureAutomaticGoogleDocsText(tab)
   return sendToTab(tab.id, { type: 'CTS_ACQUIRE_TEXT', selection })
 }
 
@@ -150,12 +300,17 @@ async function captureTabAndSend(tab, { selection = {}, mode: oneTimeMode, autom
     error.code = 'host_permission_required'
     throw error
   }
-  await ensureInjected(tab.id)
-  const discovery = await discover(tab)
+  const automaticGoogleDocsText = Boolean(
+    automatic && oneTimeMode === 'text' && googleDocsTextInfo(tab.url),
+  )
+  if (!automaticGoogleDocsText) await ensureInjected(tab.id)
+  const discovery = automaticGoogleDocsText
+    ? automaticGoogleDocsDiscovery(tab)
+    : await discover(tab)
   const config = await loadConfig()
   const requestedMode = resolveMode(config, discovery.sourceType, oneTimeMode)
   const acquisition = await acquireWithMode(requestedMode, {
-    text: () => captureText(tab, selection),
+    text: () => captureText(tab, selection, { automaticGoogleDocsText }),
     screenshot: async () => {
       if (automatic && !await chrome.permissions.contains(LINKED_RESOURCE_PERMISSION)) {
         const error = new Error(
