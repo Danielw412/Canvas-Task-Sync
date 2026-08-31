@@ -6,7 +6,7 @@ import {
   Clock3,
   Grid2X2,
   HeartPulse,
-  MoreHorizontal,
+  Menu,
   RefreshCw,
   Settings,
 } from 'lucide-react'
@@ -48,34 +48,35 @@ export function AppShell() {
   return <div className="app-shell">
     <aside className="sidebar">
       <NavLink to="/" className="brand" aria-label="Canvas Task Sync overview">
-        <RefreshCw size={31} strokeWidth={2.2} /><span>Canvas Task Sync</span>
+        <span className="brand__mark"><RefreshCw size={20} strokeWidth={2.2} /></span>
+        <span>Canvas Task Sync</span>
       </NavLink>
       <nav className="desktop-nav" aria-label="Primary navigation">
         {navigation.map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? 'nav-item nav-item--active' : 'nav-item'}>
-          <Icon size={22} /><span>{label}</span>
+          <Icon size={19} strokeWidth={1.8} /><span>{label}</span>
         </NavLink>)}
       </nav>
-      <div className="server-status"><span className="online-dot" /><div><strong>Local server</strong><span>Connected</span></div></div>
+      <div className="server-status"><CircleCheck size={17} /><div><strong>Local server</strong><span>Connected</span></div></div>
     </aside>
     <div className="app-main">
       <header className="topbar">
         <div className="mobile-brand">
-          <NavLink to="/" aria-label="Canvas Task Sync overview"><RefreshCw size={29} strokeWidth={2.2} /><span>Canvas Task Sync</span></NavLink>
-          <NavLink to="/settings" aria-label="Open settings"><MoreHorizontal size={25} /></NavLink>
+          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><RefreshCw size={19} strokeWidth={2.2} /></span><span>Canvas Task Sync</span></NavLink>
+          <NavLink to="/settings" aria-label="Open settings"><Menu size={22} /></NavLink>
         </div>
         <CourseSwitcher courses={data?.courses ?? []} selectedCourseId={selectedCourseId} onSelect={setSelectedCourseId} />
         <div className="topbar__actions">
-          <Button variant="secondary" icon={HeartPulse} onClick={runHealth}>Run health check</Button>
+          <Button variant="ghost" icon={HeartPulse} onClick={runHealth}>Check health</Button>
           <div className={`connection-summary ${healthy ? 'tone-success' : 'tone-warning'}`}>
-            <CircleCheck size={20} /><span>{healthy ? 'Google + Gemini connected' : 'Setup needs attention'}</span>
+            <CircleCheck size={18} /><span>{healthy ? 'Ready' : 'Needs setup'}</span>
           </div>
         </div>
       </header>
       <main className="page-shell" key={location.pathname}><Outlet /></main>
     </div>
     <nav className="mobile-nav" aria-label="Mobile navigation">
-      {navigation.filter((item) => !item.desktopOnly).map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><Icon size={22} /><span>{label}</span></NavLink>)}
-      <NavLink to="/settings" className={({ isActive }) => isActive || location.pathname === '/diagnostics' ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><MoreHorizontal size={22} /><span>More</span></NavLink>
+      {navigation.filter((item) => !item.desktopOnly).map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><Icon size={20} strokeWidth={1.8} /><span>{label}</span></NavLink>)}
+      <NavLink to="/settings" className={({ isActive }) => isActive || location.pathname === '/diagnostics' ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><Menu size={20} strokeWidth={1.8} /><span>More</span></NavLink>
     </nav>
   </div>
 }

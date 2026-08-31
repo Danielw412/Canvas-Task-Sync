@@ -37,9 +37,9 @@ describe('agendaWeekOptions', () => {
     )
 
     expect(options).toEqual([
-      { value: 'previous_week', label: 'Previous Week · Aug 10–14, 2026' },
-      { value: 'this_week', label: 'This Week · Aug 17–21, 2026' },
-      { value: 'next_week', label: 'Next Week · Aug 24–28, 2026' },
+      { value: 'previous_week', label: 'Previous Week · Aug 10-14, 2026' },
+      { value: 'this_week', label: 'This Week · Aug 17-21, 2026' },
+      { value: 'next_week', label: 'Next Week · Aug 24-28, 2026' },
     ])
   })
 })

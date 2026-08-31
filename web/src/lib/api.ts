@@ -112,7 +112,7 @@ export function useOverview(courseId?: string | null) {
 }
 
 export function formatDateTime(value?: string | null, options?: Intl.DateTimeFormatOptions) {
-  if (!value) return '—'
+  if (!value) return '-'
   return new Intl.DateTimeFormat(undefined, options ?? {
     month: 'short',
     day: 'numeric',
@@ -122,7 +122,7 @@ export function formatDateTime(value?: string | null, options?: Intl.DateTimeFor
 }
 
 export function formatDuration(start?: string | null, finish?: string | null) {
-  if (!start) return '—'
+  if (!start) return '-'
   const end = finish ? new Date(finish).getTime() : Date.now()
   const seconds = Math.max(0, (end - new Date(start).getTime()) / 1000)
   return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`
@@ -166,10 +166,10 @@ function formatAgendaWeekRange(start: Date, end: Date) {
   const endMonth = month.format(end)
   const year = end.getUTCFullYear()
   if (start.getUTCFullYear() === year && startMonth === endMonth) {
-    return `${startMonth} ${start.getUTCDate()}–${end.getUTCDate()}, ${year}`
+    return `${startMonth} ${start.getUTCDate()}-${end.getUTCDate()}, ${year}`
   }
   if (start.getUTCFullYear() !== year) {
-    return `${startMonth} ${start.getUTCDate()}, ${start.getUTCFullYear()}–${endMonth} ${end.getUTCDate()}, ${year}`
+    return `${startMonth} ${start.getUTCDate()}, ${start.getUTCFullYear()}-${endMonth} ${end.getUTCDate()}, ${year}`
   }
-  return `${startMonth} ${start.getUTCDate()}–${endMonth} ${end.getUTCDate()}, ${year}`
+  return `${startMonth} ${start.getUTCDate()}-${endMonth} ${end.getUTCDate()}, ${year}`
 }

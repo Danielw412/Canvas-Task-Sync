@@ -89,7 +89,7 @@ export default function SettingsPage() {
   if (error) return <EmptyState title="Settings could not load" body={error.message} />
   const connections = data?.connections
   return <div className="settings-page">
-    <header className="page-heading page-heading--actions"><div><h1>Settings</h1><p>Manage local connections, storage, and app behavior.</p></div><Button icon={RefreshCw} disabled={busy} onClick={() => void action(() => mutateJson('/api/v1/health-runs'), 'Health check queued.')}>Run all checks</Button></header>
+    <header className="page-heading page-heading--actions"><div><h1>Settings</h1><p>Connections, storage, and local data.</p></div><Button icon={RefreshCw} disabled={busy} onClick={() => void action(() => mutateJson('/api/v1/health-runs'), 'Health check queued.')}>Run all checks</Button></header>
     <div className="tab-bar settings-tabs"><button className={tab === 'connections' ? 'is-active' : ''} onClick={() => setTab('connections')}>Connections</button><button className={tab === 'general' ? 'is-active' : ''} onClick={() => setTab('general')}>General</button><button className={tab === 'privacy' ? 'is-active' : ''} onClick={() => setTab('privacy')}>Data &amp; privacy</button></div>
     <div className="settings-layout">
       <section className="settings-main">

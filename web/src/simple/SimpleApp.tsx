@@ -93,7 +93,7 @@ function runOutcome(run: RunSummary) {
   const outcomes: Partial<Record<RunStatus, { message: string; tone: string }>> = {
     awaiting_approval: { message: 'Approval required', tone: 'warning' },
     review_needed: { message: 'Review needed', tone: 'warning' },
-    stale: { message: 'Preview changed — run again', tone: 'warning' },
+    stale: { message: 'Preview changed. Run again', tone: 'warning' },
     cancelled: { message: 'Run cancelled', tone: 'muted' },
     failed: { message: 'Run failed', tone: 'error' },
     failed_partial: { message: 'Run partially applied', tone: 'error' },
@@ -320,7 +320,7 @@ export function SimpleApp({
                   <span className={`task-action task-action--${action.kind}`}>{humanizeStage(action.kind)}</span>
                   <strong>{action.title}</strong>
                   <span>{dueDateLabel(action.due_date)}</span>
-                  <span>{action.task_list ?? '—'}</span>
+                  <span>{action.task_list ?? '-'}</span>
                   <small>{action.reason}</small>
                 </div>)}
               </div> : <p>{runDetail?.plan ? 'No tasks were suggested for this run.' : 'The suggested task plan is not available yet.'}</p>}

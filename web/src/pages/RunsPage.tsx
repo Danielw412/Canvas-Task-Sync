@@ -33,7 +33,7 @@ export default function RunsPage() {
   }
 
   return <div className="standard-page">
-    <header className="page-heading page-heading--actions"><div><h1>Runs</h1><p>Review syncs, previews, scheduled activity, and health checks.</p></div><Button icon={Play} onClick={syncCourse} disabled={!selectedCourseId}>Sync selected course</Button></header>
+    <header className="page-heading page-heading--actions"><div><h1>Runs</h1><p>Review previews, syncs, and health checks.</p></div><Button icon={Play} onClick={syncCourse} disabled={!selectedCourseId}>Sync selected course</Button></header>
     <div className="toolbar-row">
       <label className="filter-control week-filter-control"><CalendarDays size={17} /><select aria-label="Agenda week" value={weekSelection} onChange={(event) => setWeekSelection(event.target.value as WeekSelection)}>{weekOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
       <label className="search-control"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search runs" /></label>

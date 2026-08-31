@@ -7,6 +7,7 @@ import {
   Circle,
   Info,
   LoaderCircle,
+  Minus,
   XCircle,
   type LucideIcon,
 } from 'lucide-react'
@@ -55,7 +56,7 @@ export function ActionMark({ kind }: { kind: SyncActionKind }) {
     return <span className="action-mark action-mark--attention"><AlertTriangle size={15} />Needs attention</span>
   }
   if (kind === 'ignored') return <span className="action-mark action-mark--muted"><Info size={15} />Ignored</span>
-  return <span className="action-mark action-mark--muted"><span>—</span>Unchanged</span>
+  return <span className="action-mark action-mark--muted"><Minus size={15} />Unchanged</span>
 }
 
 export function SelectChevron() { return <ChevronDown aria-hidden size={17} /> }
@@ -66,7 +67,7 @@ export function EmptyState({ title, body, action }: { title: string; body: strin
 }
 
 export function PageLoader() {
-  return <div className="page-loader"><LoaderCircle className="spin" size={26} /><span>Loading control center…</span></div>
+  return <div className="page-loader" role="status" aria-label="Loading control center"><span /><span /><span /></div>
 }
 
 export function Modal({ title, children, footer, onClose }: { title: string; children: ReactNode; footer: ReactNode; onClose: () => void }) {
