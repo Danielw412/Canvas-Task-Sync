@@ -142,6 +142,7 @@ class TrackedTaskReader:
             due_uncertain_reason=record.due_uncertain_reason,
             source_date=record.source_date,
             historical=record.historical,
+            manually_managed=record.manually_managed,
             google_task=TrackedTaskGoogleIdentity(
                 task_id=record.google_task_id,
                 tasklist_id=record.tasklist_id,
@@ -177,6 +178,8 @@ def _tasklist_title(record: StateRecord, course: Any | None) -> str | None:
 
 def _source_type(source_key: str, source_url: str | None) -> str:
     lowered = source_key.casefold()
+    if lowered.startswith("manual:"):
+        return "manual"
     for candidate in ("canvas", "google_slides", "google_docs", "google_sheets", "browser"):
         if candidate in lowered:
             return candidate

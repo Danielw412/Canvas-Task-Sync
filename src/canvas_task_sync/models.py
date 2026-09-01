@@ -255,6 +255,7 @@ class StateRecord(BaseModel):
     tasklist_id: str | None = None
     tasklist_title: str | None = None
     payload_hash: str | None = None
+    manually_managed: bool = False
 
 
 class SyncAction(BaseModel):

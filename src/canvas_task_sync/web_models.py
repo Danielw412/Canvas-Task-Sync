@@ -331,9 +331,23 @@ class TrackedTaskView(BaseModel):
     due_uncertain_reason: str | None = None
     source_date: date | None = None
     historical: bool = False
+    manually_managed: bool = False
     google_task: TrackedTaskGoogleIdentity
     source: TrackedTaskSource
     canvas: TrackedTaskCanvasIdentity
+
+
+class ManualTaskSave(BaseModel):
+    course_id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=1024)
+    details: str = Field(default="", max_length=8192)
+    due_date: date | None = None
+    completed: bool = False
+    classification: TaskClassification = TaskClassification.HOMEWORK
+    task_type: TaskType = TaskType.ASSIGNMENT
+    action_kind: ActionKind = ActionKind.COMPLETE
+    source_url: str | None = Field(default=None, max_length=4096)
+    assignment_url: str | None = Field(default=None, max_length=4096)
 
 
 class DiagnosticsResponse(BaseModel):

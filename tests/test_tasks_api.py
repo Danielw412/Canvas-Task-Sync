@@ -59,6 +59,71 @@ class FakeTasksClient:
         ]
 
 
+class MutableTasksClient:
+    def __init__(self) -> None:
+        self.tasks: dict[str, RemoteTask] = {}
+        self.updates: list[tuple[str, str, str]] = []
+
+    def resolve_task_list(self, title: str) -> tuple[str, str]:
+        return ("list-tests", title) if title == "Tests" else ("list-1", title)
+
+    def list_tasks(self, tasklist_id: str) -> list[RemoteTask]:
+        return [
+            task.model_copy(update={"tasklist_id": tasklist_id, "tasklist_title": "School"})
+            for task in self.tasks.values()
+        ]
+
+    def create_task(self, tasklist_id: str, *, title: str, notes: str, due_date) -> RemoteTask:
+        task = RemoteTask(
+            id="manual-google-1",
+            title=title,
+            notes=notes,
+            due=f"{due_date.isoformat()}T00:00:00.000Z" if due_date else None,
+        )
+        self.tasks[task.id] = task
+        self.updates.append(("create", tasklist_id, title))
+        return task
+
+    def get_task(self, tasklist_id: str, task_id: str) -> RemoteTask:
+        return self.tasks[task_id]
+
+    def verify_due(self, tasklist_id: str, task_id: str, due_date) -> RemoteTask:
+        return self.tasks[task_id]
+
+    def update_task(
+        self,
+        tasklist_id: str,
+        task_id: str,
+        *,
+        title: str,
+        notes: str,
+        due_date,
+    ) -> RemoteTask:
+        current = self.tasks[task_id]
+        updated = current.model_copy(update={
+            "title": title,
+            "notes": notes,
+            "due": f"{due_date.isoformat()}T00:00:00.000Z" if due_date else None,
+        })
+        self.tasks[task_id] = updated
+        self.updates.append(("update", tasklist_id, title))
+        return updated
+
+    def set_task_completed(
+        self,
+        tasklist_id: str,
+        task_id: str,
+        *,
+        completed: bool,
+    ) -> RemoteTask:
+        updated = self.tasks[task_id].model_copy(update={
+            "status": "completed" if completed else "needsAction",
+            "completed": "2026-08-31T20:00:00.000Z" if completed else None,
+        })
+        self.tasks[task_id] = updated
+        return updated
+
+
 def _record(logical_id: str, google_task_id: str, *, task_type: TaskType) -> StateRecord:
     return StateRecord(
         logical_id=logical_id,
@@ -146,3 +211,67 @@ def test_unfinished_tasks_exclude_unknown_google_status(tmp_path: Path) -> None:
     assert detail.status_code == 200
     assert detail.json()["completed"] is None
     assert detail.json()["completion_status"] == "unavailable"
+
+
+def test_manual_task_create_and_edit_write_google_and_persist_override(tmp_path: Path) -> None:
+    config_path = _write_project(tmp_path)
+    app = create_web_app(config_path)
+    tasks = MutableTasksClient()
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        runtime.manual_tasks.credentials_loader = lambda *_args, **_kwargs: object()
+        runtime.manual_tasks.tasks_client_factory = lambda _credentials: tasks
+        runtime.tracked_tasks.credentials_loader = lambda *_args, **_kwargs: object()
+        runtime.tracked_tasks.tasks_client_factory = lambda _credentials: tasks
+        csrf = client.get("/api/v1/bootstrap").json()["csrf_token"]
+        headers = {"X-CSRF-Token": csrf}
+        created = client.post(
+            "/api/v1/tasks",
+            headers=headers,
+            json={
+                "course_id": "physics",
+                "title": "Lab report",
+                "details": "Finish the analysis and conclusion.",
+                "due_date": "2026-09-03",
+                "completed": False,
+                "classification": "homework",
+                "task_type": "assignment",
+                "action_kind": "write",
+                "source_url": "https://school.instructure.com/courses/11126",
+            },
+        )
+
+        assert created.status_code == 201
+        logical_id = created.json()["logical_id"]
+        assert created.json()["display_title"] == "Lab report"
+        assert created.json()["manually_managed"] is True
+        assert created.json()["source"]["type"] == "manual"
+        assert tasks.tasks["manual-google-1"].title == "[PHYSICS] Lab report"
+
+        edited = client.put(
+            f"/api/v1/tasks/{logical_id}",
+            headers=headers,
+            json={
+                "course_id": "physics",
+                "title": "Revised lab report",
+                "details": "Add error analysis and submit the final PDF.",
+                "due_date": "2026-09-04",
+                "completed": True,
+                "classification": "classwork",
+                "task_type": "assignment",
+                "action_kind": "submit",
+                "assignment_url": "https://school.instructure.com/courses/11126/assignments/99",
+            },
+        )
+
+    assert edited.status_code == 200
+    assert edited.json()["display_title"] == "Revised lab report"
+    assert edited.json()["details"] == "Add error analysis and submit the final PDF."
+    assert edited.json()["due_date"] == "2026-09-04"
+    assert edited.json()["completed"] is True
+    assert tasks.tasks["manual-google-1"].status == "completed"
+    with StateStore(tmp_path / ".canvas-task-sync" / "state.sqlite3", writable=False) as state:
+        record = state.get_record(logical_id)
+    assert record is not None
+    assert record.manually_managed is True
+    assert record.title == "[PHYSICS] Revised lab report"

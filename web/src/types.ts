@@ -255,6 +255,51 @@ export interface OverviewResponse {
   next_schedule?: Schedule | null
 }
 
+export interface TrackedTask {
+  logical_id: string
+  course: {
+    id: string
+    name: string
+    prefix: string
+  }
+  title: string
+  display_title: string
+  details: string
+  due_date?: string | null
+  completed: boolean | null
+  completion_status: string
+  classification?: 'homework' | 'classwork' | null
+  task_type?: 'assignment' | 'quiz' | 'test' | null
+  action_kind?: string | null
+  manually_managed: boolean
+  google_task: {
+    task_id?: string | null
+    tasklist_title?: string | null
+    status: string
+  }
+  source: {
+    type: string
+    url?: string | null
+    assignment_url?: string | null
+  }
+  canvas: {
+    assignment_url?: string | null
+  }
+}
+
+export interface ManualTaskInput {
+  course_id: string
+  title: string
+  details: string
+  due_date: string | null
+  completed: boolean
+  classification: 'homework' | 'classwork'
+  task_type: 'assignment' | 'quiz' | 'test'
+  action_kind: string
+  source_url: string | null
+  assignment_url: string | null
+}
+
 export interface DiagnosticsResponse {
   checks: ConnectionItem[]
   recent_events: RunEvent[]

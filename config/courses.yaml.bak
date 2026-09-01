@@ -19,6 +19,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '12604'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -51,6 +52,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11126'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -83,6 +85,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11517'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -116,6 +119,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '12506'
+    gemini_reasoning: medium
     source:
       type: none
       extraction:
@@ -126,7 +130,8 @@ courses:
         - present
         - submit
         - bring
-    ai_instructions: Ignore the watching AP classroom video assignments
+    ai_instructions: Ignore the watch AP classroom video assignments and Open 
+      Stax readings
     gemini_model: gemini-3.7-flash
     gemini_fallback_models:
     - gemini-3.6-flash
@@ -147,6 +152,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '11334'
+    gemini_reasoning: medium
     canvas_base_url:
     source:
       type: none
@@ -178,6 +184,7 @@ courses:
     - thu
     - fri
     canvas_course_id: '12477'
+    gemini_reasoning: medium
     canvas_base_url:
     source:
       type: none

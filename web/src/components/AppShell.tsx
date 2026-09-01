@@ -9,6 +9,7 @@ import {
   Menu,
   RefreshCw,
   Settings,
+  ListChecks,
 } from 'lucide-react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { mutate } from 'swr'
@@ -20,6 +21,7 @@ import { Button } from './ui'
 const navigation = [
   { to: '/', label: 'Overview', icon: Grid2X2, end: true },
   { to: '/runs', label: 'Runs', icon: Clock3 },
+  { to: '/tasks', label: 'Tasks', icon: ListChecks },
   { to: '/courses', label: 'Courses', icon: BookOpen },
   { to: '/schedules', label: 'Schedules', icon: CalendarDays },
   { to: '/diagnostics', label: 'Diagnostics', icon: Activity, desktopOnly: true },

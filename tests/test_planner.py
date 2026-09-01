@@ -306,6 +306,36 @@ def test_description_update_replaces_notes_without_internal_text():
     assert plan.actions[0].replacement_notes == "Complete the revised activity."
 
 
+def test_manual_override_is_not_reverted_by_a_later_source_sync():
+    source_draft = _draft()
+    record = _record(source_draft, "durable-id").model_copy(update={
+        "title": "[SPANISH] User-edited activity",
+        "details": "Keep the user's revised notes.",
+        "due_date": "2026-08-15",
+        "classification": TaskClassification.CLASSWORK,
+        "task_type": TaskType.ASSIGNMENT,
+        "action_kind": ActionKind.SUBMIT,
+        "due_basis": "manual",
+        "manually_managed": True,
+    })
+    remote = RemoteTask(
+        id="remote-1",
+        title=record.title,
+        notes=record.details,
+        due="2026-08-15T00:00:00.000Z",
+        tasklist_id="list-1",
+        tasklist_title="School",
+    )
+
+    plan = _plan([source_draft], records=[record], remotes=[remote])
+
+    assert plan.actions[0].kind == SyncActionKind.UNCHANGED
+    assert plan.actions[0].desired is not None
+    assert plan.actions[0].desired.title == "[SPANISH] User-edited activity"
+    assert plan.actions[0].desired.details == "Keep the user's revised notes."
+    assert plan.actions[0].desired.due_date == date(2026, 8, 15)
+
+
 def test_same_class_collision_in_other_list_prevents_duplicate():
     draft = _draft(title="[SPANISH] Preterite Quiz", task_type=TaskType.QUIZ)
     collision = RemoteTask(

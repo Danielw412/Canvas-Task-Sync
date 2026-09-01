@@ -51,6 +51,7 @@ def _state_record(
     *,
     tasklist_id: str,
     remote_task_id: str,
+    manually_managed: bool = False,
 ) -> StateRecord:
     return StateRecord(
         logical_id=desired.logical_id,
@@ -77,6 +78,7 @@ def _state_record(
         tasklist_id=tasklist_id,
         tasklist_title=desired.destination_task_list,
         payload_hash=desired_payload_hash(desired),
+        manually_managed=manually_managed,
     )
 
 
@@ -184,13 +186,26 @@ class SyncPlanner:
                 if mapped
                 else default_destination
             )
-            desired_tasks.append(
-                DesiredTask(
-                    **draft.model_dump(),
-                    logical_id=logical_id,
-                    destination_task_list=destination,
-                )
+            desired = DesiredTask(
+                **draft.model_dump(),
+                logical_id=logical_id,
+                destination_task_list=destination,
             )
+            if mapped and mapped.manually_managed:
+                desired = desired.model_copy(update={
+                    "source_url": mapped.source_url or desired.source_url,
+                    "assignment_url": mapped.assignment_url,
+                    "title": mapped.title,
+                    "details": mapped.details,
+                    "classification": mapped.classification or desired.classification,
+                    "task_type": mapped.task_type or desired.task_type,
+                    "action_kind": mapped.action_kind or desired.action_kind,
+                    "due_date": date.fromisoformat(mapped.due_date) if mapped.due_date else None,
+                    "due_basis": mapped.due_basis or "manual",
+                    "due_uncertain": False,
+                    "due_uncertain_reason": None,
+                })
+            desired_tasks.append(desired)
 
         actions: list[SyncAction] = []
         for item in uncertain:
@@ -337,7 +352,11 @@ class SyncPlanner:
                 continue
 
             used_remote_keys.add((remote.tasklist_id, remote.id))
-            expected_notes = compose_task_notes(remote.notes, desired)
+            expected_notes = (
+                state_record.details
+                if state_record and state_record.manually_managed
+                else compose_task_notes(remote.notes, desired)
+            )
             changed: list[str] = []
             if remote.title != desired.title:
                 changed.append("title")
@@ -489,8 +508,14 @@ def apply_sync_plan(
                 notes=notes,
                 due_date=desired.due_date,
             )
+            existing_state = state.get_record(desired.logical_id)
             state.upsert_record(
-                _state_record(desired, tasklist_id=tasklist_id, remote_task_id=remote.id)
+                _state_record(
+                    desired,
+                    tasklist_id=tasklist_id,
+                    remote_task_id=remote.id,
+                    manually_managed=bool(existing_state and existing_state.manually_managed),
+                )
             )
             verified = tasks_client.verify_due(tasklist_id, remote.id, desired.due_date)
             action.due_verified = True
@@ -513,10 +538,12 @@ def apply_sync_plan(
             and desired is not None
             and action.remote_task_id
         ):
+            existing_state = state.get_record(desired.logical_id)
             state.upsert_record(
                 _state_record(
                     desired,
                     tasklist_id=tasklist_id,
                     remote_task_id=action.remote_task_id,
+                    manually_managed=bool(existing_state and existing_state.manually_managed),
                 )
             )

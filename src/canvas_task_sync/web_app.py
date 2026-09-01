@@ -36,7 +36,9 @@ from canvas_task_sync.configuration_service import (
     ConfigurationService,
 )
 from canvas_task_sync.control_store import ControlStore
+from canvas_task_sync.google_tasks import GoogleTasksError
 from canvas_task_sync.health import connection_status, run_health_checks
+from canvas_task_sync.manual_tasks import ManualTaskError, ManualTaskService
 from canvas_task_sync.models import AcquisitionStrategy
 from canvas_task_sync.redaction import safe_exception_summary, sanitize
 from canvas_task_sync.run_manager import (
@@ -64,6 +66,7 @@ from canvas_task_sync.web_models import (
     GeminiKeyUpdate,
     GeneralSettings,
     HealthState,
+    ManualTaskSave,
     OverviewResponse,
     RunAllCreate,
     RunApply,
@@ -97,6 +100,11 @@ class WebRuntime:
             credentials_loader=self.sync_service.credentials_loader,
             tasks_client_factory=self.sync_service.tasks_client_factory,
         )
+        self.manual_tasks = ManualTaskService(
+            self.settings,
+            credentials_loader=self.sync_service.credentials_loader,
+            tasks_client_factory=self.sync_service.tasks_client_factory,
+        )
         self.runs = RunManager(self.store, self.sync_service)
         self.schedules = ScheduleManager(self.store, self.runs)
         self.csrf_token = secrets.token_urlsafe(32)
@@ -106,6 +114,7 @@ class WebRuntime:
         self.settings = self.configuration.load()
         self.sync_service.settings = self.settings
         self.tracked_tasks.settings = self.settings
+        self.manual_tasks.settings = self.settings
         return self.settings
 
     def create_source_adapter(self, settings: Any, credentials: Any, **kwargs: Any) -> Any:
@@ -383,6 +392,42 @@ def create_web_app(
     @api.get("/tasks/{logical_id}", response_model=TrackedTaskView)
     def get_tracked_task(request: Request, logical_id: str) -> TrackedTaskView:
         task = _runtime(request).tracked_tasks.get(logical_id)
+        if task is None:
+            raise _http_error(404, "task_not_found", "Tracked task was not found.")
+        return task
+
+    @api.post("/tasks", response_model=TrackedTaskView, status_code=201)
+    def create_manual_task(request: Request, payload: ManualTaskSave) -> TrackedTaskView:
+        runtime = _runtime(request)
+        try:
+            logical_id = runtime.manual_tasks.create(payload)
+        except ManualTaskError as error:
+            raise _http_error(422, "manual_task_invalid", str(error)) from None
+        except GoogleTasksError as error:
+            raise _http_error(502, "google_tasks_write_failed", str(error)) from None
+        task = runtime.tracked_tasks.get(logical_id)
+        if task is None:
+            raise _http_error(
+                500,
+                "manual_task_state_missing",
+                "The task was created but could not be loaded.",
+            )
+        return task
+
+    @api.put("/tasks/{logical_id}", response_model=TrackedTaskView)
+    def update_manual_task(
+        request: Request,
+        logical_id: str,
+        payload: ManualTaskSave,
+    ) -> TrackedTaskView:
+        runtime = _runtime(request)
+        try:
+            runtime.manual_tasks.update(logical_id, payload)
+        except ManualTaskError as error:
+            raise _http_error(422, "manual_task_invalid", str(error)) from None
+        except GoogleTasksError as error:
+            raise _http_error(502, "google_tasks_write_failed", str(error)) from None
+        task = runtime.tracked_tasks.get(logical_id)
         if task is None:
             raise _http_error(404, "task_not_found", "Tracked task was not found.")
         return task

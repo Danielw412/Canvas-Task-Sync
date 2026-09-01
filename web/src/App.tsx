@@ -9,6 +9,7 @@ const RunsPage = lazy(() => import('./pages/RunsPage'))
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage'))
 const CoursesPage = lazy(() => import('./pages/CoursesPage'))
 const SchedulesPage = lazy(() => import('./pages/SchedulesPage'))
+const TasksPage = lazy(() => import('./pages/TasksPage'))
 const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 
@@ -22,6 +23,7 @@ export default function App() {
           <Route path="runs/:runId" element={<Suspense fallback={<PageLoader />}><RunDetailPage /></Suspense>} />
           <Route path="courses" element={<Suspense fallback={<PageLoader />}><CoursesPage /></Suspense>} />
           <Route path="schedules" element={<Suspense fallback={<PageLoader />}><SchedulesPage /></Suspense>} />
+          <Route path="tasks" element={<Suspense fallback={<PageLoader />}><TasksPage /></Suspense>} />
           <Route path="diagnostics" element={<Suspense fallback={<PageLoader />}><DiagnosticsPage /></Suspense>} />
           <Route path="settings" element={<Suspense fallback={<PageLoader />}><SettingsPage /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />

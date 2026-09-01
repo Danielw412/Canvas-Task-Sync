@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS task_mappings (
     tasklist_id TEXT,
     tasklist_title TEXT,
     payload_hash TEXT,
+    manually_managed INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS task_mappings_source
@@ -63,6 +64,7 @@ TASK_MAPPING_COLUMNS: dict[str, str] = {
     "source_date": "TEXT",
     "historical": "INTEGER NOT NULL DEFAULT 0",
     "tasklist_title": "TEXT",
+    "manually_managed": "INTEGER NOT NULL DEFAULT 0",
 }
 
 STATE_RECORD_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -90,6 +92,7 @@ STATE_RECORD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tasklist_id", "NULL"),
     ("tasklist_title", "NULL"),
     ("payload_hash", "NULL"),
+    ("manually_managed", "0"),
 )
 
 
@@ -185,8 +188,8 @@ class StateStore:
                 anchor, ordinal, fingerprint, source_text, title, details,
                 classification, task_type, action_kind, due_date, due_basis,
                 due_uncertain, due_uncertain_reason, source_date, historical,
-                google_task_id, tasklist_id, tasklist_title, payload_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                google_task_id, tasklist_id, tasklist_title, payload_hash, manually_managed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(logical_id) DO UPDATE SET
                 course_id = excluded.course_id,
                 source_key = excluded.source_key,
@@ -211,6 +214,7 @@ class StateStore:
                 tasklist_id = excluded.tasklist_id,
                 tasklist_title = excluded.tasklist_title,
                 payload_hash = excluded.payload_hash,
+                manually_managed = excluded.manually_managed,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -238,6 +242,7 @@ class StateStore:
                 record.tasklist_id,
                 record.tasklist_title,
                 record.payload_hash,
+                int(record.manually_managed),
             ),
         )
         self.connection.commit()

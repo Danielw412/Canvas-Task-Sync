@@ -232,3 +232,30 @@ class GoogleTasksClient:
             status=str(item.get("status", "needsAction")),
             completed=item.get("completed"),
         )
+
+    def set_task_completed(
+        self,
+        tasklist_id: str,
+        task_id: str,
+        *,
+        completed: bool,
+    ) -> RemoteTask:
+        body: dict[str, Any] = {"status": "completed" if completed else "needsAction"}
+        if not completed:
+            body["completed"] = None
+        try:
+            item = self.service.tasks().patch(
+                tasklist=tasklist_id,
+                task=task_id,
+                body=body,
+            ).execute()
+        except Exception as error:
+            raise GoogleTasksError(f"Could not update Google Task status '{task_id}'.") from error
+        return RemoteTask(
+            id=str(item.get("id", task_id)),
+            title=str(item.get("title", "")),
+            notes=str(item.get("notes", "")),
+            due=item.get("due"),
+            status=str(item.get("status", body["status"])),
+            completed=item.get("completed"),
+        )
