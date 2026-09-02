@@ -1105,8 +1105,3 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
   .modal-backdrop { align-items: flex-end; padding: 0; }
   .modal { border-radius: 14px 14px 0 0; }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .course-switcher__menu { animation: none; }
-  .course-switcher__chevron { transition: none; }
-}
