@@ -71,10 +71,12 @@ describe('TasksPage', () => {
   }
 
   it('creates and edits Google-backed tasks', async () => {
-    renderPage()
+    const { container } = renderPage()
     await screen.findByText('Existing task')
+    expect(container.querySelector('.tasks-page')).toHaveClass('standard-page')
 
     fireEvent.click(screen.getByRole('button', { name: 'New task' }))
+    expect(screen.getByRole('dialog')).toContainElement(screen.getByText('Create task'))
     fireEvent.change(screen.getByLabelText('Task name'), { target: { value: 'New reading' } })
     fireEvent.change(screen.getByLabelText('Description / notes'), { target: { value: 'Read pages 40–52.' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create task' }))

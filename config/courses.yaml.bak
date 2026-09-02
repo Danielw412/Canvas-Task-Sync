@@ -60,11 +60,12 @@ courses:
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
-        - present
         - complete
-        - submit
         - bring
-    ai_instructions: Do not create tasks for the readings.
+        - submit
+        - present
+    ai_instructions: Do not create tasks for the readings. Always create tasks 
+      for Unit X Assignment X even if its under classwork.
     canvas_base_url:
     gemini_model: gemini-3.6-flash
     gemini_fallback_models:
@@ -127,11 +128,11 @@ courses:
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
+        - bring
         - present
         - submit
-        - bring
     ai_instructions: Ignore the watch AP classroom video assignments and Open 
-      Stax readings
+      Stax readings. Do not ignore packet problems.
     gemini_model: gemini-3.7-flash
     gemini_fallback_models:
     - gemini-3.6-flash

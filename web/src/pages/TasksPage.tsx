@@ -25,7 +25,7 @@ export default function TasksPage() {
     return !query || terms.includes(query.toLocaleLowerCase())
   }), [filter, query, selectedCourseId, tasks])
 
-  return <div className="tasks-page">
+  return <div className="standard-page tasks-page">
     <header className="page-heading page-heading--actions">
       <div><h1>Tasks</h1><p>Create and edit tracked work. Changes are written directly to Google Tasks.</p></div>
       <Button icon={Plus} disabled={!courses?.length} onClick={() => setEditing('new')}>New task</Button>

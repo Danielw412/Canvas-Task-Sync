@@ -671,11 +671,11 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
 .detail-drawer dd { margin: 0; overflow-wrap: anywhere; }
 
 .modal-backdrop { align-items: center; justify-content: center; padding: 20px; }
-.modal { width: min(520px, 100%); overflow: hidden; border-radius: 12px; background: var(--surface); box-shadow: 0 24px 70px rgb(16 24 40 / .24); }
+.modal { width: min(520px, 100%); max-height: calc(100dvh - 40px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border-radius: 12px; background: var(--surface); box-shadow: 0 24px 70px rgb(16 24 40 / .24); }
 .modal > header, .modal > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
 .modal > header { border-bottom: 1px solid var(--border); }
 .modal > footer { justify-content: flex-end; border-top: 1px solid var(--border); }
-.modal__body { padding: 20px; }
+.modal__body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px; }
 .confirmation-copy { display: flex; align-items: flex-start; gap: 14px; color: #475467; }
 .confirmation-copy svg { flex: 0 0 auto; color: var(--primary); }
 
@@ -724,7 +724,7 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
 .form-field input:focus, .form-field select:focus, .form-field textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgb(11 92 245 / .12); }
 .form-field textarea { resize: vertical; }
 
-.tasks-page { display: grid; gap: 18px; }
+.tasks-page { width: 100%; min-width: 0; max-width: 100%; display: grid; gap: 18px; }
 .task-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; }
 .task-search { display: flex; align-items: center; gap: 8px; width: min(440px, 100%); padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); }
 .task-search input { width: 100%; min-height: 38px; border: 0; outline: 0; background: transparent; }

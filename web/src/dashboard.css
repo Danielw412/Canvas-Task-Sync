@@ -2063,6 +2063,7 @@ select:not(:disabled) {
 
 .modal {
   width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
   overflow: hidden;
   border: 1px solid rgb(255 255 255 / 0.34);
   border-radius: var(--radius-surface);
@@ -2862,7 +2863,7 @@ select:not(:disabled) {
 
   .modal {
     width: 100%;
-    max-height: 92dvh;
+    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)));
     border-radius: var(--radius-surface) var(--radius-surface) 0 0;
   }
 }

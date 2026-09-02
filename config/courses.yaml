@@ -128,11 +128,12 @@ courses:
         thumbnail_size: large
         assignments_default_due: next_class
         same_day_action_kinds:
+        - bring
         - present
         - submit
-        - bring
     ai_instructions: Ignore the watch AP classroom video assignments and Open 
-      Stax readings
+      Stax readings. Do not ignore packet problems, put due date unclear if its 
+      unclear.
     gemini_model: gemini-3.7-flash
     gemini_fallback_models:
     - gemini-3.6-flash
