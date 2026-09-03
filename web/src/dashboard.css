@@ -737,8 +737,7 @@ select:not(:disabled) {
   background: var(--green-soft);
 }
 
-.flow-step__line i.is-healthy + span,
-.flow-step:has(+ .flow-step) .flow-step__line > span {
+.flow-step__line:has(.is-healthy) > span {
   background: #75d4a4;
 }
 
