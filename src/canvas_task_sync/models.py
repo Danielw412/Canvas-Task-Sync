@@ -274,6 +274,9 @@ class SyncAction(BaseModel):
     replacement_notes: str | None = None
     recovered_state: StateRecord | None = None
     due_verified: bool = False
+    # True when the remote task state is inconsistent (duplicate managed IDs, malformed
+    # managed notes) and the sync could not safely act on this item.
+    conflict: bool = False
 
     def model_post_init(self, __context: Any) -> None:
         if self.desired is not None and self.desired.due_uncertain:

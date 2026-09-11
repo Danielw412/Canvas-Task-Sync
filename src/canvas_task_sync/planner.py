@@ -234,6 +234,7 @@ class SyncPlanner:
                     kind=SyncActionKind.UNCERTAIN,
                     title=remote.title,
                     reason="Legacy managed notes are malformed; notes were not removed.",
+                    conflict=True,
                     remote_task_id=remote.id,
                     task_list=remote.tasklist_title,
                 )
@@ -254,6 +255,7 @@ class SyncPlanner:
                         logical_id=desired.logical_id,
                         due_date=desired.due_date,
                         reason="More than one remote task contains this managed logical ID.",
+                        conflict=True,
                         evidence=desired.source_text,
                         source_anchor=desired.source_anchor,
                         desired=desired,

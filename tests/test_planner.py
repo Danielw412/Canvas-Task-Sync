@@ -19,6 +19,7 @@ from canvas_task_sync.models import (
     SyncActionKind,
     TaskClassification,
     TaskType,
+    UncertainItem,
 )
 from canvas_task_sync.planner import SyncPlanner, apply_sync_plan
 from canvas_task_sync.state import StateStore
@@ -432,3 +433,55 @@ def test_malformed_legacy_marker_is_flagged_without_cleanup():
     )
     assert [action.kind for action in plan.actions] == [SyncActionKind.UNCERTAIN]
     assert "malformed" in plan.actions[0].reason
+    assert plan.actions[0].conflict is True
+
+
+def test_duplicate_managed_logical_id_is_a_conflict():
+    draft = _draft()
+    marker = build_managed_block(draft, "durable-id")
+    remotes = [
+        RemoteTask(
+            id=remote_id,
+            title=draft.title,
+            notes=marker,
+            due="2026-08-12T00:00:00.000Z",
+            tasklist_id="list-1",
+            tasklist_title="School",
+        )
+        for remote_id in ("remote-1", "remote-2")
+    ]
+
+    plan = _plan([draft], remotes=remotes, include_past=True)
+
+    uncertain = [action for action in plan.actions if action.kind == SyncActionKind.UNCERTAIN]
+    assert len(uncertain) == 1
+    assert "More than one remote task" in uncertain[0].reason
+    assert uncertain[0].conflict is True
+
+
+def test_extraction_uncertainty_is_informational_not_a_conflict():
+    plan = SyncPlanner().plan(
+        course_id="spanish",
+        source_key=SOURCE_KEY,
+        task_list="School",
+        extraction_mode=ExtractionMode.TEXT,
+        fallback_reasons=[],
+        drafts=[],
+        uncertain=[
+            UncertainItem(
+                title="Warm-up",
+                evidence="Warm-up: discuss the reading",
+                reason="Gemini did not provide a high-enough-confidence actionable title.",
+                source_anchor="table:agenda:r1:c2",
+            )
+        ],
+        ignored=[],
+        state_records=[],
+        remote_tasks=[],
+        include_past=True,
+        dry_run=True,
+        course_prefix="SPANISH",
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.UNCERTAIN]
+    assert plan.actions[0].conflict is False

@@ -120,6 +120,7 @@ def action_counts(plan: SyncPlan) -> dict[str, int]:
     counts = Counter(action.kind.value for action in plan.actions)
     result = {kind.value: counts.get(kind.value, 0) for kind in SyncActionKind}
     result["due_uncertain"] = sum(action.due_uncertain for action in plan.actions)
+    result["conflict"] = sum(action.conflict for action in plan.actions)
     return result
 
 

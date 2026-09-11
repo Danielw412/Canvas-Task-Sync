@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from canvas_task_sync.control_store import ControlStore, utc_now
 from canvas_task_sync.health import run_health_checks
-from canvas_task_sync.models import SyncActionKind
 from canvas_task_sync.redaction import safe_exception_summary, sanitize
 from canvas_task_sync.sync_service import (
     CancellationToken,
@@ -50,11 +49,11 @@ TERMINAL_STATUSES = {
 
 
 def _review_attention_count(counts: dict[str, int]) -> int:
-    return (
-        counts.get(SyncActionKind.UNCERTAIN.value, 0)
-        + counts.get(SyncActionKind.REMOTE_MISSING.value, 0)
-        + counts.get("due_uncertain", 0)
-    )
+    # Only items the sync could not act on because the remote task state is inconsistent
+    # (duplicate managed IDs, malformed managed notes) need a person to review them.
+    # Low-confidence extractions, missing remote tasks, and uncertain due dates stay
+    # visible in the plan but are informational.
+    return counts.get("conflict", 0)
 
 
 class StoreProgressSink(ProgressSink):
@@ -351,9 +350,9 @@ class RunManager:
             remote_hash=prepared.remote_hash,
             counts=counts,
         )
-        # Missing source mappings and past-due tasks are informational safeguards.
-        # They remain visible in the plan, but do not make an otherwise healthy
-        # auto-apply run report "review needed".
+        # Informational items (missing mappings, past-due tasks, low-confidence
+        # extractions, uncertain due dates) remain visible in the plan. Only real
+        # conflicts make an otherwise healthy auto-apply run report "review needed".
         attention_count = _review_attention_count(counts)
         if run.requested_mode == RunMode.AUTO_APPLY:
             self.store.update_run(

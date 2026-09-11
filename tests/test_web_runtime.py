@@ -9,16 +9,25 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-from canvas_task_sync.configuration import NoFallbackSourceSettings
+from canvas_task_sync.configuration import NoFallbackSourceSettings, ProjectSettings
 from canvas_task_sync.configuration_service import ConfigurationService
 from canvas_task_sync.control_store import ControlStore
+from canvas_task_sync.models import (
+    ExtractionMode,
+    ExtractionOutcome,
+    SyncAction,
+    SyncActionKind,
+    SyncPlan,
+)
 from canvas_task_sync.redaction import REDACTED, redact_text, sanitize
 from canvas_task_sync.run_manager import (
+    RunManager,
     ScheduleManager,
     StoreProgressSink,
     _review_attention_count,
     next_schedule_occurrence,
 )
+from canvas_task_sync.sync_service import AppliedPlanResult, PreparedPlan
 from canvas_task_sync.web_app import create_web_app
 from canvas_task_sync.web_models import (
     CourseSave,
@@ -178,19 +187,130 @@ def test_progress_events_persist_the_current_run_stage(tmp_path):
         store.close()
 
 
-def test_informational_source_and_history_actions_do_not_require_review():
+def test_only_conflicts_require_review():
     assert _review_attention_count(
         {
             "source_missing": 4,
             "historical_blocked": 3,
-            "uncertain": 0,
-            "remote_missing": 0,
-            "due_uncertain": 0,
+            "uncertain": 2,
+            "remote_missing": 1,
+            "due_uncertain": 1,
+            "conflict": 0,
         }
     ) == 0
-    assert _review_attention_count({"uncertain": 1}) == 1
-    assert _review_attention_count({"remote_missing": 1}) == 1
-    assert _review_attention_count({"due_uncertain": 1}) == 1
+    assert _review_attention_count({"conflict": 1}) == 1
+    assert _review_attention_count({}) == 0
+
+
+class _FakePreviewService:
+    def __init__(self, settings: ProjectSettings, prepared: PreparedPlan) -> None:
+        self.settings = settings
+        self.prepared = prepared
+
+    def prepare(self, **_kwargs) -> PreparedPlan:
+        return self.prepared
+
+    def apply(self, prepared: PreparedPlan, *, progress, safe_subset: bool) -> AppliedPlanResult:
+        del prepared, progress, safe_subset
+        return AppliedPlanResult(applied_counts={}, completed_action_indexes=[])
+
+
+def _prepared_plan(course, actions: list[SyncAction]) -> PreparedPlan:
+    plan = SyncPlan(
+        course_id="spanish",
+        task_list=course.task_list,
+        dry_run=True,
+        extraction_mode=ExtractionMode.TEXT,
+        actions=actions,
+    )
+    return PreparedPlan(
+        course_id="spanish",
+        course=course,
+        source_key="fixture",
+        configured_mode=course.source.extraction.mode,
+        target_week_start=date(2026, 9, 7),
+        config_hash="config",
+        page_hash="page",
+        remote_hash="remote",
+        plan_hash="plan",
+        extraction_was_cached=False,
+        extraction_outcome=ExtractionOutcome(used_mode=ExtractionMode.TEXT),
+        plan=plan,
+    )
+
+
+def _run_auto_apply(tmp_path: Path, course, actions: list[SyncAction]):
+    settings = ProjectSettings(
+        root_dir=tmp_path,
+        state_path=Path(".canvas-task-sync/state.sqlite3"),
+        courses={"spanish": course},
+    )
+    store = ControlStore(tmp_path / "control.sqlite3")
+    manager = RunManager(store, _FakePreviewService(settings, _prepared_plan(course, actions)))
+    try:
+        run_id = store.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.AUTO_APPLY,
+        )
+        manager._execute_preview(run_id, StoreProgressSink(store, run_id, threading.Condition()))
+        return store.get_run(run_id)
+    finally:
+        manager._executor.shutdown(wait=False)
+        store.close()
+
+
+def test_auto_apply_succeeds_when_only_informational_items_remain(tmp_path, spanish_course):
+    run = _run_auto_apply(
+        tmp_path,
+        spanish_course,
+        [
+            SyncAction(
+                kind=SyncActionKind.UNCERTAIN,
+                title="Warm-up discussion",
+                reason="Gemini did not provide a high-enough-confidence actionable title.",
+            ),
+            SyncAction(
+                kind=SyncActionKind.REMOTE_MISSING,
+                title="Deleted by the student",
+                reason="The mapped Google Task is missing or deleted.",
+            ),
+            SyncAction(
+                kind=SyncActionKind.CREATE,
+                title="Essay draft",
+                reason="New task",
+                due_uncertain=True,
+                due_uncertain_reason="Next-class work could not be tied to a dated agenda row.",
+                task_list="School",
+            ),
+        ],
+    )
+
+    assert run.status == RunStatus.SUCCEEDED
+    assert run.counts["uncertain"] == 1
+    assert run.counts["remote_missing"] == 1
+    assert run.counts["due_uncertain"] == 1
+    assert run.counts["conflict"] == 0
+    completed = next(event for event in run.events if event.event_type == "run_completed")
+    assert completed.message == "Sync completed successfully."
+
+
+def test_auto_apply_needs_review_when_remote_state_conflicts(tmp_path, spanish_course):
+    run = _run_auto_apply(
+        tmp_path,
+        spanish_course,
+        [
+            SyncAction(
+                kind=SyncActionKind.UNCERTAIN,
+                title="Vocabulary quiz",
+                reason="More than one remote task contains this managed logical ID.",
+                conflict=True,
+            ),
+        ],
+    )
+
+    assert run.status == RunStatus.REVIEW_NEEDED
+    assert run.counts["conflict"] == 1
 
 
 def test_next_occurrence_normalizes_spring_dst_gap_and_uses_first_fall_fold():
