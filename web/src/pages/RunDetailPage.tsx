@@ -15,8 +15,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
+import { ElapsedTime } from '../components/ElapsedTime'
 import { ActionMark, Button, EmptyState, Modal, StatusLabel } from '../components/ui'
-import { fetchJson, formatDateTime, formatDuration, humanize, mutateJson } from '../lib/api'
+import { fetchJson, formatDateTime, humanize, mutateJson } from '../lib/api'
 import type { RunDetail, RunEvent, RunStage, SyncAction } from '../types'
 
 const previewStages: { key: RunStage; label: string }[] = [
@@ -104,6 +105,7 @@ export default function RunDetailPage() {
   const completedStages = new Set(run.events.filter((event) => event.event_type === 'stage_completed').map((event) => event.stage))
   const isActive = ['queued', 'running', 'applying'].includes(run.status)
   const latestEvent = run.events.at(-1)
+  const stageStartedAt = run.events.filter((event) => event.event_type === 'stage_completed').at(-1)?.created_at ?? run.started_at
   const eventGroups = {
     events: run.events,
     evidence: run.events.filter((event) => ['capture_source', 'extract_assignments', 'build_review_plan'].includes(event.stage)),
@@ -127,10 +129,10 @@ export default function RunDetailPage() {
           )
           return <div className={`stage-item ${complete ? 'stage-item--complete' : active ? 'stage-item--active' : ''}`} key={stage.key}>
             <div className="stage-item__track">{index > 0 ? <span /> : null}<i>{complete ? <Check size={17} /> : active ? <LoaderCircle className="spin" size={17} /> : <Circle size={16} />}</i>{index < previewStages.length - 1 ? <span /> : null}</div>
-            <strong>{stage.label}</strong><small>{complete ? `${((event?.duration_ms ?? 0) / 1000).toFixed(1)}s` : active ? 'In progress' : 'Waiting'}</small>
+            <strong>{stage.label}</strong><small>{complete ? `${((event?.duration_ms ?? 0) / 1000).toFixed(1)}s` : active ? <>In progress · <ElapsedTime start={stageStartedAt} active /></> : 'Waiting'}</small>
           </div>
         })}</div>
-        <div className="stage-summary"><span>{completedStages.size} of 7 stages</span><span>{formatDuration(run.started_at, run.finished_at)} elapsed</span></div>
+        <div className="stage-summary"><span>{completedStages.size} of 7 stages</span><span><ElapsedTime start={run.started_at} finish={run.finished_at} active={isActive} /> elapsed</span></div>
       </section>}
 
       <section className="plan-section">

@@ -617,3 +617,97 @@ def test_statistics_agenda_classwork_default_due_and_explicit_thursday(
         "Practice identifying hypotheses",
         "Work through released AP FRQs",
     }
+
+
+def test_assignment_work_days_collapse_into_the_later_submission(spanish_course):
+    rows = [(2, "T", "Unit 2 Assignment 1"), (3, "W", "Submit : Unit 2 Assignment 1")]
+    blocks = [
+        AgendaBlock(
+            anchor="header",
+            element_id="agenda",
+            kind="heading",
+            role=BlockRole.HEADER,
+            text="September 14-18, 2026",
+        ),
+        *(
+            AgendaBlock(
+                anchor=f"table:agenda:r{row}:c2",
+                element_id="agenda",
+                kind="table_cell",
+                role=BlockRole.ASSIGNMENTS,
+                row_index=row,
+                column_index=2,
+                row_label=label,
+                text=text,
+                order=row,
+            )
+            for row, label, text in rows
+        ),
+    ]
+    capture = SourceCapture(
+        source_key="canvas:physics:week:2026-09-14",
+        source_url="https://canvas.example/physics",
+        page_hash="fixture",
+        transcript="\n".join(block.text for block in blocks),
+        blocks=blocks,
+    )
+    tasks = [
+        ExtractedTask(
+            source_anchor=f"table:agenda:r{row}:c2",
+            source_text=text,
+            row_label=label,
+            classification=TaskClassification.CLASSWORK,
+            action_kind=action,
+            title_stem="Unit 2 Assignment 1",
+            due_relation=DueRelation.SAME_DAY,
+            confidence=Confidence.HIGH,
+        )
+        for (row, label, text), action in zip(
+            rows, (ActionKind.COMPLETE, ActionKind.SUBMIT), strict=True
+        )
+    ]
+
+    drafts, uncertain, ignored = build_draft_tasks(
+        course_id="physics",
+        course=spanish_course,
+        capture=capture,
+        tasks=tasks,
+        today=date(2026, 9, 14),
+    )
+
+    assert not uncertain
+    assert [(draft.action_kind, draft.due_date) for draft in drafts] == [
+        (ActionKind.SUBMIT, date(2026, 9, 16))
+    ]
+    assert [item.reason for item in ignored] == [
+        "Work on this assignment is tracked by its later submission task."
+    ]
+
+
+def test_weekday_only_explicit_due_date_resolves_within_the_agenda_week(
+    spanish_capture, spanish_course
+):
+    header = spanish_capture.blocks[0]
+    task = ExtractedTask(
+        source_anchor=header.anchor,
+        source_text="Unit 2 AP Classroom MC/FR Due Thursday at midnight",
+        classification=TaskClassification.HOMEWORK,
+        action_kind=ActionKind.COMPLETE,
+        title_stem="Unit 2 AP Classroom MC/FR",
+        due_relation=DueRelation.EXPLICIT_DATE,
+        explicit_due_date="Thursday at midnight",
+        confidence=Confidence.HIGH,
+    )
+
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="chemistry",
+        course=spanish_course,
+        capture=spanish_capture,
+        tasks=[task],
+        today=date(2026, 5, 1),
+    )
+
+    assert not uncertain
+    assert drafts[0].due_date == date(2026, 5, 28)
+    assert drafts[0].due_uncertain is False
+    assert drafts[0].due_basis == "Weekday explicitly stated in source evidence"

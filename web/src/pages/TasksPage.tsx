@@ -1,4 +1,4 @@
-import { CalendarDays, CheckCircle2, Edit3, Plus, Search } from 'lucide-react'
+import { CalendarDays, CheckCircle2, Edit3, Filter, Plus, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import useSWR, { mutate } from 'swr'
 import { useApp } from '../components/AppContext'
@@ -16,14 +16,15 @@ export default function TasksPage() {
   const { data: courses } = useSWR<CourseView[]>('/api/v1/courses', fetchJson)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<TaskFilter>('open')
+  const [courseFilter, setCourseFilter] = useState('')
   const [editing, setEditing] = useState<TrackedTask | 'new' | null>(null)
   const filtered = useMemo(() => (tasks ?? []).filter((task) => {
-    if (selectedCourseId && task.course.id !== selectedCourseId) return false
+    if (courseFilter && task.course.id !== courseFilter) return false
     if (filter === 'open' && task.completed !== false) return false
     if (filter === 'completed' && task.completed !== true) return false
     const terms = `${task.display_title} ${task.details} ${task.course.name}`.toLocaleLowerCase()
     return !query || terms.includes(query.toLocaleLowerCase())
-  }), [filter, query, selectedCourseId, tasks])
+  }), [courseFilter, filter, query, tasks])
 
   return <div className="standard-page tasks-page">
     <header className="page-heading page-heading--actions">
@@ -32,12 +33,13 @@ export default function TasksPage() {
     </header>
     <section className="task-toolbar panel">
       <label className="task-search"><Search size={17} /><input aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks" /></label>
+      <label className="filter-control task-course-filter"><Filter size={17} /><select aria-label="Course filter" value={courseFilter} onChange={(event) => setCourseFilter(event.target.value)}><option value="">All courses</option>{courses?.map((course) => <option value={course.id} key={course.id}>{course.settings.name}</option>)}</select></label>
       <div className="task-filter" aria-label="Task status filter">
         {(['open', 'completed', 'all'] as TaskFilter[]).map((value) => <button key={value} className={filter === value ? 'is-active' : ''} onClick={() => setFilter(value)}>{value === 'open' ? 'Open' : value === 'completed' ? 'Completed' : 'All'}</button>)}
       </div>
     </section>
     {error ? <EmptyState title="Tasks could not load" body={error.message} /> : null}
-    {!error && !isLoading && filtered.length === 0 ? <EmptyState title="No matching tasks" body="Create a task or change the current course, status, or search filter." action={<Button icon={Plus} onClick={() => setEditing('new')}>New task</Button>} /> : null}
+    {!error && !isLoading && filtered.length === 0 ? <EmptyState title="No matching tasks" body="Create a task or change the course, status, or search filter." action={<Button icon={Plus} onClick={() => setEditing('new')}>New task</Button>} /> : null}
     {isLoading ? <div className="task-list panel"><div className="task-list__loading" /></div> : null}
     {filtered.length ? <section className="task-list panel" aria-label="Tracked tasks">
       {filtered.map((task) => <button className="task-list__row" key={task.logical_id} onClick={() => setEditing(task)}>
@@ -51,7 +53,7 @@ export default function TasksPage() {
     {editing ? <TaskEditor
       task={editing === 'new' ? null : editing}
       courses={courses ?? []}
-      defaultCourseId={selectedCourseId}
+      defaultCourseId={courseFilter || selectedCourseId}
       onClose={() => setEditing(null)}
       onSaved={async (task) => {
         await mutate('/api/v1/tasks')

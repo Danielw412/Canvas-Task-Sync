@@ -4,8 +4,11 @@ import { Link, useNavigate } from 'react-router-dom'
 import useSWR from 'swr'
 import { Button, EmptyState, StatusLabel } from '../components/ui'
 import { useApp } from '../components/AppContext'
-import { agendaWeekOptions, fetchJson, formatDateTime, formatDuration, mutateJson, useOverview } from '../lib/api'
+import { ElapsedTime } from '../components/ElapsedTime'
+import { agendaWeekOptions, fetchJson, formatDateTime, mutateJson, useOverview } from '../lib/api'
 import type { RunStatus, RunSummary, WeekSelection } from '../types'
+
+const activeStatuses = new Set<RunStatus>(['queued', 'running', 'applying'])
 
 export default function RunsPage() {
   const { selectedCourseId, toast } = useApp()
@@ -18,7 +21,9 @@ export default function RunsPage() {
   const weekOptions = agendaWeekOptions(course?.settings.timezone)
   const suffix = new URLSearchParams({ ...(courseFilter ? { course_id: courseFilter } : {}), ...(status ? { status } : {}) })
   const runsUrl = suffix.size ? `/api/v1/runs?${suffix}` : '/api/v1/runs'
-  const { data: runs, error } = useSWR<RunSummary[]>(runsUrl, fetchJson)
+  const { data: runs, error } = useSWR<RunSummary[]>(runsUrl, fetchJson, {
+    refreshInterval: (data) => data?.some((run) => activeStatuses.has(run.status)) ? 2_000 : 0,
+  })
   const navigate = useNavigate()
   const filtered = useMemo(() => (runs ?? []).filter((run) => `${run.course_name} ${run.status} ${run.requested_mode}`.toLowerCase().includes(query.toLowerCase())), [runs, query])
 
@@ -42,7 +47,7 @@ export default function RunsPage() {
     </div>
     {error ? <EmptyState title="Runs could not load" body={error.message} /> : filtered.length ? <div className="table-frame">
       <div className="data-table data-table--runs-page data-table__header"><span>Started</span><span>Course</span><span>Mode</span><span>Result</span><span>Duration</span><span>Changes</span><span>Trigger</span><span /></div>
-      {filtered.map((run) => <Link className="data-table data-table--runs-page data-row" to={`/runs/${run.id}`} key={run.id}><span>{formatDateTime(run.created_at)}</span><span>{run.course_name ?? run.course_id}</span><span>{run.requested_mode === 'auto_apply' ? 'Auto-apply' : run.requested_mode === 'health' ? 'Health check' : 'Dry run'}</span><StatusLabel status={run.status} /><span>{formatDuration(run.started_at, run.finished_at)}</span><span>{(run.counts.create ?? 0) + (run.counts.update ?? 0) + (run.counts.notes_cleanup ?? 0)} changes</span><span>{run.trigger === 'schedule' ? 'Schedule' : 'Manual'}</span><ArrowRight size={16} /></Link>)}
+      {filtered.map((run) => <Link className="data-table data-table--runs-page data-row" to={`/runs/${run.id}`} key={run.id}><span>{formatDateTime(run.created_at)}</span><span>{run.course_name ?? run.course_id}</span><span>{run.requested_mode === 'auto_apply' ? 'Auto-apply' : run.requested_mode === 'health' ? 'Health check' : 'Dry run'}</span><StatusLabel status={run.status} /><span><ElapsedTime start={run.started_at} finish={run.finished_at} active={activeStatuses.has(run.status)} /></span><span>{(run.counts.create ?? 0) + (run.counts.update ?? 0) + (run.counts.notes_cleanup ?? 0)} changes</span><span>{run.trigger === 'schedule' ? 'Schedule' : 'Manual'}</span><ArrowRight size={16} /></Link>)}
     </div> : <EmptyState title="No matching runs" body="Change the filter or start a new sync." action={<Button icon={Play} onClick={syncCourse}>Sync selected course</Button>} />}
   </div>
 }

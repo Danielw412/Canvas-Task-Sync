@@ -10,11 +10,13 @@ from canvas_task_sync.models import (
     AcquisitionStrategy,
     ActionKind,
     AgendaBlock,
+    BlockRole,
     Confidence,
     DueRelation,
     ExtractedTask,
     SourceCapture,
     TaskClassification,
+    TaskType,
     WeekSelection,
 )
 from canvas_task_sync.scheduling import build_draft_tasks, row_date_ranges
@@ -475,6 +477,166 @@ def test_relative_this_week_heading_requires_current_target_and_current_canvas_u
         source(date(2026, 8, 10), "2026-08-17T09:00:00-04:00").capture(include_image=False)
     with pytest.raises(CanvasAgendaNotFound, match="No sufficiently specific Canvas agenda"):
         source(TARGET_WEEK, "2026-08-10T09:00:00-04:00").capture(include_image=False)
+
+
+def front_page_source(course_id: str, body: str, target: date) -> CanvasAgendaSource:
+    prefix = f"/api/v1/courses/{course_id}"
+    session = FakeSession(
+        {
+            f"{prefix}/front_page": {
+                "url": "agenda",
+                "title": "Agenda",
+                "html_url": f"https://canvas.example/courses/{course_id}/pages/agenda",
+                "body": body,
+            },
+            prefix: {},
+            f"{prefix}/modules": [],
+            f"{prefix}/pages": [],
+            f"{prefix}/assignments": [],
+        }
+    )
+    return CanvasAgendaSource(
+        course_id=course_id,
+        target_week_start=target,
+        base_url="https://canvas.example",
+        token="test-token",
+        session=session,
+    )
+
+
+def test_dated_day_cells_schedule_weekday_deadlines_and_duplicate_columns_collapse():
+    body = """
+    <table>
+      <caption><h4>WEEK OF AUGUST 17-21, 2026</h4></caption>
+      <thead><tr><th>Days</th><th>Learning Goals</th><th>Learning Activities</th>
+        <th>Assignments / Homework</th></tr></thead>
+      <tbody>
+        <tr><td><p><strong>Monday</strong></p><p><strong>August 17th</strong></p></td>
+          <td><span>Explain photoelectron spectroscopy.</span></td>
+          <td><span>Explain photoelectron spectroscopy.</span></td>
+          <td><ul><li><strong>Unit 2 Packet HW Due Tuesday in class</strong></li>
+            <li><strong>Unit 2 AP Classroom MC/FR Due Thursday at midnight</strong></li>
+          </ul></td></tr>
+        <tr><td><p>Tuesday</p><p>August 18th</p></td><td>Work on AP Classroom</td>
+          <td>Work on AP Classroom</td><td>Watch AP Classroom Daily Video 1.5</td></tr>
+        <tr><td><p>Friday</p><p>August 21st</p></td>
+          <td><ul><li>Take the Unit 2 Free Response Test In Class</li></ul></td>
+          <td><ul><li>Take the Unit 2 Free Response Test In Class</li></ul></td>
+          <td>Watch AP Classroom Daily Videos 1.3</td></tr>
+      </tbody>
+    </table>
+    """
+    capture = front_page_source("12506", body, TARGET_WEEK).capture(include_image=False)
+
+    monday = next(block for block in capture.blocks if block.text == "Monday\nAugust 17th")
+    assert (monday.role, monday.row_label) == (BlockRole.DAY, "Monday")
+    homework = next(
+        block
+        for block in capture.blocks
+        if block.role == BlockRole.ASSIGNMENTS and block.row_label == "Monday"
+    )
+    assert homework.text == (
+        "Unit 2 Packet HW Due Tuesday in class\n"
+        "Unit 2 AP Classroom MC/FR Due Thursday at midnight"
+    )
+    test_blocks = [block for block in capture.blocks if "Free Response Test" in block.text]
+    assert [(block.role, block.row_label) for block in test_blocks] == [
+        (BlockRole.LEARNING, "Friday")
+    ]
+    # The skipped Learning Goals duplicate still consumes its slot, keeping anchors stable.
+    assert test_blocks[0].anchor == "canvas:agenda:15"
+    assert row_date_ranges(capture)[(test_blocks[0].element_id, test_blocks[0].row_index)] == (
+        date(2026, 8, 21),
+        date(2026, 8, 21),
+    )
+
+    course = CourseSettings.model_validate(
+        {
+            "name": "AP Chemistry",
+            "prefix": "CHEM",
+            "task_list": "School",
+            "canvas_course_id": "12506",
+            "source": {"type": "none", "extraction": {"mode": "text"}},
+        }
+    )
+
+    def extracted(block, source_text, due_relation, explicit_due_date=None, **overrides):
+        fields = {
+            "source_anchor": block.anchor,
+            "source_text": source_text,
+            "row_label": block.row_label,
+            "classification": TaskClassification.HOMEWORK,
+            "action_kind": ActionKind.COMPLETE,
+            "title_stem": source_text,
+            "due_relation": due_relation,
+            "explicit_due_date": explicit_due_date,
+            "confidence": Confidence.HIGH,
+        }
+        return ExtractedTask(**{**fields, **overrides})
+
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="12506",
+        course=course,
+        capture=capture,
+        tasks=[
+            extracted(
+                homework,
+                "Unit 2 Packet HW Due Tuesday in class",
+                DueRelation.EXPLICIT_DATE,
+                "Tuesday in class",
+            ),
+            extracted(
+                homework,
+                "Unit 2 AP Classroom MC/FR Due Thursday at midnight",
+                DueRelation.EXPLICIT_DATE,
+                "Thursday at midnight",
+            ),
+            extracted(
+                test_blocks[0],
+                "Take the Unit 2 Free Response Test In Class",
+                DueRelation.SAME_DAY,
+                task_type=TaskType.TEST,
+                action_kind=ActionKind.OTHER,
+            ),
+        ],
+        today=TARGET_WEEK,
+    )
+
+    assert not uncertain
+    assert sorted((draft.due_date, draft.due_uncertain) for draft in drafts) == [
+        (date(2026, 8, 18), False),
+        (date(2026, 8, 20), False),
+        (date(2026, 8, 21), False),
+    ]
+
+
+def test_narrative_first_row_is_not_a_column_header_and_list_items_stay_separate():
+    body = physics_agenda_table(
+        "August 17",
+        "<ul><li>Submit : Unit 1 Assignment 1</li><li>Unit 1 Assignment 2</li></ul>",
+        "Classwork: Unit 1 Assignment 2",
+    )
+    capture = front_page_source("11126", body, TARGET_WEEK).capture(include_image=False)
+
+    assert capture.blocks[0].role == BlockRole.HEADER
+    monday = next(
+        block
+        for block in capture.blocks
+        if block.row_label == "M" and block.role != BlockRole.DAY
+    )
+    assert monday.role == BlockRole.ASSIGNMENTS
+    assert monday.text == "Monday\nSubmit : Unit 1 Assignment 1\nUnit 1 Assignment 2"
+
+
+def test_incidental_date_in_an_older_week_table_does_not_claim_the_next_week():
+    body = physics_agenda_table(
+        "August 17",
+        "Classwork: Unit 1 FRQ Exam",
+        "Make up exams must be completed by Wednesday August 26",
+    )
+
+    with pytest.raises(CanvasAgendaNotFound, match="No sufficiently specific Canvas agenda"):
+        front_page_source("11126", body, date(2026, 8, 24)).capture(include_image=False)
 
 
 def test_course_can_use_canvas_without_any_fallback_source():

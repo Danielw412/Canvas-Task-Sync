@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.gemini import normalized_text, token_similarity
 from canvas_task_sync.models import (
+    ActionKind,
     AgendaBlock,
     BlockRole,
     DraftTask,
@@ -598,6 +599,47 @@ def _collapse_continuing_drafts(
     return [selected[key] for key in order], ignored
 
 
+def _collapse_work_before_submission(
+    drafts: list[DraftTask],
+) -> tuple[list[DraftTask], list[IgnoredItem]]:
+    """Track an assignment once when the agenda lists work days before its submission day."""
+
+    submitted: dict[str, date] = {}
+    for draft in drafts:
+        if (
+            draft.action_kind == ActionKind.SUBMIT
+            and draft.task_type == TaskType.ASSIGNMENT
+            and draft.due_date is not None
+        ):
+            key = normalized_text(draft.title)
+            submitted[key] = max(submitted.get(key, draft.due_date), draft.due_date)
+
+    kept: list[DraftTask] = []
+    ignored: list[IgnoredItem] = []
+    for draft in drafts:
+        submission_date = submitted.get(normalized_text(draft.title))
+        # Compare the day the work appears on the agenda, not its next-class deadline.
+        work_date = draft.source_date or draft.due_date
+        if (
+            submission_date is not None
+            and draft.action_kind != ActionKind.SUBMIT
+            and draft.task_type == TaskType.ASSIGNMENT
+            and work_date is not None
+            and work_date <= submission_date
+        ):
+            ignored.append(
+                IgnoredItem(
+                    title=draft.title,
+                    evidence=draft.source_text,
+                    reason="Work on this assignment is tracked by its later submission task.",
+                    source_anchor=draft.source_anchor,
+                )
+            )
+            continue
+        kept.append(draft)
+    return kept, ignored
+
+
 def build_draft_tasks(
     *,
     course_id: str,
@@ -684,7 +726,9 @@ def build_draft_tasks(
 
             is_assignment = block.role == BlockRole.ASSIGNMENTS
             is_same_day_action = task.action_kind in course.source.extraction.same_day_action_kinds
-            explicit_weekday = _explicit_weekday_date(task.source_text, row_range)
+            # A weekday outside a dated row still belongs to the captured agenda week.
+            agenda_week = (agenda_reference, agenda_reference) if agenda_reference else None
+            explicit_weekday = _explicit_weekday_date(task.source_text, row_range or agenda_week)
             relation = task.due_relation
             is_assessment = task.task_type in {TaskType.QUIZ, TaskType.TEST}
             if explicit_weekday is None and relation != DueRelation.EXPLICIT_DATE:
@@ -748,14 +792,20 @@ def build_draft_tasks(
                     supporting_text=block.text,
                     row_date=source_date,
                 )
-                if due_date is None:
+                if due_date is not None:
+                    due_basis = "Explicit date stated in source evidence"
+                elif explicit_weekday is not None and not _calendar_dates_in_text(
+                    task.source_text, calendar_reference
+                ):
+                    # Evidence such as "Due Thursday at midnight" names only a weekday.
+                    due_date = explicit_weekday
+                    due_basis = "Weekday explicitly stated in source evidence"
+                else:
                     due_uncertain = True
                     due_uncertain_reason = (
                         "The proposed explicit date is not present in the exact source evidence."
                     )
                     due_basis = "Due date uncertain"
-                else:
-                    due_basis = "Explicit date stated in source evidence"
             elif explicit_weekday is not None:
                 due_date = explicit_weekday
                 due_basis = "Weekday explicitly stated in source evidence"
@@ -835,4 +885,6 @@ def build_draft_tasks(
 
     drafts, continuing_ignored = _collapse_continuing_drafts(drafts)
     ignored.extend(continuing_ignored)
+    drafts, submission_ignored = _collapse_work_before_submission(drafts)
+    ignored.extend(submission_ignored)
     return drafts, uncertain, ignored

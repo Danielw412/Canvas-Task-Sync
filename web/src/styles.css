@@ -748,6 +748,7 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
 
 @media (max-width: 720px) {
   .task-toolbar { align-items: stretch; flex-direction: column; }
+  .task-toolbar .task-course-filter { width: 100%; }
   .task-list__row { grid-template-columns: 24px minmax(0, 1fr) 18px; }
   .task-list__due, .manual-badge { grid-column: 2; }
 }

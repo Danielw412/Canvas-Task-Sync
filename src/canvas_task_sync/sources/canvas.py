@@ -62,10 +62,42 @@ AGENDA_TERMS = (
     "assignments",
     "homework",
 )
-DAY_RE = re.compile(
-    r"^(?:m|t|w|th|f|mon|tue|wed|thu|fri|monday|tuesday|wednesday|thursday|friday)\.?$", re.I
+DAY_NAME_PATTERN = (
+    r"(?:m|t|w|th|f|mon|tue|tues|wed|thu|thur|thurs|fri|monday|tuesday|wednesday|thursday|friday)"
 )
+DAY_RE = re.compile(rf"^{DAY_NAME_PATTERN}\.?$", re.I)
+DATED_DAY_RE = re.compile(rf"^(?P<day>{DAY_NAME_PATTERN})\.?,?\s+(?P<date>.+)$", re.I | re.S)
 SEMANTIC_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"}
+LINE_BREAK_TAGS = {
+    "address",
+    "blockquote",
+    "br",
+    "caption",
+    "dd",
+    "div",
+    "dl",
+    "dt",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
+}
+HEADER_CELL_MAX_CHARS = 80
+WEEK_LABEL_PREFIX_RE = re.compile(r"(?:learning\s+targets\s+)?for\s+the\s+week\s*:?\s*$", re.I)
+ROW_CELL_ROLE_PRIORITY = {BlockRole.ASSIGNMENTS: 3, BlockRole.LEARNING: 2, BlockRole.UNKNOWN: 1}
 THIS_WEEK_RE = re.compile(
     r"\b(?:this\s+week(?:['’]?s)?(?:\s+agenda)?|agenda\s+(?:for\s+)?this\s+week)\b",
     re.IGNORECASE,
@@ -170,6 +202,7 @@ class WeekTextMatch:
     score: int
     matched_text: str
     position: int
+    heading: bool = False
 
 
 @dataclass
@@ -193,42 +226,54 @@ def _candidate_date(month: int, day: int, year: int, target: date) -> date | Non
     return value
 
 
+def _matched_date(found: re.Match[str], target_week_start: date) -> date | None:
+    month_value = found.group("month").casefold().rstrip(".")
+    month = MONTHS.get(month_value, int(month_value) if month_value.isdigit() else 0)
+    year_text = found.group("year")
+    if year_text:
+        year = int(year_text)
+        if year < 100:
+            year += 2000
+        years = [year]
+    else:
+        years = [
+            target_week_start.year - 1,
+            target_week_start.year,
+            target_week_start.year + 1,
+        ]
+    candidates = [
+        value
+        for candidate_year in years
+        if (
+            value := _candidate_date(
+                month,
+                int(found.group("day")),
+                candidate_year,
+                target_week_start,
+            )
+        )
+        is not None
+    ]
+    return (
+        min(candidates, key=lambda value: abs((value - target_week_start).days))
+        if candidates
+        else None
+    )
+
+
+def _has_week_label(text: str, found: re.Match[str]) -> bool:
+    # Canvas agenda tables often label their first cell as
+    # "Learning Targets for the Week: August 24" instead of the more
+    # conventional "Week of August 24".
+    prefix = text[max(0, found.start() - 80) : found.start()]
+    return bool(found.group("week") or WEEK_LABEL_PREFIX_RE.search(prefix))
+
+
 def find_week_matches(text: str, target_week_start: date) -> list[WeekTextMatch]:
     matches: list[WeekTextMatch] = []
     for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
         for found in pattern.finditer(text):
-            month_value = found.group("month").casefold().rstrip(".")
-            month = MONTHS.get(month_value, int(month_value) if month_value.isdigit() else 0)
-            year_text = found.group("year")
-            if year_text:
-                year = int(year_text)
-                if year < 100:
-                    year += 2000
-                years = [year]
-            else:
-                years = [
-                    target_week_start.year - 1,
-                    target_week_start.year,
-                    target_week_start.year + 1,
-                ]
-            candidates = [
-                value
-                for candidate_year in years
-                if (
-                    value := _candidate_date(
-                        month,
-                        int(found.group("day")),
-                        candidate_year,
-                        target_week_start,
-                    )
-                )
-                is not None
-            ]
-            start = (
-                min(candidates, key=lambda value: abs((value - target_week_start).days))
-                if candidates
-                else None
-            )
+            start = _matched_date(found, target_week_start)
             if start is None:
                 continue
             delta = (start - target_week_start).days
@@ -240,23 +285,55 @@ def find_week_matches(text: str, target_week_start: date) -> list[WeekTextMatch]
                 score = 72 - abs(delta * 4)
             else:
                 continue
-            if found.group("week"):
+            labeled = _has_week_label(text, found)
+            if labeled:
+                # A labeled week heading outranks incidental due dates for the same
+                # Monday in an older table on the page.
                 score += 20
-            else:
-                # Canvas agenda tables often label their first cell as
-                # "Learning Targets for the Week: August 24" instead of the more
-                # conventional "Week of August 24".  Treat that date as a week
-                # heading so it outranks incidental due dates for the same Monday
-                # in an older table on the page.
-                prefix = text[max(0, found.start() - 80) : found.start()]
-                if re.search(r"(?:learning\s+targets\s+)?for\s+the\s+week\s*:?\s*$", prefix, re.I):
-                    score += 20
             if found.group("range"):
                 score += 8
             surrounding = text[max(0, found.start() - 180) : found.end() + 240].casefold()
             score += min(24, 6 * sum(term in surrounding for term in AGENDA_TERMS))
-            matches.append(WeekTextMatch(start, score, found.group(0), found.start()))
+            matches.append(
+                WeekTextMatch(
+                    start,
+                    score,
+                    found.group(0),
+                    found.start(),
+                    heading=labeled or bool(found.group("range")),
+                )
+            )
     return sorted(matches, key=lambda item: (-item.score, item.position))
+
+
+def _other_week_heading(text: str, target_week_start: date) -> bool:
+    """Return whether text carries a week heading for a different agenda week."""
+    for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+        for found in pattern.finditer(text):
+            # Bare numeric ranges such as "2-3" are too ambiguous to count as headings.
+            ranged_month = pattern is MONTH_DATE_RE and found.group("range")
+            if not (_has_week_label(text, found) or ranged_month):
+                continue
+            start = _matched_date(found, target_week_start)
+            if start is not None and not -2 <= (start - target_week_start).days <= 4:
+                return True
+    return False
+
+
+def _belongs_to_other_week(text: str, target_week_start: date) -> bool:
+    matches = find_week_matches(text, target_week_start)
+    return not any(match.heading for match in matches) and _other_week_heading(
+        text, target_week_start
+    )
+
+
+def _inside_any(node: HtmlNode, node_ids: set[int]) -> bool:
+    cursor: HtmlNode | None = node
+    while cursor is not None:
+        if id(cursor) in node_ids:
+            return True
+        cursor = cursor.parent
+    return False
 
 
 def week_match_score(text: str, target_week_start: date) -> int:
@@ -276,12 +353,23 @@ def _agenda_node(
 ) -> tuple[HtmlNode, WeekTextMatch]:
     candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
     table_candidates: list[tuple[float, int, HtmlNode, WeekTextMatch]] = []
+    other_week_tables = {
+        id(table)
+        for table in parser.root.descendants({"table"})
+        if _belongs_to_other_week(table.text(" "), target_week_start)
+    }
     for node in [parser.root, *parser.root.descendants()]:
         text = node.text(" ")
         if len(text) < 25:
             continue
         matches = find_week_matches(text, target_week_start)
         if not matches:
+            continue
+        if not any(match.heading for match in matches) and (
+            _inside_any(node, other_week_tables) or _other_week_heading(text, target_week_start)
+        ):
+            # An incidental date, such as a make-up exam deadline, inside another week's
+            # agenda must not claim that agenda for the target week.
             continue
         best = matches[0]
         lowered = text.casefold()
@@ -346,6 +434,76 @@ def _direct_children(node: HtmlNode, tags: set[str]) -> list[HtmlNode]:
     return [child for child in node.children if isinstance(child, HtmlNode) and child.tag in tags]
 
 
+def _line_text(node: HtmlNode) -> str:
+    """Return node text with one line per paragraph/list item so list entries stay distinct."""
+    lines: list[str] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        line = " ".join(" ".join(current).split())
+        if line:
+            lines.append(line)
+        current.clear()
+
+    def visit(item: HtmlNode | str) -> None:
+        if isinstance(item, str):
+            current.append(item)
+            return
+        breaks_line = item.tag in LINE_BREAK_TAGS
+        if breaks_line:
+            flush()
+        for child in item.children:
+            visit(child)
+        if breaks_line:
+            flush()
+
+    visit(node)
+    flush()
+    return "\n".join(lines)
+
+
+def _day_label(value: str) -> str | None:
+    """Return the weekday label for a day cell such as "Th" or "Monday September 14th"."""
+    stripped = value.strip()
+    if DAY_RE.fullmatch(stripped):
+        return stripped.rstrip(".")
+    dated = DATED_DAY_RE.fullmatch(stripped)
+    if dated is None:
+        return None
+    date_text = " ".join(dated.group("date").split())
+    if MONTH_DATE_RE.fullmatch(date_text) or NUMERIC_DATE_RE.fullmatch(date_text):
+        return dated.group("day")
+    return None
+
+
+def _is_header_row(cells: list[HtmlNode], values: list[str]) -> bool:
+    labels = [value for value in values if value.strip()]
+    if not any(
+        "assignment" in value.casefold() or "activit" in value.casefold() for value in labels
+    ):
+        return False
+    # Narrative cells such as "How to find the assignments in Canvas ..." mention the same
+    # words but are not column headings.
+    return all(cell.tag == "th" for cell in cells) or all(
+        len(value) <= HEADER_CELL_MAX_CHARS for value in labels
+    )
+
+
+def _distinct_row_cells(values: list[str], roles: list[BlockRole]) -> set[int]:
+    """Keep one copy of cells repeated across a row, preferring the most specific column."""
+    kept: dict[str, int] = {}
+    for index, value in enumerate(values):
+        key = " ".join(value.casefold().split())
+        if not key:
+            continue
+        current = kept.get(key)
+        if current is None or ROW_CELL_ROLE_PRIORITY.get(
+            roles[index], 0
+        ) > ROW_CELL_ROLE_PRIORITY.get(roles[current], 0):
+            kept[key] = index
+    return set(kept.values())
+
+
 def _safe_anchor(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]+", "_", value).strip("_")[:180] or "content"
 
@@ -388,7 +546,9 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
         **metadata: Any,
     ) -> None:
         nonlocal order
-        normalized = " ".join(text.split()).strip()
+        normalized = "\n".join(
+            " ".join(line.split()) for line in text.splitlines() if line.strip()
+        )
         if not normalized:
             return
         order += 1
@@ -415,20 +575,17 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
             cells = _direct_children(row, {"td", "th"})
             if not cells:
                 continue
-            values = [cell.text(" ") for cell in cells]
-            if not headers and any(
-                "assignment" in value.casefold() or "activit" in value.casefold()
-                for value in values
-            ):
+            values = [_line_text(cell) for cell in cells]
+            if not headers and _is_header_row(cells, values):
                 headers = values
-            row_label = next(
-                (value.rstrip(".") for value in values if DAY_RE.fullmatch(value.strip())), None
-            )
-            for column_index, value in enumerate(values):
+            day_labels = [_day_label(value) for value in values]
+            row_label = next((label for label in day_labels if label), None)
+            roles: list[BlockRole] = []
+            for column_index in range(len(values)):
                 lowered_header = (
                     headers[column_index].casefold() if column_index < len(headers) else ""
                 )
-                if row_label and DAY_RE.fullmatch(value.strip()):
+                if day_labels[column_index]:
                     role = BlockRole.DAY
                 elif "assignment" in lowered_header or "homework" in lowered_header:
                     role = BlockRole.ASSIGNMENTS
@@ -438,6 +595,15 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
                     role = BlockRole.HEADER
                 else:
                     role = BlockRole.UNKNOWN
+                roles.append(role)
+            kept_columns = _distinct_row_cells(values, roles)
+            for column_index, value in enumerate(values):
+                role = roles[column_index]
+                if column_index not in kept_columns:
+                    if value.strip():
+                        # Consume the duplicate's slot so later anchors stay stable.
+                        order += 1
+                    continue
                 assignment_links = _assignment_links(cells[column_index], document.html_url)
                 append(
                     value,

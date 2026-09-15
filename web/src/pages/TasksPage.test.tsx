@@ -44,6 +44,17 @@ const task = {
   canvas: { assignment_url: null },
 }
 
+const chemistryCourse = { ...course, id: 'chemistry', settings: { ...course.settings, name: 'AP Chemistry', prefix: 'CHEM' } }
+
+const chemistryTask = {
+  ...task,
+  logical_id: 'logical-2',
+  course: { id: 'chemistry', name: 'AP Chemistry', prefix: 'CHEM' },
+  title: '[CHEM] Unit 2 packet',
+  display_title: 'Unit 2 packet',
+  google_task: { ...task.google_task, task_id: 'google-2' },
+}
+
 function response(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 }
@@ -53,8 +64,8 @@ describe('TasksPage', () => {
     toast.mockReset()
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url === '/api/v1/tasks' && !init?.method) return response([task])
-      if (url === '/api/v1/courses') return response([course])
+      if (url === '/api/v1/tasks' && !init?.method) return response([task, chemistryTask])
+      if (url === '/api/v1/courses') return response([course, chemistryCourse])
       if (url === '/api/v1/bootstrap') return response({ csrf_token: 'csrf-token' })
       if (url === '/api/v1/tasks' && init?.method === 'POST') {
         return response({ ...task, logical_id: 'manual-1', display_title: 'New reading', manually_managed: true }, 201)
@@ -69,6 +80,19 @@ describe('TasksPage', () => {
   function renderPage() {
     return render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><TasksPage /></SWRConfig>)
   }
+
+  it('shows tasks from every course by default and filters by course', async () => {
+    renderPage()
+    await screen.findByText('Existing task')
+    expect(screen.getByText('Unit 2 packet')).toBeInTheDocument()
+    const courseFilter = screen.getByLabelText('Course filter')
+    expect(courseFilter).toHaveValue('')
+
+    await screen.findByRole('option', { name: 'AP Chemistry' })
+    fireEvent.change(courseFilter, { target: { value: 'chemistry' } })
+    expect(screen.queryByText('Existing task')).not.toBeInTheDocument()
+    expect(screen.getByText('Unit 2 packet')).toBeInTheDocument()
+  })
 
   it('creates and edits Google-backed tasks', async () => {
     const { container } = renderPage()
