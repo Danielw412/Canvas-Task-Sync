@@ -52,6 +52,12 @@ def _token_scopes(path: Path) -> set[str]:
     return set(data.get("scopes") or [])
 
 
+def persist_authorized_credentials(root_dir: Path, credentials: Credentials) -> None:
+    """Store freshly authorized credentials under the same lock a refresh would take."""
+    with _CREDENTIALS_LOCK:
+        _write_token(root_dir / "token.json", credentials)
+
+
 def load_google_credentials(
     root_dir: Path,
     *,

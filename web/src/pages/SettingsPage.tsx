@@ -20,7 +20,7 @@ import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
 import { Button, EmptyState, Modal, StatusIcon } from '../components/ui'
 import { fetchJson, mutateJson } from '../lib/api'
-import type { ConnectionStatus } from '../types'
+import type { ConnectionStatus, GoogleAuthorizationStart, GoogleAuthorizationStatus } from '../types'
 
 interface SettingsResponse {
   connections: ConnectionStatus
@@ -34,7 +34,22 @@ interface ExtensionSetup {
   capture_ttl_seconds: number
   supported_sources: string[]
   load_unpacked_path: string
+  load_unpacked_relative_path?: string
   captures: { source_type: string; captured_at: string; item_count: number; screenshot_count: number }[]
+}
+
+const AUTHORIZATION_POLL_MS = 1_500
+
+async function pollAuthorization(state: string, expiresAt: number): Promise<GoogleAuthorizationStatus> {
+  let latest: GoogleAuthorizationStatus | null = null
+  while (Date.now() < expiresAt) {
+    await new Promise((resolve) => setTimeout(resolve, AUTHORIZATION_POLL_MS))
+    latest = await fetchJson<GoogleAuthorizationStatus>(`/api/v1/settings/google/authorize/${encodeURIComponent(state)}`)
+    if (latest.status !== 'pending') return latest
+  }
+  return latest?.status === 'pending' || latest === null
+    ? { status: 'failed', message: 'Google authorization timed out. Start it again.', connections: latest?.connections ?? ({} as never) }
+    : latest
 }
 
 export default function SettingsPage() {
@@ -45,6 +60,8 @@ export default function SettingsPage() {
   const [keyModal, setKeyModal] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
+  const [authorizing, setAuthorizing] = useState(false)
+  const [consentUrl, setConsentUrl] = useState<string | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
 
   async function action(work: () => Promise<unknown>, success: string) {
@@ -62,6 +79,32 @@ export default function SettingsPage() {
     await action(() => mutateJson('/api/v1/settings/gemini-key', { body: { api_key: apiKey } }), 'Gemini API key saved locally.')
     setApiKey('')
     setKeyModal(false)
+  }
+
+  // Consent happens in this browser even when the backend is headless on another machine:
+  // the backend mints the URL, this tab opens it, and Google redirects to the dashboard
+  // origin, which hands the code back over the same loopback API.
+  async function authorizeGoogle() {
+    setAuthorizing(true)
+    setConsentUrl(null)
+    try {
+      const started = await mutateJson<GoogleAuthorizationStart>('/api/v1/settings/google/authorize')
+      setConsentUrl(started.authorization_url)
+      window.open(started.authorization_url, '_blank', 'noopener,noreferrer')
+      toast('Complete Google consent in the tab that opened.', 'info')
+      const outcome = await pollAuthorization(started.state, new Date(started.expires_at).getTime())
+      if (outcome.status === 'completed') {
+        await Promise.all([mutate(), mutateExtension(), globalMutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))])
+        setConsentUrl(null)
+        toast('Google authorization completed.', 'success')
+      } else {
+        toast(outcome.message ?? 'Google authorization did not complete.', 'error')
+      }
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'Google authorization failed to start.', 'error')
+    } finally {
+      setAuthorizing(false)
+    }
   }
 
   async function uploadClient(file?: File) {
@@ -94,7 +137,7 @@ export default function SettingsPage() {
     <div className="settings-layout">
       <section className="settings-main">
         {tab === 'connections' ? <>
-          <section className="settings-section panel"><header><h2>Google connection</h2><span className={connections?.google_authorized ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.google_authorized ? 'healthy' : 'missing'} size={17} />{connections?.google_authorized ? 'Authorized' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>OAuth client file</strong><small>credentials.json</small></div><div className="setup-result"><StatusIcon state={connections?.google_client_configured ? 'healthy' : 'missing'} size={17} /><span>{connections?.google_client_configured ? 'Valid desktop client' : 'Not configured'}</span></div><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => void uploadClient(event.target.files?.[0])} /><Button variant="secondary" icon={Upload} disabled={busy} onClick={() => fileInput.current?.click()}>{connections?.google_client_configured ? 'Replace file' : 'Upload file'}</Button></div><div className="setup-row"><span className="step-number">2</span><div><strong>Google authorization</strong><small>Tasks and Slides access</small></div><div className="scope-list"><span><Check size={14} />Google Tasks · Read and write</span><span><Check size={14} />Google Slides · Read selected presentation pages</span></div><Button variant="secondary" disabled={busy || !connections?.google_client_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/google/authorize'), 'Google authorization completed.')}>{connections?.google_authorized ? 'Reauthorize' : 'Authorize'}</Button></div>{connections?.google_authorized ? <button className="settings-danger-row" disabled={busy} onClick={() => { if (window.confirm('Disconnect Google access? Your OAuth client file remains, but token.json is removed from active use.')) void action(() => mutateJson('/api/v1/settings/google/disconnect'), 'Google access disconnected.') }}><span>Disconnect</span><small>Disconnect Google access for Tasks and Slides.</small></button> : null}</section>
+          <section className="settings-section panel"><header><h2>Google connection</h2><span className={connections?.google_authorized ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.google_authorized ? 'healthy' : 'missing'} size={17} />{connections?.google_authorized ? 'Authorized' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>OAuth client file</strong><small>credentials.json</small></div><div className="setup-result"><StatusIcon state={connections?.google_client_configured ? 'healthy' : 'missing'} size={17} /><span>{connections?.google_client_configured ? 'Valid desktop client' : 'Not configured'}</span></div><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => void uploadClient(event.target.files?.[0])} /><Button variant="secondary" icon={Upload} disabled={busy} onClick={() => fileInput.current?.click()}>{connections?.google_client_configured ? 'Replace file' : 'Upload file'}</Button></div><div className="setup-row"><span className="step-number">2</span><div><strong>Google authorization</strong><small>Tasks and Slides access</small></div><div className="scope-list"><span><Check size={14} />Google Tasks · Read and write</span><span><Check size={14} />Google Slides · Read selected presentation pages</span></div><Button variant="secondary" disabled={busy || authorizing || !connections?.google_client_configured} onClick={() => void authorizeGoogle()}>{authorizing ? 'Waiting for consent…' : connections?.google_authorized ? 'Reauthorize' : 'Authorize'}</Button></div>{consentUrl ? <p className="setup-hint">Consent did not open? <a href={consentUrl} target="_blank" rel="noreferrer">Open the Google authorization page<ExternalLink size={13} /></a></p> : null}{connections?.google_authorized ? <button className="settings-danger-row" disabled={busy} onClick={() => { if (window.confirm('Disconnect Google access? Your OAuth client file remains, but token.json is removed from active use.')) void action(() => mutateJson('/api/v1/settings/google/disconnect'), 'Google access disconnected.') }}><span>Disconnect</span><small>Disconnect Google access for Tasks and Slides.</small></button> : null}</section>
           <section className="settings-section panel"><header><h2>Gemini API</h2><span className={connections?.gemini_configured ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.gemini_configured ? 'healthy' : 'missing'} size={17} />{connections?.gemini_configured ? 'Configured' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>API key</strong><small>Stored locally in .env and never returned by the API</small></div><div className="masked-key">••••••••••••••••••••••••</div><div className="button-cluster"><Button variant="secondary" icon={KeyRound} onClick={() => setKeyModal(true)}>{connections?.gemini_configured ? 'Replace key' : 'Add key'}</Button><Button variant="secondary" disabled={busy || !connections?.gemini_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini connection passed.')}>Test connection</Button></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Models and reasoning</strong><small>Configured separately for each class on the Courses page</small></div></div></section>
           <ChromeConnectorSection data={extension} error={extensionError} busy={busy} copyToken={copyPairingToken} rotate={() => action(() => mutateJson('/api/v1/settings/extension/rotate'), 'Extension pairing token rotated. Paste the new token into the extension.')} clear={() => action(() => mutateJson('/api/v1/settings/extension/captures', { method: 'DELETE' }), 'In-memory browser captures cleared.')} />
           <LocalServerSection address={connections?.local_server ?? '127.0.0.1:8790'} />
@@ -110,7 +153,7 @@ export default function SettingsPage() {
 
 function ChromeConnectorSection({ data, error, busy, copyToken, rotate, clear }: { data?: ExtensionSetup; error?: Error; busy: boolean; copyToken: () => Promise<void>; rotate: () => Promise<void>; clear: () => Promise<void> }) {
   const capture = data?.captures?.[0]
-  return <section className="settings-section panel"><header><h2>Chrome source connector</h2><span className={capture ? 'tone-success' : 'tone-warning'}><StatusIcon state={capture ? 'healthy' : 'warning'} size={17} />{capture ? 'Capture ready' : 'Waiting for capture'}</span></header>{error ? <p className="tone-danger">{error.message}</p> : <><div className="setup-row"><span className="step-number">1</span><div><strong>Load the unpacked extension</strong><small>Open <code>chrome://extensions</code>, enable Developer mode, choose Load unpacked, and select:</small><small><code>{data?.load_unpacked_path ?? 'extension/dist'}</code></small></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Pair with this local app</strong><small>Use server <code>{data?.server_url ?? 'http://127.0.0.1:8790'}</code>. The token authorizes only this loopback bridge.</small></div><input className="extension-token" aria-label="Extension pairing token" readOnly value={data?.pairing_token ?? ''} onFocus={(event) => event.currentTarget.select()} /><div className="button-cluster"><Button variant="secondary" icon={Copy} disabled={!data?.pairing_token} onClick={() => void copyToken()}>Copy token</Button><Button variant="secondary" icon={RotateCcw} disabled={busy} onClick={() => void rotate()}>Rotate</Button></div></div><div className="setup-row"><span className="step-number">3</span><div><strong>Capture the open file</strong><small>Open Slides, Docs, or Sheets in Chrome, click the extension, choose portions and a mode, then send the capture.</small></div>{capture ? <div className="setup-result"><StatusIcon state="healthy" size={17} /><span>{capture.source_type.replace('google_', '')} · {capture.item_count} items · {capture.screenshot_count} screenshots</span></div> : null}</div><p className="local-note"><LockKeyhole size={15} />Captures stay in memory for {Math.round((data?.capture_ttl_seconds ?? 900) / 60)} minutes, are never written to disk, and contain no exported login credentials.</p>{capture ? <button className="settings-danger-row" disabled={busy} onClick={() => void clear()}><span>Clear browser captures</span><small>Immediately removes all pending in-memory source content.</small></button> : null}</>}</section>
+  return <section className="settings-section panel"><header><h2>Chrome source connector</h2><span className={capture ? 'tone-success' : 'tone-warning'}><StatusIcon state={capture ? 'healthy' : 'warning'} size={17} />{capture ? 'Capture ready' : 'Waiting for capture'}</span></header>{error ? <p className="tone-danger">{error.message}</p> : <><div className="setup-row"><span className="step-number">1</span><div><strong>Load the unpacked extension</strong><small>Open <code>chrome://extensions</code>, enable Developer mode, choose Load unpacked, and select this folder inside your Canvas Task Sync checkout <em>on this computer</em>:</small><small><code>{data?.load_unpacked_relative_path ?? 'extension/dist'}</code></small></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Pair with this local app</strong><small>Use server <code>{data?.server_url ?? 'http://127.0.0.1:8790'}</code>. The token authorizes only this loopback bridge.</small></div><input className="extension-token" aria-label="Extension pairing token" readOnly value={data?.pairing_token ?? ''} onFocus={(event) => event.currentTarget.select()} /><div className="button-cluster"><Button variant="secondary" icon={Copy} disabled={!data?.pairing_token} onClick={() => void copyToken()}>Copy token</Button><Button variant="secondary" icon={RotateCcw} disabled={busy} onClick={() => void rotate()}>Rotate</Button></div></div><div className="setup-row"><span className="step-number">3</span><div><strong>Capture the open file</strong><small>Open Slides, Docs, or Sheets in Chrome, click the extension, choose portions and a mode, then send the capture.</small></div>{capture ? <div className="setup-result"><StatusIcon state="healthy" size={17} /><span>{capture.source_type.replace('google_', '')} · {capture.item_count} items · {capture.screenshot_count} screenshots</span></div> : null}</div><p className="local-note"><LockKeyhole size={15} />Captures stay in memory for {Math.round((data?.capture_ttl_seconds ?? 900) / 60)} minutes, are never written to disk, and contain no exported login credentials.</p>{capture ? <button className="settings-danger-row" disabled={busy} onClick={() => void clear()}><span>Clear browser captures</span><small>Immediately removes all pending in-memory source content.</small></button> : null}</>}</section>
 }
 
 function LocalServerSection({ address }: { address: string }) {

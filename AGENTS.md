@@ -41,7 +41,10 @@ New formats should do acquisition only, register through `create_source_adapter`
 - `cli.py` / `app.py` — CLI parsing and thin command entry points (`auth`, `doctor`, `sync`, `web`).
 - `auth.py` — Google OAuth scopes/token refresh and atomic token persistence.
 - `health.py` — connection/source/task-list diagnostics.
-- `server.py` / `windows_startup.py` / `scripts/` — loopback servers and Windows scheduled-startup integration.
+- `server.py` / `windows_startup.py` / `scripts/` — loopback servers and Windows scheduled-startup
+  integration. Both understand two modes: the whole application on one machine, or dashboards-only
+  against `--remote` with a supervised SSH tunnel.
+- `deploy/` — systemd user service and installer for the authoritative backend on a Linux server.
 - `week.py` — week-selection helpers.
 
 ### Web control center backend
@@ -53,7 +56,15 @@ New formats should do acquisition only, register through `create_source_adapter`
 - `tracked_tasks.py` — read-only canonical task feed that merges sync state with live Google completion. `completed=false` is intentionally strict: only live `needsAction` counts as unfinished. School Dashboard consumes this contract.
 - `redaction.py` — secret/binary sanitization before logs/support data are persisted or returned.
 - `browser_capture.py` — bounded, validated, **memory-only** browser capture broker and automatic capture-request queue.
-- `simple_web_app.py` / `web_constants.py` — secondary simple UI server and shared loopback ports.
+- `simple_web_app.py` / `web_constants.py` — secondary simple UI server, shared loopback ports, and
+  the dashboard-origin helpers (`resolve_public_origin`) used to build the Google redirect.
+- `proxy_app.py` — **dashboards-only** app for a machine that does not own the backend. It serves
+  `web_dist` and forwards `/api/` to the authoritative backend over an SSH tunnel, rewriting `Host`
+  so the backend's loopback/CSRF/extension guards behave unchanged and streaming responses so SSE and
+  long-polls pass through. It must never import `WebRuntime`, `SyncService`, or a store.
+- `google_oauth.py` — browser-delegated OAuth for a headless backend. The backend mints the consent
+  URL, the person's own browser completes consent, and the code returns through the dashboard origin.
+  `auth.load_google_credentials` still owns non-interactive refresh.
 
 ### React frontend: `web/`
 
@@ -87,6 +98,8 @@ New formats should do acquisition only, register through `create_source_adapter`
 ### Tests and reference material
 
 - `tests/` — Python tests are organized by production module: sources/extraction, scheduling, identity, planner, Google Tasks/state, orchestration, web runtime/API, CLI/auth/startup.
+  `test_remote_backend.py` drives the real backend app through the proxy, so a new `web_app` route is
+  covered as soon as it exists; two of its cases need real sockets because TestClient buffers.
 - `tests/fixtures/` — sanitized extraction fixtures; prefer these over live services.
 - `web/src/**/*.test.ts(x)` — React/API UI tests.
 - `design/reference/` and `design/implementation/` — screenshots for visual comparison only; not runtime code.
@@ -103,6 +116,14 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Browser captures remain bounded and memory-only; do not persist screenshots/page content or accept credential-like metadata.
 - Keep the web server loopback-only. Do not weaken host/origin/CSRF/extension-token checks.
 - Persisted run/support data must pass the redaction layer.
+- In a split deployment the backend is authoritative and the dashboard machine is not. Do not add
+  sync logic, credential handling, or SQLite state to `proxy_app.py`, and do not copy `token.json` or
+  either SQLite database back to the dashboard machine.
+- The proxy must stay transparent: preserve `Content-Length` (the capture size guard reads it),
+  relay `Origin`/`X-CSRF-Token`/`X-Extension-Token` unchanged, and stream rather than buffer.
+- Google authorization is delegated to the person's browser, never `run_local_server`, on any backend
+  that may be headless. Reject a mismatched, reused, or expired OAuth `state`, and never overwrite a
+  working `token.json` with credentials that lack a refresh token or a required scope.
 - If `/api/v1/tasks` or browser-resource endpoints change, check the School Dashboard `server/task-sync.ts` integration too.
 
 ## Avoid wasting context
@@ -134,6 +155,7 @@ Run the narrowest relevant tests first. Useful groups:
 python -m pytest tests/test_scheduling.py tests/test_identity.py tests/test_planner.py
 python -m pytest tests/test_sync_service.py
 python -m pytest tests/test_web_runtime.py tests/test_tasks_api.py
+python -m pytest tests/test_remote_backend.py tests/test_google_oauth.py
 ```
 
 Before finishing a broad Python/backend change:

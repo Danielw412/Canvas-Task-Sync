@@ -1,5 +1,22 @@
+<#
+.SYNOPSIS
+    Register the Canvas Task Sync dashboards to start at sign-in.
+
+.DESCRIPTION
+    Without -ServerHost the task runs the whole application locally, as it always has.
+    With -ServerHost the task serves only the two dashboards and keeps an SSH tunnel open
+    to the authoritative backend, so no sync runtime or database is created on this laptop.
+
+.EXAMPLE
+    .\scripts\install-windows-startup.ps1
+    .\scripts\install-windows-startup.ps1 -ServerHost daniel@192.168.1.186
+#>
 [CmdletBinding()]
-param()
+param(
+    [string]$ServerHost,
+    [int]$TunnelPort = 8879,
+    [int]$RemoteBackendPort = 8790
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -90,6 +107,10 @@ if ($listeners.Count -ne 0) {
 }
 
 $actionArguments = '-m canvas_task_sync.windows_startup --config "{0}" --log-path "{1}" --port {2} --simple-port {3}' -f $configPath, $logPath, $port, $simplePort
+if ($ServerHost) {
+    $actionArguments += ' --ssh-target "{0}" --tunnel-port {1} --remote-backend-port {2}' -f $ServerHost, $TunnelPort, $RemoteBackendPort
+    Write-Host "Dashboard-only mode: the backend stays on $ServerHost via 127.0.0.1:$TunnelPort." -ForegroundColor Cyan
+}
 $action = New-ScheduledTaskAction `
     -Execute $pythonwPath `
     -Argument $actionArguments `
@@ -115,7 +136,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "Starts the private Canvas Task Sync website in the background when this user signs in." `
+    -Description $(if ($ServerHost) { "Starts the Canvas Task Sync dashboards and an SSH tunnel to $ServerHost when this user signs in." } else { "Starts the private Canvas Task Sync website in the background when this user signs in." }) `
     -Force | Out-Null
 
 $desktopPath = [Environment]::GetFolderPath("Desktop")

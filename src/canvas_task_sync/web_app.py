@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import html
 import json
 import re
 import secrets
@@ -11,15 +12,15 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
-from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.browser_capture import (
     MAX_CAPTURE_BYTES,
     MAX_CAPTURE_TEXT_BYTES,
@@ -36,6 +37,11 @@ from canvas_task_sync.configuration_service import (
     ConfigurationService,
 )
 from canvas_task_sync.control_store import ControlStore
+from canvas_task_sync.google_oauth import (
+    GoogleAuthorizationError,
+    GoogleAuthorizationManager,
+    build_redirect_uri,
+)
 from canvas_task_sync.google_tasks import GoogleTasksError
 from canvas_task_sync.health import connection_status, run_health_checks
 from canvas_task_sync.manual_tasks import ManualTaskError, ManualTaskService
@@ -55,7 +61,11 @@ from canvas_task_sync.sources.browser_connector import (
 )
 from canvas_task_sync.sync_service import SyncService
 from canvas_task_sync.tracked_tasks import TrackedTaskReader
-from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
+from canvas_task_sync.web_constants import (
+    DEFAULT_SIMPLE_WEB_PORT,
+    DEFAULT_WEB_PORT,
+    resolve_public_origin,
+)
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
     BrowserResourceRead,
@@ -84,6 +94,11 @@ class WebRuntime:
         self.port = port
         self.configuration = ConfigurationService(config_path)
         self.settings = self.configuration.load()
+        # The dashboard origin can differ from this backend's bound port when the
+        # dashboards run on another machine, and Google must redirect to the origin the
+        # person's browser actually uses.
+        load_dotenv(self.settings.root_dir / ".env")
+        self.google_auth = GoogleAuthorizationManager(self.settings.root_dir)
         self.store = ControlStore(self.settings.root_dir / ".canvas-task-sync" / "control.sqlite3")
         self.capture_broker = BrowserCaptureBroker()
         pairing_token = self.store.get_setting("extension_pairing_token")
@@ -839,6 +854,10 @@ def create_web_app(
             "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
             "supported_sources": ["google_slides", "google_docs", "google_sheets", "web_page"],
             "load_unpacked_path": str(runtime.settings.root_dir / "extension" / "dist"),
+            # Chrome loads the extension from the machine the browser runs on, which is
+            # not this one when the dashboards are remote. The relative path is the part
+            # that holds true in both deployments.
+            "load_unpacked_relative_path": "extension/dist",
             "captures": [
                 status.as_dict() for status in runtime.capture_broker.list_statuses()
             ],
@@ -1012,13 +1031,69 @@ def create_web_app(
 
     @api.post("/settings/google/authorize")
     async def authorize_google(request: Request) -> dict[str, Any]:
+        """Mint a consent URL for the person's own browser.
+
+        The backend may be headless, so it never opens a browser or binds a redirect
+        port itself. It hands back a URL; the dashboard origin receives the redirect and
+        proxies the code back to /settings/google/callback below.
+        """
         runtime = _runtime(request)
-        await asyncio.to_thread(
-            load_google_credentials,
-            runtime.settings.root_dir,
-            interactive=True,
+        redirect_uri = build_redirect_uri(resolve_public_origin(runtime.port))
+        try:
+            started = await asyncio.to_thread(runtime.google_auth.begin, redirect_uri=redirect_uri)
+        except GoogleAuthorizationError as error:
+            raise _http_error(409, error.code, str(error)) from None
+        return started.as_dict()
+
+    @api.get("/settings/google/authorize/{state}")
+    def google_authorization_status(request: Request, state: str) -> dict[str, Any]:
+        runtime = _runtime(request)
+        status = runtime.google_auth.status(state)
+        if status["status"] == "completed":
+            runtime.google_auth.forget(state)
+        return {
+            **status,
+            "connections": connection_status(runtime.settings, port=runtime.port),
+        }
+
+    @api.get("/settings/google/callback", include_in_schema=False)
+    async def google_authorization_callback(
+        request: Request,
+        state: str = "",
+        code: str = "",
+        error: str = "",
+    ) -> HTMLResponse:
+        """Receive Google's redirect from the person's browser and finish the exchange.
+
+        This is a top-level navigation, so it carries no CSRF token; the OAuth ``state``
+        minted above is what binds the response to the request that started it.
+        """
+        runtime = _runtime(request)
+        if error:
+            runtime.google_auth.fail(
+                state=state,
+                code="google_consent_declined",
+                message="Google authorization was cancelled or declined.",
+            )
+            return _authorization_page(
+                ok=False,
+                heading="Authorization cancelled",
+                body="Google authorization was cancelled. You can close this tab and try again.",
+            )
+        try:
+            await asyncio.to_thread(runtime.google_auth.complete, state=state, code=code)
+        except GoogleAuthorizationError as failure:
+            return _authorization_page(
+                ok=False,
+                heading="Authorization failed",
+                body=str(failure),
+                status_code=400,
+            )
+        return _authorization_page(
+            ok=True,
+            heading="Authorization complete",
+            body="Canvas Task Sync is connected to Google. You can close this tab.",
         )
-        return {"connections": connection_status(runtime.settings, port=runtime.port)}
 
     @api.post("/settings/google/disconnect")
     def disconnect_google(request: Request) -> dict[str, Any]:
@@ -1192,6 +1267,35 @@ def _http_error(
             "run_id": run_id,
         },
     )
+
+
+def _authorization_page(
+    *,
+    ok: bool,
+    heading: str,
+    body: str,
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Self-contained page shown in the tab Google redirected, with no external loads."""
+    accent = "#15803d" if ok else "#b91c1c"
+    document = (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{html.escape(heading)}</title><style>"
+        "body{margin:0;min-height:100vh;display:flex;align-items:center;"
+        "justify-content:center;background:#f8fafc;color:#0f172a;"
+        "font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}"
+        "main{max-width:32rem;padding:2rem;background:#fff;border-radius:12px;"
+        "border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(15,23,42,.08)}"
+        f"h1{{margin:0 0 .5rem;font-size:1.25rem;color:{accent}}}"
+        "p{margin:0;color:#475569}"
+        "@media(prefers-color-scheme:dark){body{background:#0f172a;color:#e2e8f0}"
+        "main{background:#1e293b;border-color:#334155}p{color:#cbd5e1}}"
+        "</style></head><body><main>"
+        f"<h1>{html.escape(heading)}</h1><p>{html.escape(body)}</p>"
+        "</main></body></html>"
+    )
+    return HTMLResponse(content=document, status_code=status_code)
 
 
 def _error_response(

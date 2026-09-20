@@ -120,6 +120,22 @@ export interface ConnectionStatus {
   checks: ConnectionItem[]
 }
 
+export interface GoogleAuthorizationStart {
+  state: string
+  authorization_url: string
+  redirect_uri: string
+  expires_at: string
+}
+
+export type GoogleAuthorizationState = 'pending' | 'completed' | 'failed' | 'unknown'
+
+export interface GoogleAuthorizationStatus {
+  status: GoogleAuthorizationState
+  code?: string | null
+  message?: string | null
+  connections: ConnectionStatus
+}
+
 export interface SyncAction {
   kind: SyncActionKind
   title: string

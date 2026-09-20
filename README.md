@@ -233,6 +233,85 @@ text, table structure, geometry, and styles. A successful apply stores its struc
 SQLite. A later unchanged run reuses that extraction and avoids the expensive thumbnail request.
 Dry runs never create or modify the SQLite file.
 
+## Split deployment: dashboards on a laptop, backend on a server
+
+The dashboards and the backend can live on different machines. The laptop serves only the two web
+UIs and forwards every API call over an SSH tunnel; the server owns Canvas, Gemini, Google Tasks,
+the scheduler, both SQLite databases, and all credentials.
+
+```text
+Laptop                                        Server
+  :8790  full dashboard + API proxy   ──┐       :8790  authoritative backend (127.0.0.1 only)
+  :8791  simple dashboard              │          ├─ Canvas / Gemini / Google Tasks
+                                       │          ├─ sync jobs + scheduler
+         ssh -N -L 8879:127.0.0.1:8790 ┘          ├─ state.sqlite3 + control.sqlite3
+                                                  └─ credentials.json, token.json, .env
+```
+
+Nothing on the laptop instantiates `WebRuntime`, `SyncService`, the scheduler, or a production
+database: `canvas-task-sync web --remote` builds a proxy app instead. The proxy rewrites `Host` to
+the backend's own dashboard origin so the backend's loopback host guard, CSRF origin checks, and
+extension pairing all behave exactly as they do without a tunnel, and it streams responses so
+server-sent events, the extension's capture long-poll, and file downloads pass straight through.
+
+### Server
+
+```bash
+# Once, on the server:
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+./deploy/install-server-service.sh          # systemd --user service, bound to 127.0.0.1:8790
+sudo loginctl enable-linger "$USER"         # keep it running when you are not logged in
+
+systemctl --user status canvas-task-sync
+journalctl --user -u canvas-task-sync -f
+```
+
+Copy `config/courses.yaml`, `.env`, `credentials.json`, and `token.json` to the server, and migrate
+`.canvas-task-sync/state.sqlite3` once so existing Google Tasks keep their identity. After that the
+databases stay on the server; they are never synchronized between machines.
+
+### Laptop
+
+```powershell
+# Start the SSH tunnel and both dashboards.
+.\scripts\start-remote-dashboards.ps1
+.\scripts\start-remote-dashboards.ps1 -ServerHost daniel@192.168.1.186 -NoBrowser
+
+# Stop both again.
+.\scripts\stop-remote-dashboards.ps1
+
+# Or start them automatically at sign-in, tunnel included.
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1 -ServerHost daniel@192.168.1.186
+```
+
+Run `canvas-task-sync web` with no `--remote` to go back to a single machine that does everything.
+
+### Google authorization without a browser on the server
+
+`InstalledAppFlow.run_local_server` needs one machine to both open the consent page and bind the
+redirect port, which a headless server cannot do. Authorization is split instead:
+
+1. **Authorize** in the laptop dashboard asks the backend for a consent URL (PKCE, `access_type=offline`,
+   the same Tasks and Slides scopes as before).
+2. The laptop browser opens it and you complete consent there.
+3. Google redirects the browser to `http://127.0.0.1:8790/api/v1/settings/google/callback`, which the
+   laptop proxies to the backend.
+4. The backend exchanges the code and writes `token.json` **on the server only**. Refresh continues
+   normally from there.
+
+The OAuth `state` is what binds the callback to the request that started it; a mismatched, reused, or
+expired state is refused, and a response missing a refresh token or a required scope is rejected
+rather than written over a working `token.json`. If the dashboards run on a different origin than the
+backend's own port, set `CANVAS_TASK_SYNC_PUBLIC_ORIGIN` on the server so the redirect points at the
+browser's address.
+
+### Chrome extension
+
+Point the extension at `http://127.0.0.1:8790` exactly as before; the laptop proxy relays the pairing
+token, capture uploads, screenshots, and the automatic capture long-poll. Load the unpacked extension
+from `extension/dist` **in the checkout on the laptop**, not the server's copy, and paste the pairing
+token shown in the laptop dashboard's Settings page.
+
 ## Chrome source connector
 
 The Manifest V3 extension in `extension/` is an acquisition client, not a second sync system. It

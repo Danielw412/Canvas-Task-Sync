@@ -1,0 +1,29 @@
+[Unit]
+Description=Canvas Task Sync authoritative backend
+Documentation=https://github.com/Danielw412/Canvas-Task-Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/Canvas-Task-Sync
+# Loopback only. Reach it from a laptop with:
+#   ssh -N -L 8879:127.0.0.1:8790 daniel@<server>
+ExecStart=%h/projects/Canvas-Task-Sync/.venv/bin/python -m canvas_task_sync \
+    --config config/courses.yaml \
+    web --port 8790 --no-open --no-simple
+# The dashboards live on the laptop at http://127.0.0.1:8790, which is also where Google
+# must return after consent. The backend never opens a browser itself.
+Environment=CANVAS_TASK_SYNC_PUBLIC_ORIGIN=http://127.0.0.1:8790
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# The service only ever needs its own project directory.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=default.target
