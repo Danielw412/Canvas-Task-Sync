@@ -163,7 +163,7 @@ canvas-task-sync sync --course spanish --extraction-mode hybrid
 Start the single-user control center on the loopback interface:
 
 ```powershell
-# Opens http://127.0.0.1:8790 in the default browser.
+# Opens http://127.0.0.1:8890 in the default browser.
 canvas-task-sync web
 
 # Choose other loopback ports or leave browser opening to yourself.
@@ -178,8 +178,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1
 ```
 
 The installer registers one hidden per-user scheduled task, starts it immediately, and verifies both
-the full control center at `http://127.0.0.1:8790/` and the minimal sync console at
-`http://127.0.0.1:8791/`. Both desktop shortcuts use the same authoritative sync queue, scheduler,
+the full control center at `http://127.0.0.1:8890/` and the minimal sync console at
+`http://127.0.0.1:8891/`. Both desktop shortcuts use the same authoritative sync queue, scheduler,
 and databases. The servers run without a terminal or browser window and do not expose either site
 to the local network. To remove the scheduled task and both shortcuts later:
 
@@ -201,7 +201,7 @@ hosted multi-user service.
 
 ### Local JSON API
 
-The control center exposes a read-only API under `http://127.0.0.1:8790/api/v1` for local companion
+The control center exposes a read-only API under `http://127.0.0.1:8890/api/v1` for local companion
 apps such as School Dashboard:
 
 ```text
@@ -241,8 +241,8 @@ the scheduler, both SQLite databases, and all credentials.
 
 ```text
 Laptop                                        Server
-  :8790  full dashboard + API proxy   ──┐       :8790  authoritative backend (127.0.0.1 only)
-  :8791  simple dashboard              │          ├─ Canvas / Gemini / Google Tasks
+  :8890  full dashboard + API proxy   ──┐       :8790  authoritative backend (127.0.0.1 only)
+  :8891  simple dashboard              │          ├─ Canvas / Gemini / Google Tasks
                                        │          ├─ sync jobs + scheduler
          ssh -N -L 8879:127.0.0.1:8790 ┘          ├─ state.sqlite3 + control.sqlite3
                                                   └─ credentials.json, token.json, .env
@@ -270,6 +270,10 @@ Copy `config/courses.yaml`, `.env`, `credentials.json`, and `token.json` to the 
 `.canvas-task-sync/state.sqlite3` once so existing Google Tasks keep their identity. After that the
 databases stay on the server; they are never synchronized between machines.
 
+Schedules belong to the server and run whenever it is on. The laptop is only a window
+onto it: with the dashboards closed and the tunnel down, the scheduler still fires, the
+worker still starts, and the run still completes.
+
 ### Laptop
 
 ```powershell
@@ -294,7 +298,7 @@ redirect port, which a headless server cannot do. Authorization is split instead
 1. **Authorize** in the laptop dashboard asks the backend for a consent URL (PKCE, `access_type=offline`,
    the same Tasks and Slides scopes as before).
 2. The laptop browser opens it and you complete consent there.
-3. Google redirects the browser to `http://127.0.0.1:8790/api/v1/settings/google/callback`, which the
+3. Google redirects the browser to `http://127.0.0.1:8890/api/v1/settings/google/callback`, which the
    laptop proxies to the backend.
 4. The backend exchanges the code and writes `token.json` **on the server only**. Refresh continues
    normally from there.
@@ -305,9 +309,50 @@ rather than written over a working `token.json`. If the dashboards run on a diff
 backend's own port, set `CANVAS_TASK_SYNC_PUBLIC_ORIGIN` on the server so the redirect points at the
 browser's address.
 
+### Server memory
+
+The web process is long-lived, so anything it loads it keeps. The sync pipeline is the
+expensive part of that — the Gemini SDK alone is about 23 MB and never unloads — and it
+is idle almost all day. So it does not live there.
+
+```text
+web process   ~50 MB   FastAPI, the control database, the dashboards' API
+                       spawns on demand v
+sync worker   ~70 MB   Canvas, Gemini, Google Tasks, the whole pipeline
+                       exits 60s after the queue drains ^
+```
+
+`canvas_task_sync.worker` is started by the web process when a run is queued and shut
+down once nothing is left to do, which returns every byte of the pipeline to the OS.
+Run state, progress events, and cancellation all travel through `control.sqlite3`
+(WAL, so both processes can use it), not through the pipe; the pipe only reports that a
+run finished. That is why server-sent events, cancellation, and schedules behave exactly
+as they did in one process.
+
+Alongside that:
+
+* **Heavy imports are deferred.** `google.genai`, `googleapiclient`, `google_auth_oauthlib`,
+  and `google.auth` load inside the functions that use them, so the web process never
+  pays for them. `tests/test_memory_footprint.py` fails if one leaks back to import time.
+* **Freed pages go back to the OS.** `release_memory()` collects and calls `malloc_trim`
+  when the queue drains and every 15 minutes while idle.
+* **The allocator is capped to one arena.** `MALLOC_ARENA_MAX=1` stops per-thread arenas
+  from accumulating fragmentation that outlives the run that caused it.
+
+Measured on the server: **~50 MB idle** (`MemoryCurrent`), ~117 MB while a sync is
+running, back to ~50 MB about a minute later. `MemoryMax=1G` in the unit is a runaway
+guard, not a working limit.
+
+One exception: a course whose agenda comes from a **Chrome capture** runs in the web
+process instead. Those captures are memory-only by design and are deliberately never
+written anywhere a second process could read them. Such a run loads the pipeline into
+the web process, where it stays until restart. Courses that use the Canvas API, Slides,
+or Docs — which is all of them by default — are unaffected.
+
+### Chrome extension
 ### Chrome extension
 
-Point the extension at `http://127.0.0.1:8790` exactly as before; the laptop proxy relays the pairing
+Point the extension at `http://127.0.0.1:8890`; the laptop proxy relays the pairing
 token, capture uploads, screenshots, and the automatic capture long-poll. Load the unpacked extension
 from `extension/dist` **in the checkout on the laptop**, not the server's copy, and paste the pairing
 token shown in the laptop dashboard's Settings page.

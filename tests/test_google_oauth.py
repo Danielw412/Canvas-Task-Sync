@@ -19,7 +19,7 @@ from canvas_task_sync.google_oauth import (
 )
 from canvas_task_sync.web_app import create_web_app
 
-REDIRECT_URI = f"http://127.0.0.1:8790{CALLBACK_PATH}"
+REDIRECT_URI = f"http://127.0.0.1:8890{CALLBACK_PATH}"
 
 
 class FakeCredentials:
@@ -208,9 +208,9 @@ def test_a_missing_oauth_client_is_reported_before_any_url_is_minted(tmp_path):
 @pytest.mark.parametrize(
     "redirect_uri",
     [
-        f"https://127.0.0.1:8790{CALLBACK_PATH}",
+        f"https://127.0.0.1:8890{CALLBACK_PATH}",
         f"http://example.com{CALLBACK_PATH}",
-        "http://127.0.0.1:8790/somewhere-else",
+        "http://127.0.0.1:8890/somewhere-else",
     ],
 )
 def test_only_the_loopback_callback_may_be_used_as_a_redirect(tmp_path, redirect_uri):
@@ -244,8 +244,8 @@ def test_cancelled_consent_is_recorded_for_the_dashboard(tmp_path):
 
 
 def test_redirect_uri_is_built_from_the_dashboard_origin():
-    assert build_redirect_uri("http://127.0.0.1:8790") == REDIRECT_URI
-    assert build_redirect_uri("http://127.0.0.1:8790/") == REDIRECT_URI
+    assert build_redirect_uri("http://127.0.0.1:8890") == REDIRECT_URI
+    assert build_redirect_uri("http://127.0.0.1:8890/") == REDIRECT_URI
 
 
 # --- the web routes that drive the flow from the dashboard --------------------------
@@ -266,7 +266,7 @@ courses: {}
 
 
 def test_dashboard_can_authorize_google_end_to_end_without_a_server_browser(tmp_path):
-    app = create_web_app(_project(tmp_path), port=8790, simple_port=8791)
+    app = create_web_app(_project(tmp_path), port=8890, simple_port=8891)
     with TestClient(app) as client:
         app.state.runtime.google_auth = _manager(tmp_path)
         headers = {"X-CSRF-Token": client.get("/api/v1/bootstrap").json()["csrf_token"]}
@@ -297,7 +297,7 @@ def test_dashboard_can_authorize_google_end_to_end_without_a_server_browser(tmp_
 
 
 def test_callback_with_a_forged_state_does_not_authorize(tmp_path):
-    app = create_web_app(_project(tmp_path), port=8790, simple_port=8791)
+    app = create_web_app(_project(tmp_path), port=8890, simple_port=8891)
     with TestClient(app) as client:
         app.state.runtime.google_auth = _manager(tmp_path)
         headers = {"X-CSRF-Token": client.get("/api/v1/bootstrap").json()["csrf_token"]}
@@ -311,7 +311,7 @@ def test_callback_with_a_forged_state_does_not_authorize(tmp_path):
 
 
 def test_declined_consent_renders_a_cancellation_page(tmp_path):
-    app = create_web_app(_project(tmp_path), port=8790, simple_port=8791)
+    app = create_web_app(_project(tmp_path), port=8890, simple_port=8891)
     with TestClient(app) as client:
         app.state.runtime.google_auth = _manager(tmp_path)
         headers = {"X-CSRF-Token": client.get("/api/v1/bootstrap").json()["csrf_token"]}
@@ -326,7 +326,7 @@ def test_declined_consent_renders_a_cancellation_page(tmp_path):
 
 
 def test_authorize_requires_csrf_like_every_other_mutation(tmp_path):
-    app = create_web_app(_project(tmp_path), port=8790, simple_port=8791)
+    app = create_web_app(_project(tmp_path), port=8890, simple_port=8891)
     with TestClient(app) as client:
         response = client.post("/api/v1/settings/google/authorize")
     assert response.status_code == 403
@@ -335,7 +335,7 @@ def test_authorize_requires_csrf_like_every_other_mutation(tmp_path):
 
 def test_authorize_uses_the_configured_dashboard_origin_when_it_differs(tmp_path, monkeypatch):
     monkeypatch.setenv("CANVAS_TASK_SYNC_PUBLIC_ORIGIN", "http://127.0.0.1:9999")
-    app = create_web_app(_project(tmp_path), port=8790, simple_port=8791)
+    app = create_web_app(_project(tmp_path), port=8890, simple_port=8891)
     with TestClient(app) as client:
         app.state.runtime.google_auth = _manager(tmp_path)
         headers = {"X-CSRF-Token": client.get("/api/v1/bootstrap").json()["csrf_token"]}

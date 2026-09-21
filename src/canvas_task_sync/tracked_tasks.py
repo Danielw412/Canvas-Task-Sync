@@ -5,9 +5,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
-from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.configuration import ProjectSettings
-from canvas_task_sync.google_tasks import GoogleTasksClient, GoogleTasksError
+from canvas_task_sync.google_tasks import GoogleTasksError
 from canvas_task_sync.models import RemoteTask, StateRecord, TaskType
 from canvas_task_sync.state import StateStore
 from canvas_task_sync.web_models import (
@@ -28,12 +27,38 @@ class TrackedTaskReader:
         self,
         settings: ProjectSettings,
         *,
-        credentials_loader: Callable[..., Any] = load_google_credentials,
-        tasks_client_factory: Callable[[Any], GoogleTasksClient] = GoogleTasksClient,
+        credentials_loader: Callable[..., Any] | None = None,
+        tasks_client_factory: Callable[[Any], Any] | None = None,
     ) -> None:
         self.settings = settings
-        self.credentials_loader = credentials_loader
-        self.tasks_client_factory = tasks_client_factory
+        # Resolved on first use: importing the Google client at module scope would
+        # put ~14 MB back into a web process that may never touch Google Tasks.
+        self._credentials_loader = credentials_loader
+        self._tasks_client_factory = tasks_client_factory
+
+    @property
+    def credentials_loader(self) -> Callable[..., Any]:
+        if self._credentials_loader is None:
+            from canvas_task_sync.auth import load_google_credentials
+
+            self._credentials_loader = load_google_credentials
+        return self._credentials_loader
+
+    @credentials_loader.setter
+    def credentials_loader(self, loader: Callable[..., Any]) -> None:
+        self._credentials_loader = loader
+
+    @property
+    def tasks_client_factory(self) -> Callable[[Any], Any]:
+        if self._tasks_client_factory is None:
+            from canvas_task_sync.google_tasks import GoogleTasksClient
+
+            self._tasks_client_factory = GoogleTasksClient
+        return self._tasks_client_factory
+
+    @tasks_client_factory.setter
+    def tasks_client_factory(self, factory: Callable[[Any], Any]) -> None:
+        self._tasks_client_factory = factory
 
     def list(
         self,

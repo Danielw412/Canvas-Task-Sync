@@ -24,8 +24,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from google_auth_oauthlib.flow import Flow
-
 from canvas_task_sync.auth import SCOPES, persist_authorized_credentials
 from canvas_task_sync.web_constants import LOOPBACK_HOSTNAMES
 
@@ -82,6 +80,10 @@ def build_redirect_uri(public_origin: str) -> str:
 
 
 def _default_flow_factory(client_path: Path, redirect_uri: str) -> Any:
+    # Deferred so the ~11 MB google_auth_oauthlib import only lands when someone
+    # actually authorizes, not in every idle backend.
+    from google_auth_oauthlib.flow import Flow
+
     # ``Flow`` defaults to autogenerate_code_verifier=True, so the exchange stays
     # PKCE-protected exactly as run_local_server's was.
     return Flow.from_client_secrets_file(

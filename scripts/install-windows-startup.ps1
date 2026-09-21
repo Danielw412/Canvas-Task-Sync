@@ -21,10 +21,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $taskName = "Canvas Task Sync Web"
-$websiteUrl = "http://127.0.0.1:8790/"
-$simpleWebsiteUrl = "http://127.0.0.1:8791/"
-$port = 8790
-$simplePort = 8791
+$websiteUrl = "http://127.0.0.1:8890/"
+$simpleWebsiteUrl = "http://127.0.0.1:8891/"
+$port = 8890
+$simplePort = 8891
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonwPath = Join-Path $projectRoot ".venv\Scripts\pythonw.exe"
 $configPath = Join-Path $projectRoot "config\courses.yaml"

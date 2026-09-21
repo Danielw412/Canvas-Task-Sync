@@ -11,7 +11,7 @@ $configPath = Join-Path $projectRoot "config\courses.yaml"
 $startupModulePath = Join-Path $projectRoot "src\canvas_task_sync\windows_startup.py"
 $logDirectory = Join-Path $projectRoot ".canvas-task-sync"
 $logPath = Join-Path $logDirectory "web-startup.log"
-$simplePort = 8791
+$simplePort = 8891
 
 if (-not (Test-Path -LiteralPath $pythonwPath -PathType Leaf)) {
     throw "The project virtual environment's windowless Python executable was not found at $pythonwPath"

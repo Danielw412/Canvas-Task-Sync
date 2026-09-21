@@ -49,7 +49,7 @@ const overview: OverviewResponse = {
     google_client_configured: true,
     google_authorized: true,
     gemini_configured: true,
-    local_server: '127.0.0.1:8790',
+    local_server: '127.0.0.1:8890',
     checks: [],
   },
   latest_run: null,
@@ -206,8 +206,8 @@ describe('operational pages', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview)))
     renderPage(<AppShell />)
     expect(await screen.findByLabelText('Primary navigation')).toBeVisible()
-    expect(within(screen.getByLabelText('Primary navigation')).getAllByRole('link')).toHaveLength(6)
-    expect(within(screen.getByLabelText('Mobile navigation')).getAllByRole('link')).toHaveLength(5)
+    expect(within(screen.getByLabelText('Primary navigation')).getAllByRole('link')).toHaveLength(7)
+    expect(within(screen.getByLabelText('Mobile navigation')).getAllByRole('link')).toHaveLength(6)
   })
 
   it('submits advanced preview policy and validates Monday rebasing', async () => {
@@ -388,7 +388,7 @@ describe('operational pages', () => {
       if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
       if (url.includes('/gemini-key')) return jsonResponse(null, 204)
       if (url.includes('/settings/extension')) return jsonResponse({
-        server_url: 'http://127.0.0.1:8790',
+        server_url: 'http://127.0.0.1:8890',
         pairing_token: 'pairing-token-fixture',
         capture_ttl_seconds: 900,
         supported_sources: ['google_slides', 'google_docs', 'google_sheets'],

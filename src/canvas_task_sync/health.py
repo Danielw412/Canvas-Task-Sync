@@ -5,16 +5,14 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
 from canvas_task_sync.auth import SCOPES, load_google_credentials
-from canvas_task_sync.browser_capture import BrowserCaptureBroker
 from canvas_task_sync.configuration import ProjectSettings
-from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.redaction import safe_exception_summary
-from canvas_task_sync.sources import create_course_source_adapter
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
     ConnectionItem,
@@ -97,11 +95,24 @@ def connection_status(
     )
 
 
+def _pipeline():
+    """Import the acquisition and Google clients only when a check actually runs.
+
+    ``connection_status`` is called on almost every dashboard request and needs none of
+    this; pulling it in at module scope would put the whole pipeline back into the web
+    process it was just taken out of.
+    """
+    from canvas_task_sync.google_tasks import GoogleTasksClient
+    from canvas_task_sync.sources import create_course_source_adapter
+
+    return GoogleTasksClient, create_course_source_adapter
+
+
 def run_health_checks(
     settings: ProjectSettings,
     course_id: str | None = None,
     *,
-    capture_broker: BrowserCaptureBroker | None = None,
+    capture_broker: Any | None = None,
 ) -> list[HealthCheck]:
     load_dotenv(settings.root_dir / ".env")
     checks: list[HealthCheck] = []
@@ -196,6 +207,7 @@ def run_health_checks(
         )
         return checks
 
+    GoogleTasksClient, create_course_source_adapter = _pipeline()
     tasks_client = GoogleTasksClient(credentials)
     course_ids = [course_id] if course_id else sorted(settings.courses)
     for selected_id in course_ids:

@@ -5,10 +5,31 @@ import os
 import tempfile
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the refresh transport on first use.
+
+    ``google.auth.transport.requests`` pulls in ``requests``, about 5 MB that a web
+    process which never refreshes a token has no reason to carry. Exposing it as a module
+    attribute keeps ``auth.Request`` importable and patchable exactly as before.
+    """
+    if name == "Request":
+        from google.auth.transport.requests import Request
+
+        globals()["Request"] = Request
+        return Request
+    if name == "Credentials":
+        from google.oauth2.credentials import Credentials
+
+        globals()["Credentials"] = Credentials
+        return Credentials
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
 SLIDES_READONLY_SCOPE = "https://www.googleapis.com/auth/presentations.readonly"
@@ -42,6 +63,19 @@ def _write_token(path: Path, credentials: Credentials) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _request() -> Any:
+    from canvas_task_sync import auth
+
+    return auth.Request()
+
+
+def _credentials_class() -> Any:
+    # Through the module so a test that patches ``auth.Credentials`` still wins.
+    from canvas_task_sync import auth
+
+    return auth.Credentials
 
 
 def _token_scopes(path: Path) -> set[str]:
@@ -78,14 +112,14 @@ def _load_google_credentials_locked(
 
     token_has_scopes = token_path.exists() and set(SCOPES).issubset(_token_scopes(token_path))
     if token_has_scopes:
-        credentials = Credentials.from_authorized_user_file(token_path, SCOPES)
+        credentials = _credentials_class().from_authorized_user_file(token_path, SCOPES)
 
     if credentials and credentials.valid:
         return credentials
 
     if credentials and credentials.expired and credentials.refresh_token:
         try:
-            credentials.refresh(Request())
+            credentials.refresh(_request())
         except Exception as error:  # Google auth surfaces several transport-specific errors.
             if not interactive:
                 raise AuthenticationError(
@@ -105,6 +139,11 @@ def _load_google_credentials_locked(
 
     if not client_path.exists():
         raise AuthenticationError(f"OAuth client file not found: {client_path}")
+
+    # Imported here rather than at module scope: google_auth_oauthlib costs about
+    # 11 MB of resident memory and only this branch, which a long-running backend
+    # reaches rarely or never, needs it.
+    from google_auth_oauthlib.flow import InstalledAppFlow
 
     flow = InstalledAppFlow.from_client_secrets_file(str(client_path), SCOPES)
     credentials = flow.run_local_server(

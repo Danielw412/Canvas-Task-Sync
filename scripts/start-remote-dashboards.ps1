@@ -7,8 +7,8 @@
     Nothing on this machine runs a sync, touches Google credentials, or writes the
     operational database: every API call is forwarded over the tunnel.
 
-        laptop :8790  full dashboard + API proxy
-        laptop :8791  simple dashboard
+        laptop :8890  full dashboard + API proxy
+        laptop :8891  simple dashboard
               |
               +-- ssh -N -L 8879:127.0.0.1:8790 -> server :8790 (authoritative backend)
 
@@ -21,8 +21,8 @@ param(
     [string]$ServerHost = 'daniel@192.168.1.186',
     [int]$TunnelPort = 8879,
     [int]$RemoteBackendPort = 8790,
-    [int]$Port = 8790,
-    [int]$SimplePort = 8791,
+    [int]$Port = 8890,
+    [int]$SimplePort = 8891,
     [switch]$NoBrowser
 )
 

@@ -1,0 +1,4 @@
+# Files consumed by the Linux server must keep LF endings, whatever the editor
+# or platform that writes them.
+*.sh text eol=lf
+*.service text eol=lf

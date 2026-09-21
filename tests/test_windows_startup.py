@@ -35,9 +35,9 @@ def test_windows_startup_entrypoint_forces_no_browser_and_logs(tmp_path, monkeyp
             str(tmp_path / "courses.yaml"),
             "web",
             "--port",
-            "8790",
+            "8890",
             "--simple-port",
-            "8791",
+            "8891",
             "--no-open",
         ]
     ]
@@ -86,7 +86,7 @@ def test_startup_keeps_desktop_shortcut_and_remove_script_removes_task_and_short
 
     assert "Canvas Task Sync.url" in installer
     assert "Canvas Task Sync Simple.url" in installer
-    assert "8791" in installer
+    assert "8891" in installer
     assert "Canvas Task Sync.url" in remover
     assert "Canvas Task Sync Simple.url" in remover
     assert "Unregister-ScheduledTask" in remover

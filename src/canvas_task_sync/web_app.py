@@ -45,6 +45,7 @@ from canvas_task_sync.google_oauth import (
 from canvas_task_sync.google_tasks import GoogleTasksError
 from canvas_task_sync.health import connection_status, run_health_checks
 from canvas_task_sync.manual_tasks import ManualTaskError, ManualTaskService
+from canvas_task_sync.memory import release_memory
 from canvas_task_sync.models import AcquisitionStrategy
 from canvas_task_sync.redaction import safe_exception_summary, sanitize
 from canvas_task_sync.run_manager import (
@@ -54,12 +55,6 @@ from canvas_task_sync.run_manager import (
     ScheduleManager,
     next_schedule_occurrence,
 )
-from canvas_task_sync.sources import create_course_source_adapter, create_source_adapter
-from canvas_task_sync.sources.browser_connector import (
-    automatic_acquisition_mode,
-    extension_selection,
-)
-from canvas_task_sync.sync_service import SyncService
 from canvas_task_sync.tracked_tasks import TrackedTaskReader
 from canvas_task_sync.web_constants import (
     DEFAULT_SIMPLE_WEB_PORT,
@@ -88,6 +83,10 @@ from canvas_task_sync.web_models import (
     TrackedTaskView,
 )
 
+# Long enough that a quiet backend reclaims a handful of times an hour, short enough
+# that memory freed after a burst of activity does not sit unused until the next run.
+IDLE_RECLAIM_SECONDS = 15 * 60
+
 
 class WebRuntime:
     def __init__(self, config_path: Path, *, port: int) -> None:
@@ -106,33 +105,34 @@ class WebRuntime:
             pairing_token = secrets.token_urlsafe(32)
             self.store.set_setting("extension_pairing_token", pairing_token)
         self.extension_pairing_token = pairing_token
-        self.sync_service = SyncService(
+        # No SyncService here on purpose: the pipeline lives in the worker process, so
+        # this one stays a web server. TrackedTaskReader and ManualTaskService already
+        # default to the same credential loader and Tasks client the pipeline uses.
+        self.tracked_tasks = TrackedTaskReader(self.settings)
+        self.manual_tasks = ManualTaskService(self.settings)
+        self.runs = RunManager(
+            self.store,
             self.settings,
+            config_path=self.configuration.config_path,
             source_factory=self.create_source_adapter,
         )
-        self.tracked_tasks = TrackedTaskReader(
-            self.settings,
-            credentials_loader=self.sync_service.credentials_loader,
-            tasks_client_factory=self.sync_service.tasks_client_factory,
-        )
-        self.manual_tasks = ManualTaskService(
-            self.settings,
-            credentials_loader=self.sync_service.credentials_loader,
-            tasks_client_factory=self.sync_service.tasks_client_factory,
-        )
-        self.runs = RunManager(self.store, self.sync_service)
         self.schedules = ScheduleManager(self.store, self.runs)
         self.csrf_token = secrets.token_urlsafe(32)
         self.retention_task: asyncio.Task[None] | None = None
+        self.reclaim_task: asyncio.Task[None] | None = None
 
     def reload_settings(self) -> ProjectSettings:
         self.settings = self.configuration.load()
-        self.sync_service.settings = self.settings
+        self.runs.settings = self.settings
         self.tracked_tasks.settings = self.settings
         self.manual_tasks.settings = self.settings
         return self.settings
 
     def create_source_adapter(self, settings: Any, credentials: Any, **kwargs: Any) -> Any:
+        # Only reached for a run this process executes itself (a Chrome capture source)
+        # or a source test; the acquisition modules stay unimported otherwise.
+        from canvas_task_sync.sources import create_course_source_adapter, create_source_adapter
+
         if isinstance(settings, CourseSettings):
             return create_course_source_adapter(
                 settings,
@@ -157,13 +157,16 @@ class WebRuntime:
         await self.runs.start()
         await self.schedules.start()
         self.retention_task = asyncio.create_task(self._retention_loop(), name="history-retention")
+        self.reclaim_task = asyncio.create_task(self._reclaim_loop(), name="idle-reclaim")
 
     async def stop(self) -> None:
-        if self.retention_task is not None:
-            self.retention_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.retention_task
-            self.retention_task = None
+        for name in ("retention_task", "reclaim_task"):
+            task = getattr(self, name)
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                setattr(self, name, None)
         await self.schedules.stop()
         await self.runs.stop()
         self.capture_broker.clear()
@@ -173,6 +176,19 @@ class WebRuntime:
         while True:
             await asyncio.sleep(24 * 60 * 60)
             self.store.prune_history()
+
+    async def _reclaim_loop(self) -> None:
+        """Give back memory the backend accumulated while it was working.
+
+        Runs already reclaim as the queue drains.  This catches what everything else
+        leaves behind -- health checks, SSE sessions, config reloads -- so a backend
+        nobody is using settles back toward its startup size instead of holding its
+        high-water mark until the next restart.
+        """
+        while True:
+            await asyncio.sleep(IDLE_RECLAIM_SECONDS)
+            if not self.runs.busy:
+                release_memory()
 
 
 def create_web_app(
@@ -1186,6 +1202,11 @@ def _queue_automatic_capture(
         return None
     if course.canvas_course_id and acquisition_strategy == AcquisitionStrategy.AUTO:
         return None
+    from canvas_task_sync.sources.browser_connector import (
+        automatic_acquisition_mode,
+        extension_selection,
+    )
+
     source = course.source.model_copy(deep=True)
     if extraction_mode is not None:
         source.extraction.mode = extraction_mode

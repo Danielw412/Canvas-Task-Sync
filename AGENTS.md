@@ -19,6 +19,9 @@ The web app and Chrome extension are control/acquisition layers around that same
 - `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior.
 - `google_tasks.py` — Google Tasks transport only. Updates deliberately preserve completion/user-controlled fields.
 - `state.py` — durable sync identity mappings + extraction cache in `.canvas-task-sync/state.sqlite3`.
+- `memory.py` — `release_memory()`: collect, then hand glibc's freed pages back. Called when the
+  run queue drains and on the idle loop, because the backend is long-lived and a run's peak would
+  otherwise become its permanent size.
 - `managed_notes.py` — legacy managed-note recovery/cleanup and preservation of user-authored task notes.
 - `models.py` — shared Pydantic domain models/enums used by extraction, scheduling, planning, and state.
 
@@ -50,7 +53,12 @@ New formats should do acquisition only, register through `create_source_adapter`
 ### Web control center backend
 
 - `web_app.py` — FastAPI composition and `/api/v1` routes. This is also the local security boundary: loopback host checks, CSRF for normal mutations, and a separate extension pairing token.
-- `run_manager.py` — queued preview/apply/health runs and schedules; delegates actual sync work to `SyncService`.
+- `run_manager.py` — the run queue, schedules, and the lifetime of the sync worker process. Imports
+  nothing from the pipeline on purpose: that is what keeps the web process small.
+- `run_executor.py` — what a run actually does. Hosted by the worker process, and in-process only for
+  a course whose source is a Chrome capture. One implementation, two hosts.
+- `worker.py` — the worker entry point. Reads `{"run_id": N}` lines on stdin, replies on stdout, and
+  exits on EOF; the web process decides when that happens. Never print to stdout here.
 - `control_store.py` — operational SQLite (`control.sqlite3`): run history/events, schedules, occurrences, and control settings. It is not sync identity state.
 - `web_models.py` — Pydantic request/response models for the local API.
 - `tracked_tasks.py` — read-only canonical task feed that merges sync state with live Google completion. `completed=false` is intentionally strict: only live `needsAction` counts as unfinished. School Dashboard consumes this contract.
@@ -73,7 +81,7 @@ New formats should do acquisition only, register through `create_source_adapter`
 - `src/types.ts` — TypeScript mirror of backend API shapes; update with `web_models.py`/routes when contracts change.
 - `src/pages/` — full control-center screens.
 - `src/components/` — shared shell/context/UI.
-- `src/simple/` — lightweight UI served separately on port 8791.
+- `src/simple/` — lightweight UI served separately on port 8891.
 - `src/styles.css` / `src/simple/simple.css` — bulk styling.
 - `vite.config.ts` builds **directly into** `src/canvas_task_sync/web_dist/`.
 
@@ -116,6 +124,12 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Browser captures remain bounded and memory-only; do not persist screenshots/page content or accept credential-like metadata.
 - Keep the web server loopback-only. Do not weaken host/origin/CSRF/extension-token checks.
 - Persisted run/support data must pass the redaction layer.
+- Keep `google.genai`, `googleapiclient`, `google_auth_oauthlib`, and `google.auth` out of module
+  scope, and keep the pipeline out of the web process entirely. Both are enforced by
+  `tests/test_memory_footprint.py`, which fails if an import leaks back to module load.
+- Run state, progress events, and cancellation cross the process boundary through `control.sqlite3`,
+  never through the worker pipe. Keep it that way: the pipe carries only "this run finished", so a
+  worker that dies cannot lose a run's recorded outcome.
 - In a split deployment the backend is authoritative and the dashboard machine is not. Do not add
   sync logic, credential handling, or SQLite state to `proxy_app.py`, and do not copy `token.json` or
   either SQLite database back to the dashboard machine.

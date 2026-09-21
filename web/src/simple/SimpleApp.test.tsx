@@ -65,7 +65,7 @@ describe('SimpleApp', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       requests.push({ url, init })
-      if (url === '/runtime-config.json') return response({ api_base: 'http://127.0.0.1:8790' })
+      if (url === '/runtime-config.json') return response({ api_base: 'http://127.0.0.1:8890' })
       if (url.endsWith('/api/v1/courses')) return response([course])
       if (url.includes('/api/v1/operations?')) return response([])
       if (url.includes('/api/v1/runs?limit=50')) return response([run])
@@ -152,7 +152,7 @@ describe('SimpleApp', () => {
   it('shows completed warning-state runs with an outcome that matches the warning marker', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
-      if (url === '/runtime-config.json') return response({ api_base: 'http://127.0.0.1:8790' })
+      if (url === '/runtime-config.json') return response({ api_base: 'http://127.0.0.1:8890' })
       if (url.endsWith('/api/v1/courses')) return response([course])
       if (url.includes('/api/v1/operations?')) return response([])
       if (url.includes('/api/v1/runs?limit=50')) return response([

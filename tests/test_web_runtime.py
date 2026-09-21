@@ -20,11 +20,13 @@ from canvas_task_sync.models import (
     SyncPlan,
 )
 from canvas_task_sync.redaction import REDACTED, redact_text, sanitize
-from canvas_task_sync.run_manager import (
-    RunManager,
-    ScheduleManager,
+from canvas_task_sync.run_executor import (
+    RunExecutor,
     StoreProgressSink,
     _review_attention_count,
+)
+from canvas_task_sync.run_manager import (
+    ScheduleManager,
     next_schedule_occurrence,
 )
 from canvas_task_sync.sync_service import AppliedPlanResult, PreparedPlan
@@ -246,17 +248,16 @@ def _run_auto_apply(tmp_path: Path, course, actions: list[SyncAction]):
         courses={"spanish": course},
     )
     store = ControlStore(tmp_path / "control.sqlite3")
-    manager = RunManager(store, _FakePreviewService(settings, _prepared_plan(course, actions)))
+    executor = RunExecutor(store, _FakePreviewService(settings, _prepared_plan(course, actions)))
     try:
         run_id = store.create_run(
             course_id="spanish",
             trigger=RunTrigger.MANUAL,
             requested_mode=RunMode.AUTO_APPLY,
         )
-        manager._execute_preview(run_id, StoreProgressSink(store, run_id, threading.Condition()))
+        executor._execute_preview(run_id, StoreProgressSink(store, run_id, threading.Condition()))
         return store.get_run(run_id)
     finally:
-        manager._executor.shutdown(wait=False)
         store.close()
 
 

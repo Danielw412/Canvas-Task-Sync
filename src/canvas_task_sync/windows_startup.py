@@ -15,6 +15,7 @@ from pathlib import Path
 from canvas_task_sync import cli
 from canvas_task_sync.web_constants import (
     DEFAULT_REMOTE_BACKEND_PORT,
+    DEFAULT_REMOTE_BACKEND_SERVER_PORT,
     DEFAULT_SIMPLE_WEB_PORT,
     DEFAULT_WEB_HOST,
     DEFAULT_WEB_PORT,
@@ -38,7 +39,11 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--tunnel-port", type=int, default=DEFAULT_REMOTE_BACKEND_PORT)
-    parser.add_argument("--remote-backend-port", type=int, default=DEFAULT_WEB_PORT)
+    parser.add_argument(
+        "--remote-backend-port",
+        type=int,
+        default=DEFAULT_REMOTE_BACKEND_SERVER_PORT,
+    )
     return parser
 
 

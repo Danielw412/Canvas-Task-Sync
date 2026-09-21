@@ -148,7 +148,7 @@ test('Configuration applies sensible global defaults and per-source overrides', 
   assert.equal(resolveMode(config, 'google_slides'), 'both')
   assert.equal(resolveMode(config, 'google_docs'), 'prefer_text')
   assert.equal(resolveMode(config, 'google_sheets', 'screenshot'), 'screenshot')
-  assert.equal(DEFAULT_CONFIG.serverUrl, 'http://127.0.0.1:8790')
+  assert.equal(DEFAULT_CONFIG.serverUrl, 'http://127.0.0.1:8890')
   assert.throws(() => normalizeServerUrl('https://example.com'), /local app address/)
 })
 
@@ -178,10 +178,10 @@ test('Extension-to-app connection sends only the pairing token and normalized pa
     observed = { url, options }
     return { ok: true, status: 202, json: async () => ({ accepted: true }) }
   }
-  const config = { serverUrl: 'http://127.0.0.1:8790', pairingToken: 'pair-token' }
+  const config = { serverUrl: 'http://127.0.0.1:8890', pairingToken: 'pair-token' }
   const response = await postCapture(config, { schema_version: 1 }, fetchImpl)
   assert.equal(response.accepted, true)
-  assert.equal(observed.url, 'http://127.0.0.1:8790/api/v1/extension/captures')
+  assert.equal(observed.url, 'http://127.0.0.1:8890/api/v1/extension/captures')
   assert.equal(observed.options.headers['X-Extension-Token'], 'pair-token')
   assert.equal(observed.options.headers.Authorization, undefined)
 })
@@ -199,7 +199,7 @@ test('Automatic capture queue claims work and reports a structured failure', asy
     }
     return { ok: true, status: 204, json: async () => ({}) }
   }
-  const config = { serverUrl: 'http://127.0.0.1:8790', pairingToken: 'pair-token' }
+  const config = { serverUrl: 'http://127.0.0.1:8890', pairingToken: 'pair-token' }
   const request = await claimCaptureRequest(config, fetchImpl)
   assert.equal(request.request_id, 'request-1')
   assert.match(observed[0].url, /wait_seconds=0$/)
@@ -210,7 +210,7 @@ test('Automatic capture queue claims work and reports a structured failure', asy
 })
 
 test('Connection errors distinguish unreachable app and rejected pairing', async () => {
-  const config = { serverUrl: 'http://127.0.0.1:8790', pairingToken: 'bad-token' }
+  const config = { serverUrl: 'http://127.0.0.1:8890', pairingToken: 'bad-token' }
   await assert.rejects(
     testConnection(config, async () => { throw new Error('ECONNREFUSED') }),
     (error) => error instanceof ConnectionError && error.code === 'local_app_unreachable',

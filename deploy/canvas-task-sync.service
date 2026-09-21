@@ -1,8 +1,8 @@
 [Unit]
 Description=Canvas Task Sync authoritative backend
 Documentation=https://github.com/Danielw412/Canvas-Task-Sync
-After=network-online.target
-Wants=network-online.target
+# No network ordering: the socket it binds is loopback, and every outbound call happens
+# later, on demand. network-online.target does not exist in a user manager anyway.
 
 [Service]
 Type=simple
@@ -12,10 +12,27 @@ WorkingDirectory=%h/projects/Canvas-Task-Sync
 ExecStart=%h/projects/Canvas-Task-Sync/.venv/bin/python -m canvas_task_sync \
     --config config/courses.yaml \
     web --port 8790 --no-open --no-simple
-# The dashboards live on the laptop at http://127.0.0.1:8790, which is also where Google
+# The dashboards live on the laptop at http://127.0.0.1:8890, which is also where Google
 # must return after consent. The backend never opens a browser itself.
-Environment=CANVAS_TASK_SYNC_PUBLIC_ORIGIN=http://127.0.0.1:8790
+Environment=CANVAS_TASK_SYNC_PUBLIC_ORIGIN=http://127.0.0.1:8890
 Environment=PYTHONUNBUFFERED=1
+
+# --- Idle footprint -----------------------------------------------------------------
+# glibc gives each thread its own malloc arena and never returns them, so the sync
+# worker pool alone was costing tens of megabytes of fragmentation that outlived every
+# run. One arena is plenty for work that spends its time waiting on Canvas, Gemini,
+# and Google Tasks rather than on the allocator; the lock contention it costs is not
+# measurable for I/O-bound work.
+Environment=MALLOC_ARENA_MAX=1
+# Return freed heap to the OS at 128 KiB instead of hoarding it, and keep the mmap
+# threshold from growing dynamically so large short-lived buffers (page captures,
+# base64 screenshots, whole task lists) are unmapped on free rather than retained.
+Environment=MALLOC_TRIM_THRESHOLD_=131072
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+
+# A runaway guard, not a working limit: normal operation sits far below this.
+MemoryMax=1G
+
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

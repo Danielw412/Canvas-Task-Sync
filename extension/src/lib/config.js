@@ -13,7 +13,7 @@ export const SOURCE_TYPES = Object.freeze([
 ])
 
 export const DEFAULT_CONFIG = Object.freeze({
-  serverUrl: 'http://127.0.0.1:8790',
+  serverUrl: 'http://127.0.0.1:8890',
   pairingToken: '',
   globalMode: 'prefer_text',
   sourceOverrides: {
@@ -29,7 +29,7 @@ export function normalizeServerUrl(value) {
     throw new Error('The local app address must use http://127.0.0.1 or http://localhost.')
   }
   if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
-    throw new Error('Enter only the local app origin, for example http://127.0.0.1:8790.')
+    throw new Error('Enter only the local app origin, for example http://127.0.0.1:8890.')
   }
   return parsed.origin
 }

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
+
 
 from canvas_task_sync.models import RemoteTask
 
@@ -35,6 +36,10 @@ class GoogleTasksClient:
         *,
         service: Any | None = None,
     ) -> None:
+        # Deferred: googleapiclient pulls in ~6 MB that a backend only needs
+        # once it builds a real client, and tests inject ``service`` instead.
+        from googleapiclient.discovery import build
+
         self.service = service or build(
             "tasks",
             "v1",

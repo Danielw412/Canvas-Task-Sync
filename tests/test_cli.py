@@ -28,7 +28,7 @@ def test_cli_supports_required_sync_flags():
 def test_web_uses_the_dedicated_local_port_by_default():
     args = build_parser().parse_args(["web"])
 
-    assert args.port == DEFAULT_WEB_PORT == 8790
+    assert args.port == DEFAULT_WEB_PORT == 8890
 
 
 def test_dry_run_always_prints_all_reconciliation_sections():

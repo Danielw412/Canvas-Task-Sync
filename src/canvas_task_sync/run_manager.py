@@ -1,26 +1,26 @@
+"""Queues runs and hands them to a worker process.
+
+Nothing in this module imports the sync pipeline.  That is the point: the web process
+stays a web process, and `canvas_task_sync.worker` carries the Gemini SDK and the Google
+clients for as long as there is work, then exits.
+"""
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import sys
 import threading
 import uuid
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.control_store import ControlStore, utc_now
-from canvas_task_sync.health import run_health_checks
-from canvas_task_sync.redaction import safe_exception_summary, sanitize
-from canvas_task_sync.sync_service import (
-    CancellationToken,
-    PreparedPlan,
-    ProgressSink,
-    SyncCancelled,
-    SyncService,
-    action_counts,
-    prepared_plan_from_json,
-)
+from canvas_task_sync.memory import release_memory
 from canvas_task_sync.web_models import (
     EventLevel,
     RunCreate,
@@ -47,64 +47,177 @@ TERMINAL_STATUSES = {
     RunStatus.AWAITING_APPROVAL,
 }
 
-
-def _review_attention_count(counts: dict[str, int]) -> int:
-    # Only items the sync could not act on because the remote task state is inconsistent
-    # (duplicate managed IDs, malformed managed notes) need a person to review them.
-    # Low-confidence extractions, missing remote tasks, and uncertain due dates stay
-    # visible in the plan but are informational.
-    return counts.get("conflict", 0)
+# How long the worker process is kept alive after the queue drains. Long enough that a
+# sync-all followed by an apply does not pay to start twice, short enough that an idle
+# evening costs nothing.
+WORKER_IDLE_SECONDS = 60.0
+WORKER_START_TIMEOUT = 60.0
 
 
-class StoreProgressSink(ProgressSink):
-    def __init__(self, store: ControlStore, run_id: int, notifier: threading.Condition) -> None:
-        self.store = store
-        self.run_id = run_id
-        self.notifier = notifier
+class SyncWorkerClient:
+    """Owns the lifetime of the worker process.
 
-    def emit(
+    The parent decides when the worker exits rather than letting it time out on its own,
+    so there is no window where a job is dispatched to a process that has already decided
+    to stop.
+    """
+
+    def __init__(
         self,
-        stage: RunStage,
-        event_type: str,
-        message: str,
+        config_path: Path,
         *,
-        level: EventLevel = EventLevel.INFO,
-        metadata: dict[str, Any] | None = None,
-        duration_ms: int | None = None,
+        max_workers: int,
+        python: str | None = None,
     ) -> None:
-        self.store.update_run(self.run_id, stage=stage)
-        if event_type == "action_applied" and metadata and metadata.get("action"):
-            run = self.store.get_run(self.run_id, include_events=False)
-            counts = dict(run.applied_counts) if run else {}
-            action = str(metadata["action"])
-            counts[action] = counts.get(action, 0) + 1
-            self.store.update_run(self.run_id, applied_counts_json=counts)
-        self.store.add_event(
-            self.run_id,
-            stage=stage,
-            event_type=event_type,
-            message=message,
-            level=level,
-            metadata=sanitize(metadata or {}),
-            duration_ms=duration_ms,
+        self.config_path = config_path
+        self.max_workers = max_workers
+        self.python = python or sys.executable
+        self._process: asyncio.subprocess.Process | None = None
+        self._reader: asyncio.Task[None] | None = None
+        self._pending: dict[int, asyncio.Future[None]] = {}
+        self._spawn_lock = asyncio.Lock()
+        self._shutdown_handle: asyncio.TimerHandle | None = None
+        self._ready = asyncio.Event()
+
+    @property
+    def running(self) -> bool:
+        return self._process is not None and self._process.returncode is None
+
+    async def run(self, run_id: int) -> None:
+        """Execute one run in the worker and wait for it to finish."""
+        self.cancel_idle_shutdown()
+        await self._ensure_started()
+        process = self._process
+        assert process is not None and process.stdin is not None
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._pending[run_id] = future
+        try:
+            process.stdin.write(json.dumps({"run_id": run_id}).encode() + b"\n")
+            await process.stdin.drain()
+        except (ConnectionResetError, BrokenPipeError) as error:
+            self._pending.pop(run_id, None)
+            raise RuntimeError("The sync worker stopped before the run started.") from error
+        await future
+
+    async def _ensure_started(self) -> None:
+        async with self._spawn_lock:
+            if self.running:
+                return
+            self._process = await asyncio.create_subprocess_exec(
+                self.python,
+                "-m",
+                "canvas_task_sync.worker",
+                "--config",
+                str(self.config_path),
+                "--max-workers",
+                str(self.max_workers),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=None,
+            )
+            self._reader = asyncio.create_task(self._read_replies(), name="sync-worker-reader")
+            await asyncio.wait_for(self._await_ready(), timeout=WORKER_START_TIMEOUT)
+
+    async def _await_ready(self) -> None:
+        while not self._ready.is_set():
+            process = self._process
+            if process is not None and process.returncode is not None:
+                # It died on the way up -- a bad config or a broken install. Say so now
+                # rather than letting every run wait out the start timeout.
+                raise RuntimeError(
+                    f"The sync worker exited during startup (code {process.returncode}). "
+                    "Check the service log."
+                )
+            await asyncio.sleep(0.02)
+
+    async def _read_replies(self) -> None:
+        process = self._process
+        assert process is not None and process.stdout is not None
+        try:
+            async for raw in process.stdout:
+                try:
+                    payload = json.loads(raw.decode().strip() or "{}")
+                except ValueError:
+                    continue
+                if payload.get("ready"):
+                    self._ready.set()
+                    continue
+                run_id = payload.get("run_id")
+                future = self._pending.pop(run_id, None) if run_id is not None else None
+                if future is not None and not future.done():
+                    future.set_result(None)
+        finally:
+            # The worker died or was shut down: nobody else will answer these.
+            self._ready.clear()
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(RuntimeError("The sync worker exited unexpectedly."))
+            self._pending.clear()
+
+    def schedule_idle_shutdown(self, delay: float = WORKER_IDLE_SECONDS) -> None:
+        self.cancel_idle_shutdown()
+        if not self.running:
+            return
+        loop = asyncio.get_running_loop()
+        self._shutdown_handle = loop.call_later(
+            delay, lambda: asyncio.ensure_future(self._idle_stop())
         )
-        with self.notifier:
-            self.notifier.notify_all()
+
+    def cancel_idle_shutdown(self) -> None:
+        if self._shutdown_handle is not None:
+            self._shutdown_handle.cancel()
+            self._shutdown_handle = None
+
+    async def _idle_stop(self) -> None:
+        if self._pending:
+            return
+        await self.stop()
+        release_memory()
+
+    async def stop(self) -> None:
+        self.cancel_idle_shutdown()
+        process, self._process = self._process, None
+        reader, self._reader = self._reader, None
+        if process is not None and process.returncode is None:
+            with contextlib.suppress(ConnectionResetError, BrokenPipeError, AttributeError):
+                process.stdin.close()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=20)
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        if reader is not None:
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await asyncio.wait_for(reader, timeout=5)
+        # The pipe transports outlive the process on Windows' proactor loop and warn at
+        # collection time unless they are closed here.
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
 
 
 class RunManager:
-    def __init__(self, store: ControlStore, service: SyncService) -> None:
+    def __init__(
+        self,
+        store: ControlStore,
+        settings: ProjectSettings,
+        *,
+        config_path: Path,
+        source_factory: Any | None = None,
+    ) -> None:
         self.store = store
-        self.service = service
+        self.settings = settings
+        self.config_path = config_path
+        # Only the in-process fallback needs this; the worker builds its own adapters.
+        self._source_factory = source_factory
         self._queue: asyncio.Queue[int | None] = asyncio.Queue()
-        self._worker_count = max(2, min(8, len(service.settings.courses) or 1))
+        self._worker_count = max(2, min(8, len(settings.courses) or 1))
         self._worker_tasks: list[asyncio.Task[None]] = []
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._worker_count,
-            thread_name_prefix="canvas-sync",
-        )
         self._event_condition = threading.Condition()
         self._queued: set[int] = set()
+        self._client = SyncWorkerClient(config_path, max_workers=self._worker_count)
+        self._local: Any | None = None
 
     async def start(self) -> None:
         if not self._worker_tasks:
@@ -119,7 +232,7 @@ class RunManager:
                 await self._queue.put(None)
             await asyncio.gather(*self._worker_tasks)
             self._worker_tasks = []
-        self._executor.shutdown(wait=True, cancel_futures=False)
+        await self._client.stop()
 
     def create_preview(
         self,
@@ -132,7 +245,7 @@ class RunManager:
     ) -> int:
         effective_mode = requested_mode or request.mode
         operation_id = operation_id or str(uuid.uuid4())
-        course = self.service.settings.course(request.course_id)
+        course = self.settings.course(request.course_id)
         target_week_start = selected_week_start(
             datetime.now(ZoneInfo(course.timezone)).date(),
             request.week_selection,
@@ -169,7 +282,7 @@ class RunManager:
         return run_id
 
     def create_health(self, *, course_id: str | None = None) -> int:
-        selected_course = course_id or next(iter(sorted(self.service.settings.courses)), "all")
+        selected_course = course_id or next(iter(sorted(self.settings.courses)), "all")
         run_id = self.store.create_run(
             operation_id=str(uuid.uuid4()),
             course_id=selected_course,
@@ -244,8 +357,44 @@ class RunManager:
         with self._event_condition:
             self._event_condition.notify_all()
 
+    @property
+    def busy(self) -> bool:
+        return bool(self._queued) or not self._queue.empty()
+
+    def _needs_in_process_run(self, run_id: int) -> bool:
+        """True when this run depends on a capture only this process is holding.
+
+        Browser captures are memory-only by design, so there is nowhere a separate
+        process could read them from. Those runs stay here; everything else -- which is
+        every Canvas, Slides, and Docs course -- goes to the worker.
+        """
+        run = self.store.get_run(run_id, include_events=False)
+        if run is None:
+            return False
+        course = self.settings.courses.get(run.course_id)
+        return bool(course is not None and course.source.type == "browser")
+
+    def _in_process_executor(self) -> Any:
+        if self._local is None:
+            # Imported here so a backend that never runs a browser-sourced course never
+            # pays for the pipeline at all.
+            from canvas_task_sync.run_executor import RunExecutor
+            from canvas_task_sync.sync_service import SyncService
+
+            self._local = RunExecutor(
+                self.store,
+                SyncService(self.settings, source_factory=self._source_factory),
+                notifier=self._event_condition,
+            )
+        return self._local
+
+    async def _dispatch(self, run_id: int) -> None:
+        if self._needs_in_process_run(run_id):
+            await asyncio.to_thread(self._in_process_executor().execute, run_id)
+            return
+        await self._client.run(run_id)
+
     async def _worker(self) -> None:
-        loop = asyncio.get_running_loop()
         while True:
             run_id = await self._queue.get()
             if run_id is None:
@@ -253,249 +402,26 @@ class RunManager:
                 break
             self._queued.discard(run_id)
             try:
-                await loop.run_in_executor(self._executor, self._execute, run_id)
-            finally:
-                self._queue.task_done()
-
-    def _execute(self, run_id: int) -> None:
-        run = self.store.get_run(run_id, include_events=False)
-        if run is None:
-            return
-        sink = StoreProgressSink(self.store, run_id, self._event_condition)
-        if run.cancel_requested:
-            self._finish_cancelled(run_id, sink)
-            return
-        try:
-            if run.requested_mode == RunMode.HEALTH:
-                self._execute_health(run_id, sink)
-            elif run.plan_hash and run.plan is not None and run.status == RunStatus.QUEUED:
-                self._execute_apply(run_id, sink)
-            else:
-                self._execute_preview(run_id, sink)
-        except SyncCancelled:
-            self._finish_cancelled(run_id, sink)
-        except Exception as error:  # Boundaries turn provider-specific errors into safe run state.
-            current = self.store.get_run(run_id, include_events=False)
-            partial = bool(current and any(current.applied_counts.values()))
-            status = RunStatus.FAILED_PARTIAL if partial else RunStatus.FAILED
-            summary = safe_exception_summary(error)
-            self.store.update_run(
-                run_id,
-                status=status,
-                stage=RunStage.COMPLETE,
-                finished_at=utc_now(),
-                error_code=type(error).__name__.lower(),
-                error_summary=summary,
-            )
-            sink.emit(
-                RunStage.COMPLETE,
-                "run_failed",
-                summary,
-                level=EventLevel.ERROR,
-                metadata={"error_type": type(error).__name__, "partial": partial},
-            )
-        finally:
-            self._finish_scheduled_run(run_id)
-            self._notify()
-
-    def _finish_scheduled_run(self, run_id: int) -> None:
-        run = self.store.get_run(run_id, include_events=False)
-        if run is None or run.schedule_id is None or run.status not in TERMINAL_STATUSES:
-            return
-        occurrence_status = {
-            RunStatus.AWAITING_APPROVAL: "preview_ready",
-            RunStatus.SUCCEEDED: "succeeded",
-            RunStatus.REVIEW_NEEDED: "review_needed",
-            RunStatus.STALE: "stale",
-            RunStatus.CANCELLED: "cancelled",
-            RunStatus.FAILED: "failed",
-            RunStatus.FAILED_PARTIAL: "failed_partial",
-        }[run.status]
-        details = run.error_summary or {
-            "preview_ready": "Scheduled preview is ready for review.",
-            "succeeded": "Scheduled run completed successfully.",
-            "review_needed": "Safe changes completed; remaining items need review.",
-            "cancelled": "Scheduled run was cancelled before completion.",
-        }.get(occurrence_status, "Scheduled run finished.")
-        self.store.finish_schedule_occurrence(
-            run_id=run_id,
-            status=occurrence_status,
-            details=details,
-        )
-
-    def _execute_preview(self, run_id: int, sink: StoreProgressSink) -> None:
-        run = self.store.get_run(run_id, include_events=False)
-        if run is None:
-            return
-        self.store.mark_run_started(run_id, stage=RunStage.VALIDATE_CONFIGURATION)
-        token = CancellationToken(lambda: self.store.cancellation_requested(run_id))
-        prepared = self.service.prepare(
-            course_id=run.course_id,
-            include_past=run.include_past,
-            rebase_week=run.test_rebase_week,
-            target_week_start=run.target_week_start,
-            acquisition_strategy=run.acquisition_strategy,
-            extraction_mode=run.extraction_mode,
-            progress=sink,
-            cancellation=token,
-        )
-        counts = action_counts(prepared.plan)
-        self.store.set_prepared_plan(
-            run_id,
-            plan=prepared.plan,
-            prepared_json=prepared.model_dump_json(),
-            plan_hash=prepared.plan_hash,
-            config_hash=prepared.config_hash,
-            page_hash=prepared.page_hash,
-            remote_hash=prepared.remote_hash,
-            counts=counts,
-        )
-        # Informational items (missing mappings, past-due tasks, low-confidence
-        # extractions, uncertain due dates) remain visible in the plan. Only real
-        # conflicts make an otherwise healthy auto-apply run report "review needed".
-        attention_count = _review_attention_count(counts)
-        if run.requested_mode == RunMode.AUTO_APPLY:
-            self.store.update_run(
-                run_id,
-                status=RunStatus.APPLYING,
-                stage=RunStage.REVALIDATE_PREVIEW,
-            )
-            self._apply_prepared(run_id, prepared, sink, safe_subset=True)
-            final_status = RunStatus.REVIEW_NEEDED if attention_count else RunStatus.SUCCEEDED
-        else:
-            final_status = RunStatus.AWAITING_APPROVAL
-        self.store.update_run(
-            run_id,
-            status=final_status,
-            stage=RunStage.COMPLETE,
-            finished_at=utc_now(),
-        )
-        sink.emit(
-            RunStage.COMPLETE,
-            "run_completed",
-            (
-                "Preview is ready for review."
-                if final_status == RunStatus.AWAITING_APPROVAL
-                else "Sync completed; items needing attention are recorded for review."
-                if final_status == RunStatus.REVIEW_NEEDED
-                else "Sync completed successfully."
-            ),
-            metadata={"status": final_status.value, "counts": counts},
-        )
-
-    def _execute_health(self, run_id: int, sink: StoreProgressSink) -> None:
-        run = self.store.get_run(run_id, include_events=False)
-        if run is None:
-            return
-        self.store.mark_run_started(run_id, stage=RunStage.HEALTH_CHECK)
-        selected = None if run.course_id == "all" else run.course_id
-        checks = run_health_checks(self.service.settings, selected)
-        counts: Counter[str] = Counter(check.state.value for check in checks)
-        for check in checks:
-            sink.emit(
-                RunStage.HEALTH_CHECK,
-                "health_check",
-                f"{check.label}: {check.summary}",
-                level=(
-                    EventLevel.ERROR
-                    if check.state.value == "error"
-                    else EventLevel.WARNING
-                    if check.state.value in {"warning", "missing"}
-                    else EventLevel.INFO
-                ),
-                metadata={"key": check.key, "state": check.state.value, **check.details},
-                duration_ms=check.duration_ms,
-            )
-        failed = counts.get("error", 0) + counts.get("missing", 0)
-        status = RunStatus.REVIEW_NEEDED if failed else RunStatus.SUCCEEDED
-        self.store.update_run(
-            run_id,
-            status=status,
-            stage=RunStage.COMPLETE,
-            finished_at=utc_now(),
-            counts_json=dict(counts),
-        )
-        sink.emit(
-            RunStage.COMPLETE,
-            "run_completed",
-            "Health check completed with issues." if failed else "All health checks passed.",
-            level=EventLevel.WARNING if failed else EventLevel.INFO,
-            metadata={"status": status.value, "counts": dict(counts)},
-        )
-
-    def _execute_apply(self, run_id: int, sink: StoreProgressSink) -> None:
-        payload = self.store.prepared_json(run_id)
-        if not payload:
-            raise RuntimeError("The immutable preview snapshot is missing.")
-        prepared = prepared_plan_from_json(payload)
-        self.store.update_run(
-            run_id,
-            status=RunStatus.APPLYING,
-            stage=RunStage.REVALIDATE_PREVIEW,
-            started_at=utc_now(),
-        )
-        self._apply_prepared(run_id, prepared, sink, safe_subset=False)
-        self.store.update_run(
-            run_id,
-            status=RunStatus.SUCCEEDED,
-            stage=RunStage.COMPLETE,
-            finished_at=utc_now(),
-        )
-        sink.emit(
-            RunStage.COMPLETE,
-            "run_completed",
-            "Approved changes were applied successfully.",
-            metadata={"status": RunStatus.SUCCEEDED.value},
-        )
-
-    def _apply_prepared(
-        self,
-        run_id: int,
-        prepared: PreparedPlan,
-        sink: StoreProgressSink,
-        *,
-        safe_subset: bool,
-    ) -> None:
-        try:
-            result = self.service.apply(prepared, progress=sink, safe_subset=safe_subset)
-        except ValueError as error:
-            message = str(error)
-            if "changed after this preview" in message:
+                await self._dispatch(run_id)
+            except Exception:
+                # The worker process records the failure against the run itself; losing
+                # the pipe must not take down this queue.
                 self.store.update_run(
                     run_id,
-                    status=RunStatus.STALE,
+                    status=RunStatus.FAILED,
                     stage=RunStage.COMPLETE,
-                    finished_at=utc_now(),
-                    error_code="stale_preview",
-                    error_summary=message,
+                    finished_at=datetime.now(UTC),
+                    error_code="worker_unavailable",
+                    error_summary="The sync worker stopped before the run finished.",
                 )
-                sink.emit(
-                    RunStage.COMPLETE,
-                    "preview_stale",
-                    message,
-                    level=EventLevel.WARNING,
-                )
-                raise SyncCancelled("Stale preview was not applied.") from None
-            raise
-        self.store.update_run(run_id, applied_counts_json=result.applied_counts)
-
-    def _finish_cancelled(self, run_id: int, sink: StoreProgressSink) -> None:
-        current = self.store.get_run(run_id, include_events=False)
-        if current and current.status == RunStatus.STALE:
-            return
-        self.store.update_run(
-            run_id,
-            status=RunStatus.CANCELLED,
-            stage=RunStage.COMPLETE,
-            finished_at=utc_now(),
-        )
-        sink.emit(
-            RunStage.COMPLETE,
-            "run_cancelled",
-            "Run cancelled before the next stage.",
-            level=EventLevel.WARNING,
-        )
-
+            finally:
+                self._queue.task_done()
+                self._notify()
+                if not self.busy:
+                    # Let the worker go, and give back whatever this process accumulated
+                    # serving the run's progress.
+                    self._client.schedule_idle_shutdown()
+                    release_memory()
 
 class ScheduleManager:
     def __init__(self, store: ControlStore, runs: RunManager) -> None:

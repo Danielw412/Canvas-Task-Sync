@@ -146,6 +146,9 @@ class ControlStore:
             self.connection.execute("PRAGMA foreign_keys = ON")
             self.connection.execute("PRAGMA journal_mode = WAL")
             self.connection.execute("PRAGMA busy_timeout = 5000")
+            # 512 KiB instead of the 2 MiB default. Run history queries are small and
+            # this process stays resident for weeks.
+            self.connection.execute("PRAGMA cache_size = -512")
             self.connection.executescript(SCHEMA)
             columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")}
             for name, definition in (

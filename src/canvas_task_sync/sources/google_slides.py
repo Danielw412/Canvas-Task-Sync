@@ -4,11 +4,12 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from google.oauth2.credentials import Credentials
 
 import requests
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 from canvas_task_sync.configuration import GoogleSlidesSourceSettings
 from canvas_task_sync.models import AgendaBlock, BlockRole, SourceCapture
@@ -168,6 +169,10 @@ class GoogleSlidesSource:
         self.settings = settings
         self.presentation_id = presentation_id_from_url(settings.url)
         self.session = session or requests.Session()
+        # Deferred: googleapiclient pulls in ~6 MB that a backend only needs
+        # once it builds a real client, and tests inject ``service`` instead.
+        from googleapiclient.discovery import build
+
         self.service = service or build(
             "slides",
             "v1",

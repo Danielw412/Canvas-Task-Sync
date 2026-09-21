@@ -33,11 +33,16 @@ systemctl --user daemon-reload
 systemctl --user enable "${UNIT_NAME}"
 systemctl --user restart "${UNIT_NAME}"
 
-# Without lingering the service stops when the last login session ends, which defeats
-# scheduled syncs. This needs root, so it is reported rather than forced.
+# Lingering is what makes this start at boot rather than at first login, and what keeps
+# scheduled syncs running after you log out. Try it directly; polkit may allow it.
 if [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || echo no)" != "yes" ]]; then
+  loginctl enable-linger "$USER" 2>/dev/null || true
+fi
+if [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || echo no)" == "yes" ]]; then
+  echo "user lingering is on: the backend starts at boot and survives logout."
+else
   echo
-  echo "note: user lingering is off, so the backend stops when you log out."
+  echo "note: user lingering is off, so the backend starts only at login and stops at logout."
   echo "      Enable it once with:  sudo loginctl enable-linger $USER"
 fi
 

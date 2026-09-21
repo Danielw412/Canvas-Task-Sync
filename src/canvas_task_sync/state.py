@@ -103,14 +103,23 @@ class StateStore:
         if writable:
             path.parent.mkdir(parents=True, exist_ok=True)
             self.connection = sqlite3.connect(path)
+            # The sync worker writes this database in its own process while the web
+            # process reads it for the tracked-task feed, so both need WAL and a busy
+            # timeout rather than failing on a momentary lock.
+            self.connection.execute("PRAGMA journal_mode = WAL")
+            self.connection.execute("PRAGMA busy_timeout = 5000")
             self.connection.executescript(SCHEMA)
             self._migrate_task_mappings()
             self.connection.commit()
         elif path.exists():
             self.connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            self.connection.execute("PRAGMA busy_timeout = 5000")
         else:
             self.connection = sqlite3.connect(":memory:")
             self.connection.executescript(SCHEMA)
+        # 512 KiB instead of the 2 MiB default: this is a long-lived process and the
+        # queries are small, so the pages are not worth the resident memory.
+        self.connection.execute("PRAGMA cache_size = -512")
         self.connection.row_factory = sqlite3.Row
 
     def close(self) -> None:
