@@ -1,21 +1,22 @@
 <#
 .SYNOPSIS
-    Register the Canvas Task Sync dashboards to start at sign-in.
+    Make the Canvas Task Sync dashboards available at sign-in.
 
 .DESCRIPTION
-    Without -ServerHost the task runs the whole application locally, as it always has.
-    With -ServerHost the task serves only the two dashboards and keeps an SSH tunnel open
-    to the authoritative backend, so no sync runtime or database is created on this laptop.
+    Without -ServerHost the task runs the whole application on this computer.
+    With -ServerHost the server runs the backend and both dashboards. The task then only
+    keeps an SSH tunnel open, so http://127.0.0.1:8890 and :8891 on this laptop reach the
+    server. No web server, sync runtime, credentials, or database run on this laptop.
 
 .EXAMPLE
     .\scripts\install-windows-startup.ps1
-    .\scripts\install-windows-startup.ps1 -ServerHost daniel@192.168.1.186
+    .\scripts\install-windows-startup.ps1 -ServerHost daniel@100.87.157.44
 #>
 [CmdletBinding()]
 param(
     [string]$ServerHost,
-    [int]$TunnelPort = 8879,
-    [int]$RemoteBackendPort = 8790
+    [int]$RemoteBackendPort = 8790,
+    [int]$RemoteSimplePort = 8891
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,6 +93,21 @@ foreach ($staleServer in $staleServers) {
     Stop-Process -Id $staleServer.ProcessId -Force -ErrorAction Stop
 }
 
+# An ssh.exe left behind by an earlier tunnel keeps holding the dashboard ports. This also
+# covers the retired 8879 tunnel of the old laptop-hosted dashboards. School Dashboard's
+# own tunnel forwards 8790 and is left alone.
+$staleTunnels = @(
+    Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $commandLine = [string]$_.CommandLine
+        $commandLine.Contains("$($port):127.0.0.1:") -or
+        $commandLine.Contains("$($simplePort):127.0.0.1:") -or
+        $commandLine.Contains("8879:127.0.0.1:")
+    }
+)
+foreach ($staleTunnel in $staleTunnels) {
+    Stop-Process -Id $staleTunnel.ProcessId -Force -ErrorAction SilentlyContinue
+}
+
 $portReleaseDeadline = [DateTime]::UtcNow.AddSeconds(15)
 do {
     $listeners = @(Get-NetTCPConnection -LocalPort $port, $simplePort -State Listen -ErrorAction SilentlyContinue)
@@ -108,8 +124,8 @@ if ($listeners.Count -ne 0) {
 
 $actionArguments = '-m canvas_task_sync.windows_startup --config "{0}" --log-path "{1}" --port {2} --simple-port {3}' -f $configPath, $logPath, $port, $simplePort
 if ($ServerHost) {
-    $actionArguments += ' --ssh-target "{0}" --tunnel-port {1} --remote-backend-port {2}' -f $ServerHost, $TunnelPort, $RemoteBackendPort
-    Write-Host "Dashboard-only mode: the backend stays on $ServerHost via 127.0.0.1:$TunnelPort." -ForegroundColor Cyan
+    $actionArguments += ' --ssh-target "{0}" --remote-backend-port {1} --remote-simple-port {2}' -f $ServerHost, $RemoteBackendPort, $RemoteSimplePort
+    Write-Host "Server-hosted mode: both dashboards run on $ServerHost; this laptop only keeps an SSH tunnel open." -ForegroundColor Cyan
 }
 $action = New-ScheduledTaskAction `
     -Execute $pythonwPath `
@@ -136,7 +152,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description $(if ($ServerHost) { "Starts the Canvas Task Sync dashboards and an SSH tunnel to $ServerHost when this user signs in." } else { "Starts the private Canvas Task Sync website in the background when this user signs in." }) `
+    -Description $(if ($ServerHost) { "Opens the SSH tunnel to the Canvas Task Sync dashboards on $ServerHost when this user signs in." } else { "Starts the private Canvas Task Sync website in the background when this user signs in." }) `
     -Force | Out-Null
 
 $desktopPath = [Environment]::GetFolderPath("Desktop")
@@ -161,16 +177,18 @@ Start-ScheduledTask -TaskName $taskName
 $startupBeganAt = [DateTime]::Now.AddSeconds(-2)
 
 $ready = $false
-for ($attempt = 0; $attempt -lt 30; $attempt++) {
+for ($attempt = 0; $attempt -lt 40; $attempt++) {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $taskState = if ($null -ne $task) { [string]$task.State } else { "Missing" }
     try {
         $response = Invoke-WebRequest -Uri $websiteUrl -UseBasicParsing -TimeoutSec 1
         $simpleResponse = Invoke-WebRequest -Uri $simpleWebsiteUrl -UseBasicParsing -TimeoutSec 1
+        # One process owns both ports: the server in local mode, ssh.exe in server mode.
         $activeListeners = @(Get-NetTCPConnection -LocalPort $port, $simplePort -State Listen -ErrorAction SilentlyContinue)
+        $listenerPorts = @($activeListeners | Select-Object -ExpandProperty LocalPort -Unique)
         $listenerOwners = @($activeListeners | Select-Object -ExpandProperty OwningProcess -Unique)
         $listenerIsReplacement = (
-            $activeListeners.Count -eq 2 -and
+            $listenerPorts.Count -eq 2 -and
             $listenerOwners.Count -eq 1 -and
             $activeListeners[0].CreationTime -ge $startupBeganAt
         )
@@ -190,11 +208,17 @@ if (-not $ready) {
     $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
     $taskState = if ($null -ne $task) { [string]$task.State } else { "Missing" }
     $lastResult = if ($null -ne $taskInfo) { [string]$taskInfo.LastTaskResult } else { "Unknown" }
-    throw "Startup was installed, but the background task did not make $websiteUrl and $simpleWebsiteUrl ready. Task state: $taskState. Last task result: $lastResult. See $logPath for startup diagnostics."
+    $hint = if ($ServerHost) { " Check that 'ssh $ServerHost' connects without a password prompt and that 'systemctl --user status canvas-task-sync' is active on the server." } else { "" }
+    throw "Startup was installed, but the background task did not make $websiteUrl and $simpleWebsiteUrl ready. Task state: $taskState. Last task result: $lastResult. See $logPath for startup diagnostics.$hint"
 }
 
 Write-Host "Windows startup task installed: $taskName"
-Write-Host "The server runs in the background via pythonw.exe; no browser was opened."
+if ($ServerHost) {
+    Write-Host "The SSH tunnel to $ServerHost runs in the background via pythonw.exe; no browser was opened."
+}
+else {
+    Write-Host "The server runs in the background via pythonw.exe; no browser was opened."
+}
 Write-Host "Desktop shortcut created: $shortcutPath"
 Write-Host "Simple UI shortcut created: $simpleShortcutPath"
 Write-Host "Website ready: $websiteUrl"

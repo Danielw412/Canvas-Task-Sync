@@ -9,25 +9,17 @@ DEFAULT_SIMPLE_WEB_PORT = 8891
 DEFAULT_WEB_URL = f"http://{DEFAULT_WEB_HOST}:{DEFAULT_WEB_PORT}"
 DEFAULT_SIMPLE_WEB_URL = f"http://{DEFAULT_WEB_HOST}:{DEFAULT_SIMPLE_WEB_PORT}"
 
-# Port used by the authoritative backend on the remote server.  Keep this separate from the
-# laptop-facing dashboard ports above: the Windows proxy can move without changing the server
-# deployment or its SSH tunnel target.
-DEFAULT_REMOTE_BACKEND_SERVER_PORT = 8790
-
-# Loopback port the laptop forwards to the authoritative backend over SSH:
-#   ssh -N -L 8879:127.0.0.1:8790 daniel@<server>
-DEFAULT_REMOTE_BACKEND_PORT = 8879
-DEFAULT_REMOTE_BACKEND_URL = f"http://{DEFAULT_WEB_HOST}:{DEFAULT_REMOTE_BACKEND_PORT}"
-
-# The backend still answers as though it were the dashboard origin, so its loopback
-# host guard keeps working unchanged behind the tunnel.
-DEFAULT_BACKEND_HOST_HEADER = f"{DEFAULT_WEB_HOST}:{DEFAULT_REMOTE_BACKEND_SERVER_PORT}"
+# Port the authoritative backend binds on the server. The laptop forwards its own
+# dashboard port here, so browsers there keep typing http://127.0.0.1:8890:
+#   ssh -N -L 8890:127.0.0.1:8790 -L 8891:127.0.0.1:8891 daniel@<server>
+# It stays 8790 rather than 8890 because School Dashboard's own tunnel targets it.
+DEFAULT_SERVER_BACKEND_PORT = 8790
 
 LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
-# Origin the person's browser actually types.  It is the dashboard origin on the laptop,
-# which is also where Google must redirect after consent, so a headless backend needs to
-# be told about it when it differs from its own bound port.
+# Origin the person's browser actually types.  When an SSH tunnel maps the laptop's
+# dashboard port onto a different backend port, the backend has to be told about it: Google
+# must redirect there after consent, and the browser sends it as Host and Origin.
 PUBLIC_ORIGIN_ENV = "CANVAS_TASK_SYNC_PUBLIC_ORIGIN"
 
 
@@ -49,3 +41,12 @@ def resolve_public_origin(port: int) -> str:
     if not configured:
         return f"http://{DEFAULT_WEB_HOST}:{port}"
     return normalize_loopback_origin(configured)
+
+
+def origin_port(origin: str) -> int:
+    return urlsplit(origin).port or 80
+
+
+def loopback_host_headers(*ports: int) -> frozenset[str]:
+    """``Host`` values a loopback browser sends for ``ports``, under either loopback name."""
+    return frozenset(f"{name}:{port}" for name in ("127.0.0.1", "localhost") for port in ports)

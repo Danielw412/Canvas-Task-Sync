@@ -10,13 +10,7 @@ from pathlib import Path
 from canvas_task_sync.app import authorize, default_config_path, run_doctor, run_sync
 from canvas_task_sync.configuration import load_settings
 from canvas_task_sync.models import ExtractionMode, SyncActionKind, SyncPlan
-from canvas_task_sync.web_constants import (
-    DEFAULT_BACKEND_HOST_HEADER,
-    DEFAULT_REMOTE_BACKEND_URL,
-    DEFAULT_SIMPLE_WEB_PORT,
-    DEFAULT_WEB_PORT,
-    normalize_loopback_origin,
-)
+from canvas_task_sync.web_constants import DEFAULT_SIMPLE_WEB_PORT, DEFAULT_WEB_PORT
 
 DISPLAY_ORDER = [
     SyncActionKind.CREATE,
@@ -98,29 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not open the control center in the default browser.",
     )
     web.add_argument(
-        "--remote",
-        nargs="?",
-        const=DEFAULT_REMOTE_BACKEND_URL,
-        metavar="URL",
-        help=(
-            "Serve both dashboards locally and forward the API to a backend reached at "
-            f"URL (default: {DEFAULT_REMOTE_BACKEND_URL}). No sync runtime, credentials, "
-            "or local database are created in this mode."
-        ),
-    )
-    web.add_argument(
-        "--remote-host-header",
-        default=DEFAULT_BACKEND_HOST_HEADER,
-        metavar="HOST:PORT",
-        help=(
-            "Host header the remote backend should see, so its loopback guards still "
-            f"match (default: {DEFAULT_BACKEND_HOST_HEADER})."
-        ),
-    )
-    web.add_argument(
         "--no-simple",
         action="store_true",
-        help="Do not start the simple dashboard (used by the headless server service).",
+        help="Do not serve the simple dashboard.",
     )
     return parser
 
@@ -166,14 +140,6 @@ def _validate_web_ports(parser: argparse.ArgumentParser, args: argparse.Namespac
         parser.error("--simple-port must be a different port between 1 and 65535")
 
 
-def _validated_remote(parser: argparse.ArgumentParser, value: str) -> str:
-    try:
-        return normalize_loopback_origin(value)
-    except ValueError as error:
-        parser.error(f"--remote must be a loopback http address: {error}")
-        raise AssertionError from None  # pragma: no cover - parser.error exits
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -182,19 +148,6 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--test-rebase-week cannot be combined with --apply")
         if args.command == "web":
             _validate_web_ports(parser, args)
-        if args.command == "web" and args.remote:
-            # Dashboard-only mode. Course configuration, Google credentials, and every
-            # SQLite file belong to the backend behind --remote, so none are touched here.
-            from canvas_task_sync.server import run_proxy_server
-
-            run_proxy_server(
-                upstream=_validated_remote(parser, args.remote),
-                upstream_host=args.remote_host_header,
-                port=args.port,
-                simple_port=args.simple_port,
-                open_browser=not args.no_open,
-            )
-            return 0
         settings = load_settings(args.config)
         if args.command == "auth":
             authorize(settings)

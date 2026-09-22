@@ -198,6 +198,9 @@ to the local network. To remove the scheduled task and both shortcuts later:
 powershell -ExecutionPolicy Bypass -File .\scripts\remove-windows-startup.ps1
 ```
 
+To run everything on an always-on server and only open the dashboards from this computer, see
+[Split deployment](#split-deployment-everything-on-a-server-dashboards-opened-from-a-laptop).
+
 The full web app provides an overview, live run progress, immutable preview plans, guarded apply,
 course and schedule management, connection setup, structured diagnostics, and sanitized support
 bundles. Its normal **Sync all courses** and **Sync selected course** actions automatically apply the
@@ -244,34 +247,45 @@ text, table structure, geometry, and styles. A successful apply stores its struc
 SQLite. A later unchanged run reuses that extraction and avoids the expensive thumbnail request.
 Dry runs never create or modify the SQLite file.
 
-## Split deployment: dashboards on a laptop, backend on a server
+## Split deployment: everything on a server, dashboards opened from a laptop
 
-The dashboards and the backend can live on different machines. The laptop serves only the two web
-UIs and forwards every API call over an SSH tunnel; the server owns Canvas, Gemini, Google Tasks,
-the scheduler, both SQLite databases, and all credentials.
+The server runs Canvas Task Sync, including both dashboards. The laptop runs no web
+server, sync runtime, credentials, or database. It keeps one SSH tunnel open, so its
+browser and the Chrome extension still use the usual loopback addresses.
 
 ```text
-Laptop                                        Server
-  :8890  full dashboard + API proxy   ──┐       :8790  authoritative backend (127.0.0.1 only)
-  :8891  simple dashboard              │          ├─ Canvas / Gemini / Google Tasks
-                                       │          ├─ sync jobs + scheduler
-         ssh -N -L 8879:127.0.0.1:8790 ┘          ├─ state.sqlite3 + control.sqlite3
-                                                  └─ credentials.json, token.json, .env
+Laptop (browser, extension)               Server (systemd user service, starts at boot)
+  127.0.0.1:8890 ─┐                          127.0.0.1:8790  API + full dashboard
+  127.0.0.1:8891 ─┴─ ssh -N -L ... ───────>  127.0.0.1:8891  simple dashboard
+                                               ├─ Canvas / Gemini / Google Tasks
+                                               ├─ sync worker + scheduler
+                                               ├─ state.sqlite3 + control.sqlite3
+                                               └─ credentials.json, token.json, .env
 ```
 
-Nothing on the laptop instantiates `WebRuntime`, `SyncService`, the scheduler, or a production
-database: `canvas-task-sync web --remote` builds a proxy app instead. The proxy rewrites `Host` to
-the backend's own dashboard origin so the backend's loopback host guard, CSRF origin checks, and
-extension pairing all behave exactly as they do without a tunnel, and it streams responses so
-server-sent events, the extension's capture long-poll, and file downloads pass straight through.
+The tunnel is plain TCP port forwarding. Every request reaches the backend exactly as the
+browser sent it, and nothing on the way rewrites it. The backend binds 8790 but the
+browser types 8890, so the service sets `CANVAS_TASK_SYNC_PUBLIC_ORIGIN=http://127.0.0.1:8890`.
+That one setting is the backend's public address:
+
+* The loopback `Host` check and the CSRF `Origin` check accept it as well as the bound port.
+  Nothing else is added.
+* The simple dashboard calls the API there.
+* Google redirects there after consent.
+* The Settings page shows it as the address the extension pairs with.
+
+One process and one event loop serve both dashboards. `server.PortRouter` hands each
+connection to the app for the port it arrived on, so there is no second server thread.
+The server keeps port 8790 rather than 8890 because School Dashboard's own tunnel
+targets it.
 
 ### Server
 
 ```bash
 # Once, on the server:
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-./deploy/install-server-service.sh          # systemd --user service, bound to 127.0.0.1:8790
-sudo loginctl enable-linger "$USER"         # keep it running when you are not logged in
+./deploy/install-server-service.sh          # systemd --user service on 127.0.0.1:8790 and :8891
+sudo loginctl enable-linger "$USER"         # start at boot, keep running after logout
 
 systemctl --user status canvas-task-sync
 journalctl --user -u canvas-task-sync -f
@@ -282,43 +296,59 @@ Copy `config/courses.yaml`, `.env`, `credentials.json`, and `token.json` to the 
 databases stay on the server; they are never synchronized between machines.
 
 Schedules belong to the server and run whenever it is on. The laptop is only a window
-onto it: with the dashboards closed and the tunnel down, the scheduler still fires, the
-worker still starts, and the run still completes.
+onto it. With the laptop asleep and the tunnel down, the scheduler still fires, the worker
+still starts, and the run still completes.
 
 ### Laptop
 
 ```powershell
-# Start the SSH tunnel and both dashboards.
+# Recommended: open the tunnel at every sign-in and add both desktop shortcuts.
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1 -ServerHost daniel@100.87.157.44
+
+# Or open it once by hand, and close it again.
 .\scripts\start-remote-dashboards.ps1
-.\scripts\start-remote-dashboards.ps1 -ServerHost daniel@192.168.1.186 -NoBrowser
-
-# Stop both again.
 .\scripts\stop-remote-dashboards.ps1
-
-# Or start them automatically at sign-in, tunnel included.
-powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-startup.ps1 -ServerHost daniel@192.168.1.186
 ```
 
-Run `canvas-task-sync web` with no `--remote` to go back to a single machine that does everything.
+Then use `http://127.0.0.1:8890` (full) and `http://127.0.0.1:8891` (simple), or the
+desktop shortcuts, exactly as before.
+
+The startup task runs `canvas_task_sync.windows_startup --ssh-target ...`. In this mode it
+imports only the standard library, which takes about 13 MB. It also supervises `ssh.exe`,
+which takes about 3 MB. It reopens the tunnel after sleep, a network change, or a server
+restart, waiting 5 seconds at first and backing off to 60. `ServerAliveInterval` ends a
+dead connection within about 45 seconds. The task sits in a kill-on-close job object, so
+stopping it never leaves an orphaned `ssh.exe` holding the ports. ssh's own errors go to
+`.canvas-task-sync/web-startup.log`.
+
+The tunnel runs with `BatchMode=yes`, so it needs key-based SSH that never prompts:
+`ssh daniel@100.87.157.44 true` must succeed on its own. Any other machine with SSH
+access can open the same tunnel without the scripts:
+
+```bash
+ssh -N -L 127.0.0.1:8890:127.0.0.1:8790 -L 127.0.0.1:8891:127.0.0.1:8891 daniel@<server>
+```
+
+Run `install-windows-startup.ps1` without `-ServerHost` to go back to a single machine that
+does everything.
 
 ### Google authorization without a browser on the server
 
 `InstalledAppFlow.run_local_server` needs one machine to both open the consent page and bind the
 redirect port, which a headless server cannot do. Authorization is split instead:
 
-1. **Authorize** in the laptop dashboard asks the backend for a consent URL (PKCE, `access_type=offline`,
+1. **Authorize** in the dashboard asks the backend for a consent URL (PKCE, `access_type=offline`,
    the same Tasks and Slides scopes as before).
 2. The laptop browser opens it and you complete consent there.
 3. Google redirects the browser to `http://127.0.0.1:8890/api/v1/settings/google/callback`, which the
-   laptop proxies to the backend.
+   tunnel carries to the backend.
 4. The backend exchanges the code and writes `token.json` **on the server only**. Refresh continues
    normally from there.
 
 The OAuth `state` is what binds the callback to the request that started it; a mismatched, reused, or
 expired state is refused, and a response missing a refresh token or a required scope is rejected
-rather than written over a working `token.json`. If the dashboards run on a different origin than the
-backend's own port, set `CANVAS_TASK_SYNC_PUBLIC_ORIGIN` on the server so the redirect points at the
-browser's address.
+rather than written over a working `token.json`. The redirect uses
+`CANVAS_TASK_SYNC_PUBLIC_ORIGIN`, which is why the service sets it.
 
 ### Server memory
 
@@ -327,7 +357,7 @@ expensive part of that — the Gemini SDK alone is about 23 MB and never unloads
 is idle almost all day. So it does not live there.
 
 ```text
-web process   ~50 MB   FastAPI, the control database, the dashboards' API
+web process   ~50 MB   FastAPI, the control database, the API, both dashboards
                        spawns on demand v
 sync worker   ~70 MB   Canvas, Gemini, Google Tasks, the whole pipeline
                        exits 60s after the queue drains ^
@@ -361,12 +391,11 @@ the web process, where it stays until restart. Courses that use the Canvas API, 
 or Docs — which is all of them by default — are unaffected.
 
 ### Chrome extension
-### Chrome extension
 
-Point the extension at `http://127.0.0.1:8890`; the laptop proxy relays the pairing
-token, capture uploads, screenshots, and the automatic capture long-poll. Load the unpacked extension
-from `extension/dist` **in the checkout on the laptop**, not the server's copy, and paste the pairing
-token shown in the laptop dashboard's Settings page.
+Point the extension at `http://127.0.0.1:8890`. The tunnel carries the pairing token, capture
+uploads, screenshots, and the automatic capture long-poll to the server unchanged. Load the unpacked
+extension from `extension/dist` **in the checkout on the laptop**, not the server's copy, and paste
+the pairing token shown on the dashboard's Settings page.
 
 ## Chrome source connector
 

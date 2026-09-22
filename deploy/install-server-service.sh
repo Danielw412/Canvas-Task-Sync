@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Install (or reinstall) the systemd user service for the authoritative backend.
+# Install (or reinstall) the systemd user service that runs the backend and both
+# dashboards.
 #
 # Run this on the server, from the repository root:
 #     ./deploy/install-server-service.sh
 #
-# The backend binds 127.0.0.1 only. Reach it from a laptop with:
-#     ssh -N -L 8879:127.0.0.1:8790 daniel@<server>
+# Everything binds 127.0.0.1 only. A laptop reaches the dashboards at its usual addresses,
+# http://127.0.0.1:8890 and :8891, with:
+#     ssh -N -L 127.0.0.1:8890:127.0.0.1:8790 -L 127.0.0.1:8891:127.0.0.1:8891 daniel@<server>
+# On Windows, scripts/install-windows-startup.ps1 -ServerHost daniel@<server> keeps that
+# tunnel open from sign-in.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,10 +43,10 @@ if [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || ech
   loginctl enable-linger "$USER" 2>/dev/null || true
 fi
 if [[ "$(loginctl show-user "$USER" --property=Linger --value 2>/dev/null || echo no)" == "yes" ]]; then
-  echo "user lingering is on: the backend starts at boot and survives logout."
+  echo "user lingering is on: the backend and dashboards start at boot and survive logout."
 else
   echo
-  echo "note: user lingering is off, so the backend starts only at login and stops at logout."
+  echo "note: user lingering is off, so the backend and dashboards start only at login and stop at logout."
   echo "      Enable it once with:  sudo loginctl enable-linger $USER"
 fi
 

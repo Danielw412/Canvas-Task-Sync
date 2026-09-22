@@ -21,6 +21,13 @@ if ($null -ne $task) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
+# In server-hosted mode the task's ssh.exe ends with it; this catches one that did not.
+# School Dashboard's own tunnel forwards 8790 and is left alone.
+Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $commandLine = [string]$_.CommandLine
+    $commandLine.Contains("8890:127.0.0.1:") -or $commandLine.Contains("8891:127.0.0.1:")
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
 $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Canvas Task Sync.url"
 $simpleShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Canvas Task Sync Simple.url"
 if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {

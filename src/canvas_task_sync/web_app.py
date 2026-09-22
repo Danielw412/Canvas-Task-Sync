@@ -59,6 +59,8 @@ from canvas_task_sync.tracked_tasks import TrackedTaskReader
 from canvas_task_sync.web_constants import (
     DEFAULT_SIMPLE_WEB_PORT,
     DEFAULT_WEB_PORT,
+    loopback_host_headers,
+    origin_port,
     resolve_public_origin,
 )
 from canvas_task_sync.web_models import (
@@ -91,11 +93,12 @@ IDLE_RECLAIM_SECONDS = 15 * 60
 class WebRuntime:
     def __init__(self, config_path: Path, *, port: int) -> None:
         self.port = port
+        # The dashboard origin can differ from this backend's bound port when a browser on
+        # another machine reaches it through an SSH tunnel. Google must redirect to the
+        # origin that browser actually uses, and the extension must be paired with it.
+        self.public_origin = resolve_public_origin(port)
         self.configuration = ConfigurationService(config_path)
         self.settings = self.configuration.load()
-        # The dashboard origin can differ from this backend's bound port when the
-        # dashboards run on another machine, and Google must redirect to the origin the
-        # person's browser actually uses.
         load_dotenv(self.settings.root_dir / ".env")
         self.google_auth = GoogleAuthorizationManager(self.settings.root_dir)
         self.store = ControlStore(self.settings.root_dir / ".canvas-task-sync" / "control.sqlite3")
@@ -207,6 +210,20 @@ def create_web_app(
         finally:
             await runtime.stop()
 
+    # A browser on another machine reaches this backend through an SSH tunnel whose local
+    # port can differ from the one bound here, so it arrives with that port in Host and
+    # Origin. Both ports are still loopback-only on their own machine.
+    dashboard_ports = (port, origin_port(resolve_public_origin(port)))
+    allowed_hosts = {
+        "127.0.0.1",
+        "localhost",
+        "testserver",
+        *loopback_host_headers(*dashboard_ports),
+    }
+    allowed_mutation_origins = {
+        f"http://{host}" for host in loopback_host_headers(*dashboard_ports, 5173, simple_port)
+    }
+
     app = FastAPI(
         title="Canvas Task Sync Control Center",
         version="1.0.0",
@@ -242,13 +259,6 @@ def create_web_app(
     @app.middleware("http")
     async def local_mutation_guard(request: Request, call_next):
         host = request.headers.get("host", "").casefold()
-        allowed_hosts = {
-            "127.0.0.1",
-            f"127.0.0.1:{port}",
-            "localhost",
-            f"localhost:{port}",
-            "testserver",
-        }
         if host not in allowed_hosts:
             return _error_response(
                 status_code=400,
@@ -291,15 +301,7 @@ def create_web_app(
         elif request.url.path.startswith("/api/v1/") and is_mutation:
             runtime = _runtime(request)
             origin = request.headers.get("origin")
-            allowed_origins = {
-                f"http://127.0.0.1:{runtime.port}",
-                f"http://localhost:{runtime.port}",
-                "http://127.0.0.1:5173",
-                "http://localhost:5173",
-                f"http://127.0.0.1:{simple_port}",
-                f"http://localhost:{simple_port}",
-            }
-            if origin and origin not in allowed_origins:
+            if origin and origin not in allowed_mutation_origins:
                 return _error_response(
                     status_code=403,
                     code="origin_not_allowed",
@@ -865,7 +867,7 @@ def create_web_app(
     def get_extension_setup(request: Request) -> dict[str, Any]:
         runtime = _runtime(request)
         return {
-            "server_url": f"http://127.0.0.1:{runtime.port}",
+            "server_url": runtime.public_origin,
             "pairing_token": runtime.extension_pairing_token,
             "capture_ttl_seconds": runtime.capture_broker.ttl_seconds,
             "supported_sources": ["google_slides", "google_docs", "google_sheets", "web_page"],
@@ -1050,11 +1052,11 @@ def create_web_app(
         """Mint a consent URL for the person's own browser.
 
         The backend may be headless, so it never opens a browser or binds a redirect
-        port itself. It hands back a URL; the dashboard origin receives the redirect and
-        proxies the code back to /settings/google/callback below.
+        port itself. It hands back a URL; the dashboard origin receives the redirect, and
+        the tunnel carries the code back to /settings/google/callback below.
         """
         runtime = _runtime(request)
-        redirect_uri = build_redirect_uri(resolve_public_origin(runtime.port))
+        redirect_uri = build_redirect_uri(runtime.public_origin)
         try:
             started = await asyncio.to_thread(runtime.google_auth.begin, redirect_uri=redirect_uri)
         except GoogleAuthorizationError as error:

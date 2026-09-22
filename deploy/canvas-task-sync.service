@@ -1,19 +1,23 @@
 [Unit]
-Description=Canvas Task Sync authoritative backend
+Description=Canvas Task Sync backend and dashboards
 Documentation=https://github.com/Danielw412/Canvas-Task-Sync
-# No network ordering: the socket it binds is loopback, and every outbound call happens
+# No network ordering: the sockets it binds are loopback, and every outbound call happens
 # later, on demand. network-online.target does not exist in a user manager anyway.
 
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/Canvas-Task-Sync
-# Loopback only. Reach it from a laptop with:
-#   ssh -N -L 8879:127.0.0.1:8790 daniel@<server>
+# One process and one event loop serve both dashboards, loopback only:
+#   127.0.0.1:8790  API + full dashboard (School Dashboard's own tunnel also targets this)
+#   127.0.0.1:8891  simple dashboard
+# A laptop reaches both at its usual addresses with:
+#   ssh -N -L 127.0.0.1:8890:127.0.0.1:8790 -L 127.0.0.1:8891:127.0.0.1:8891 daniel@<server>
 ExecStart=%h/projects/Canvas-Task-Sync/.venv/bin/python -m canvas_task_sync \
     --config config/courses.yaml \
-    web --port 8790 --no-open --no-simple
-# The dashboards live on the laptop at http://127.0.0.1:8890, which is also where Google
-# must return after consent. The backend never opens a browser itself.
+    web --port 8790 --simple-port 8891 --no-open
+# The address browsers type. It arrives through the tunnel as Host and Origin, the
+# simple dashboard calls the API there, and Google returns there after consent. The
+# service never opens a browser itself.
 Environment=CANVAS_TASK_SYNC_PUBLIC_ORIGIN=http://127.0.0.1:8890
 Environment=PYTHONUNBUFFERED=1
 

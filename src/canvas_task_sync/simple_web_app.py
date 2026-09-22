@@ -7,7 +7,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
+from canvas_task_sync.web_constants import DEFAULT_WEB_PORT, resolve_public_origin
 
 
 def create_simple_web_app(*, backend_port: int = DEFAULT_WEB_PORT) -> FastAPI:
@@ -26,9 +26,13 @@ def create_simple_web_app(*, backend_port: int = DEFAULT_WEB_PORT) -> FastAPI:
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="simple-web-assets")
 
+    # The browser may sit on the far side of an SSH tunnel, so point it at the backend
+    # origin it can reach rather than the port the backend happens to bind here.
+    api_base = resolve_public_origin(backend_port)
+
     @app.get("/runtime-config.json", include_in_schema=False)
     def runtime_config() -> dict[str, str]:
-        return {"api_base": f"http://{DEFAULT_WEB_HOST}:{backend_port}"}
+        return {"api_base": api_base}
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def frontend(full_path: str):

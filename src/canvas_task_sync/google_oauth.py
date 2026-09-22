@@ -8,7 +8,7 @@ consent page and the redirect both belong there.
 This module splits the flow at that seam.  The backend mints the authorization URL and
 keeps the OAuth state (including the PKCE verifier) in memory; the person completes
 consent in their own browser; Google redirects the browser to the dashboard origin,
-whose proxy hands the code back to the backend.  Only the backend ever sees the code,
+and the SSH tunnel carries the code back to the backend.  Only the backend ever sees the code,
 the client secret, or the resulting refresh token.
 """
 
