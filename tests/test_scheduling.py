@@ -4,12 +4,14 @@ from datetime import date
 
 import pytest
 
+from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.gemini import GeminiExtractor
 from canvas_task_sync.models import (
     ActionKind,
     AgendaBlock,
     BlockRole,
     Confidence,
+    DayCount,
     DueRelation,
     ExtractedTask,
     SourceCapture,
@@ -956,6 +958,92 @@ def test_assessment_titles_have_one_canonical_form(
     )
 
     assert draft.title == expected
+
+
+FRIDAY_ROW = {"source_anchor": "table:agenda_table:r4:c2", "row_label": "F"}
+
+
+@pytest.mark.parametrize(
+    ("row", "offset", "unit", "action_kind", "expected", "basis"),
+    [
+        ({}, 2, DayCount.CALENDAR_DAYS, ActionKind.COMPLETE, date(2026, 5, 28),
+         "Due 2 days after its agenda row"),
+        # Calendar days are literal, even across a weekend.
+        (FRIDAY_ROW, 2, DayCount.CALENDAR_DAYS, ActionKind.COMPLETE, date(2026, 5, 31),
+         "Due 2 days after its agenda row"),
+        # Class days skip days the course does not meet.
+        (FRIDAY_ROW, 2, DayCount.CLASS_DAYS, ActionKind.COMPLETE, date(2026, 6, 2),
+         "Due 2 class days after its agenda row"),
+        (FRIDAY_ROW, 1, DayCount.CLASS_DAYS, ActionKind.COMPLETE, date(2026, 6, 1),
+         "Due 1 class day after its agenda row"),
+        # A course rule outranks the same-day default for submit actions.
+        ({}, 2, None, ActionKind.SUBMIT, date(2026, 5, 28), "Due 2 days after its agenda row"),
+    ],
+)
+def test_days_after_rule_is_scheduled_from_the_agenda_row(
+    spanish_capture, spanish_course, row, offset, unit, action_kind, expected, basis
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Open Pearson",
+            action_kind=action_kind,
+            due_relation=DueRelation.DAYS_AFTER,
+            due_offset_days=offset,
+            due_offset_unit=unit,
+            **row,
+        ),
+    )
+
+    assert (draft.due_date, draft.due_basis, draft.due_uncertain) == (expected, basis, False)
+
+
+@pytest.mark.parametrize(
+    ("source_text", "expected"),
+    [
+        ("Pearson 1.4 due Friday", date(2026, 5, 29)),  # "Unless specified otherwise."
+        ("Pearson Study Plan closes at 9 pm", date(2026, 5, 26)),
+    ],
+)
+def test_deadline_stated_in_the_source_outranks_a_days_after_rule(
+    spanish_capture, spanish_course, source_text, expected
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            source_text,
+            due_relation=DueRelation.DAYS_AFTER,
+            due_offset_days=2,
+            due_offset_unit=DayCount.CALENDAR_DAYS,
+        ),
+    )
+
+    assert draft.due_date == expected
+
+
+@pytest.mark.parametrize("offset", [None, 0, 45])
+def test_days_after_rule_without_a_usable_offset_is_due_uncertain(
+    spanish_capture, spanish_course, offset
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task("Open Pearson", due_relation=DueRelation.DAYS_AFTER, due_offset_days=offset),
+    )
+
+    assert draft.due_date is None
+    assert draft.due_uncertain is True
+    assert "days after assignment" in draft.due_uncertain_reason
+
+
+def test_days_after_cannot_be_a_course_default_without_a_number(spanish_course):
+    settings = spanish_course.model_dump(mode="json")
+    settings["source"]["extraction"]["assignments_default_due"] = "days_after"
+
+    with pytest.raises(ValueError, match="AI instructions"):
+        CourseSettings.model_validate(settings)
 
 
 def test_date_stated_in_a_day_cell_wins_over_counting_from_the_week_heading():

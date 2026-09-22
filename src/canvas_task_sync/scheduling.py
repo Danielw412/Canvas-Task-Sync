@@ -12,6 +12,7 @@ from canvas_task_sync.models import (
     ActionKind,
     AgendaBlock,
     BlockRole,
+    DayCount,
     DraftTask,
     DueRelation,
     ExtractedTask,
@@ -88,6 +89,8 @@ SAME_DAY_TIMING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NEXT_CLASS_TIMING_PATTERN = re.compile(r"\b(?:tomorrow|next\s+class)\b", re.IGNORECASE)
+# A days-after rule beyond a school term's typical assignment window is a misreading.
+MAX_DUE_OFFSET_DAYS = 30
 
 DAY_ALIASES = {
     "m": 0,
@@ -307,6 +310,17 @@ def next_class_day(after: date, meeting_weekdays: list[int]) -> date:
             return candidate
         candidate += timedelta(days=1)
     raise AgendaDateError("Could not find the next configured class day.")
+
+
+def _days_after(
+    assigned: date, offset: int, unit: DayCount, meeting_weekdays: list[int]
+) -> date:
+    if unit == DayCount.CALENDAR_DAYS:
+        return assigned + timedelta(days=offset)
+    due = assigned
+    for _ in range(offset):
+        due = next_class_day(due, meeting_weekdays)
+    return due
 
 
 def _date_for_month_day(
@@ -943,7 +957,8 @@ def build_draft_tasks(
             relation = task.due_relation
             is_assessment = task.task_type in {TaskType.QUIZ, TaskType.TEST}
             if explicit_weekday is None and relation != DueRelation.EXPLICIT_DATE:
-                if is_assessment or is_same_day_action:
+                # A course's days-after rule outranks the same-day default for actions.
+                if is_assessment or (is_same_day_action and relation != DueRelation.DAYS_AFTER):
                     relation = DueRelation.SAME_DAY
                 elif is_assignment and relation in {DueRelation.NONE, DueRelation.SAME_DAY}:
                     relation = course.source.extraction.assignments_default_due
@@ -959,7 +974,7 @@ def build_draft_tasks(
             ):
                 relation = DueRelation.NEXT_CLASS
             deadline_bearing_classwork = (
-                relation == DueRelation.EXPLICIT_DATE
+                relation in {DueRelation.EXPLICIT_DATE, DueRelation.DAYS_AFTER}
                 or is_same_day_action
                 or is_assessment
                 or explicit_weekday is not None
@@ -999,6 +1014,7 @@ def build_draft_tasks(
                 if stated_timing is not None and relation in {
                     DueRelation.SAME_DAY,
                     DueRelation.NEXT_CLASS,
+                    DueRelation.DAYS_AFTER,
                 }:
                     relation = stated_timing
             if relation == DueRelation.NEXT_CLASS:
@@ -1064,6 +1080,28 @@ def build_draft_tasks(
                         due_basis = (
                             "Repeated work due after its latest consecutive agenda occurrence"
                         )
+            elif relation == DueRelation.DAYS_AFTER:
+                offset = task.due_offset_days
+                unit = task.due_offset_unit or DayCount.CALENDAR_DAYS
+                if offset is None or not 1 <= offset <= MAX_DUE_OFFSET_DAYS:
+                    due_uncertain = True
+                    due_uncertain_reason = (
+                        "The number of days after assignment is missing or out of range."
+                    )
+                    due_basis = "Due date uncertain"
+                elif source_date is None:
+                    due_uncertain = True
+                    due_uncertain_reason = (
+                        "Work due days after it is assigned could not be tied to a dated "
+                        "agenda row."
+                    )
+                    due_basis = "Due date uncertain"
+                else:
+                    due_date = _days_after(source_date, offset, unit, course.meeting_weekdays)
+                    label = "class day" if unit == DayCount.CLASS_DAYS else "day"
+                    due_basis = (
+                        f"Due {offset} {label}{'s' if offset != 1 else ''} after its agenda row"
+                    )
             elif is_assessment:
                 due_uncertain = True
                 due_uncertain_reason = (

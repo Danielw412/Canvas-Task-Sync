@@ -72,6 +72,16 @@ class ExtractionSettings(BaseModel):
             raise ValueError("thumbnail_size must be small, medium, or large")
         return normalized
 
+    @field_validator("assignments_default_due")
+    @classmethod
+    def validate_assignments_default_due(cls, value: DueRelation) -> DueRelation:
+        if value == DueRelation.DAYS_AFTER:
+            raise ValueError(
+                "assignments_default_due cannot be days_after; state a days-after rule in the "
+                "course's AI instructions instead"
+            )
+        return value
+
 
 class GoogleSlidesSourceSettings(BaseModel):
     type: Literal["google_slides"] = "google_slides"

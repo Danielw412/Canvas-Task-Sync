@@ -11,6 +11,7 @@ from canvas_task_sync.models import (
     ActionKind,
     AgendaBlock,
     Confidence,
+    DayCount,
     DueRelation,
     ExtractionMode,
     GeminiTaskCandidate,
@@ -339,6 +340,64 @@ def test_course_ai_instructions_are_delimited_and_scoped_to_that_course(
     assert "Do not create homework tasks for reading assignments." not in plain_backend.calls[0][
         "prompt"
     ]
+
+
+def test_course_days_after_rule_reaches_gemini_and_its_answer_reaches_scheduling():
+    block = AgendaBlock(
+        anchor="canvas:linear-algebra:5",
+        element_id="linear-algebra:table:0",
+        kind="table_cell",
+        row_index=1,
+        row_label="M",
+        text="Open Pearson",
+    )
+    capture = SourceCapture(
+        source_key="canvas:11517:week:2026-09-14",
+        source_url="https://canvas.example/courses/11517",
+        source_type="canvas",
+        page_hash="b" * 64,
+        transcript=block.text,
+        blocks=[block],
+        selection={"week_start": "2026-09-14"},
+    )
+    course = CourseSettings.model_validate(
+        {
+            "name": "Linear Algebra",
+            "prefix": "LINALG",
+            "task_list": "School",
+            "ai_instructions": (
+                "Pearson assignments are always due 2 days after the assignment unless "
+                "specified otherwise"
+            ),
+            "source": {"type": "none", "extraction": {"mode": "text"}},
+            "canvas_course_id": "11517",
+        }
+    )
+    candidate = GeminiTaskCandidate(
+        source_anchor=block.anchor,
+        source_text="Open Pearson",
+        row_label="M",
+        classification=TaskClassification.HOMEWORK,
+        action_kind=ActionKind.COMPLETE,
+        title="Pearson assignment",
+        due_relation=DueRelation.DAYS_AFTER,
+        due_offset_days=2,
+        due_offset_unit=DayCount.CALENDAR_DAYS,
+        confidence=Confidence.HIGH,
+    )
+    backend = FakeBackend([[candidate]])
+
+    outcome = GeminiExtractor(backend).extract(capture, course)
+
+    prompt = backend.calls[0]["prompt"]
+    assert "due 2 days after the assignment" in prompt
+    assert "due_relation=days_after" in prompt
+    assert "how their deadlines relate to the agenda row" in prompt
+    assert (outcome.tasks[0].due_relation, outcome.tasks[0].due_offset_days) == (
+        DueRelation.DAYS_AFTER,
+        2,
+    )
+    assert outcome.tasks[0].due_offset_unit == DayCount.CALENDAR_DAYS
 
 
 def test_exhausted_model_chain_reports_each_attempt_without_raw_provider_details():

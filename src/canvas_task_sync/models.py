@@ -61,7 +61,15 @@ class DueRelation(StrEnum):
     EXPLICIT_DATE = "explicit_date"
     SAME_DAY = "same_day"
     NEXT_CLASS = "next_class"
+    # A fixed number of days after the agenda row, from the source or a course rule such as
+    # "Pearson assignments are due 2 days after they are assigned".
+    DAYS_AFTER = "days_after"
     NONE = "none"
+
+
+class DayCount(StrEnum):
+    CALENDAR_DAYS = "calendar_days"
+    CLASS_DAYS = "class_days"
 
 
 class Confidence(StrEnum):
@@ -148,6 +156,8 @@ class GeminiTaskCandidate(BaseModel):
     details: str = ""
     due_relation: DueRelation = DueRelation.NONE
     explicit_due_date: str | None = None
+    due_offset_days: int | None = None
+    due_offset_unit: DayCount | None = None
     confidence: Confidence = Confidence.MEDIUM
     warnings: list[str] = Field(default_factory=list)
 
@@ -163,6 +173,8 @@ class ExtractedTask(BaseModel):
     details: str = ""
     due_relation: DueRelation = DueRelation.NONE
     explicit_due_date: str | None = None
+    due_offset_days: int | None = None
+    due_offset_unit: DayCount | None = None
     confidence: Confidence = Confidence.MEDIUM
     warnings: list[str] = Field(default_factory=list)
 

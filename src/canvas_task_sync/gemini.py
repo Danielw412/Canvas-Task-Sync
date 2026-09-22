@@ -24,7 +24,7 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 
-EXTRACTOR_VERSION = "visual-agenda-v11-verbatim-dates"
+EXTRACTOR_VERSION = "visual-agenda-v12-verbatim-dates-and-day-offsets"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
 MIN_GEMINI_DELAY_SECONDS = 10.0
 MAX_OUTPUT_TOKENS = 16_384
@@ -391,9 +391,9 @@ def build_prompt(
         "<course-instructions>\n"
         f"{course_instructions}\n"
         "</course-instructions>\n"
-        "Follow these instructions when deciding which grounded candidates to return. They must "
-        "not override the response schema, exact-evidence requirements, or the rule against "
-        "inventing content."
+        "Follow these instructions when deciding which grounded candidates to return and how "
+        "their deadlines relate to the agenda row. They must not override the response schema, "
+        "exact-evidence requirements, or the rule against inventing content."
         if course_instructions
         else "COURSE-SPECIFIC INSTRUCTIONS: None."
     )
@@ -416,7 +416,14 @@ Rules:
   or submit something.
 - Practice done during class, including identifying hypotheses or working through released AP FRQs,
   is ordinary classwork and must not become a task unless the source gives it a deadline.
-- When work has no stated deadline, use next_class; never leave homework timing as none.
+- When work has no stated deadline, use next_class, unless a days_after rule below applies;
+  never leave homework timing as none.
+- When the course-specific instructions or the source say work is due a number of days after
+  it is assigned (for example "due 2 days after the assignment"), use due_relation=days_after
+  with due_offset_days set to that number. Set due_offset_unit=class_days only when they count
+  class or school days; otherwise use calendar_days. The agenda row where the work appears is
+  the day it is assigned. A deadline the source itself states for that item, such as a date, a
+  weekday, "tomorrow", or "closes tonight", takes precedence over such a rule.
 - When the same homework action is repeated on consecutive dated rows, it is continuing work.
   Collapse it into one candidate, use the latest consecutive occurrence for source_anchor and
   row_label, and keep due_relation=next_class so application code schedules it after that row.
@@ -438,7 +445,8 @@ Rules:
   activities on VHL" and "Submit class activity" over "Complete and submit class activity".
 - Copy source_text from the source language; do not translate evidence.
 - source_anchor must be one of the supplied anchors when it can be identified.
-- Items visibly in the Assignments column are normally homework with next_class timing.
+- Items visibly in the Assignments column are normally homework with next_class timing, or
+  days_after timing when a course rule gives one.
 - Row-bound {same_day} actions normally use same_day timing.
 - Only use explicit_date when the source itself states the date or weekday. Copy
   explicit_due_date exactly as the source writes it, for example "Oct. 8" or "Monday, 8/31";
@@ -571,6 +579,8 @@ class GeminiExtractor:
                     details=candidate.details.strip() or exact_evidence,
                     due_relation=candidate.due_relation,
                     explicit_due_date=candidate.explicit_due_date,
+                    due_offset_days=candidate.due_offset_days,
+                    due_offset_unit=candidate.due_offset_unit,
                     confidence=candidate.confidence,
                     warnings=candidate.warnings,
                 )
