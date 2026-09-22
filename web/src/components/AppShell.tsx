@@ -7,7 +7,6 @@ import {
   Grid2X2,
   HeartPulse,
   Menu,
-  RefreshCw,
   Settings,
   ListChecks,
 } from 'lucide-react'
@@ -50,7 +49,7 @@ export function AppShell() {
   return <div className="app-shell">
     <aside className="sidebar">
       <NavLink to="/" className="brand" aria-label="Canvas Task Sync overview">
-        <span className="brand__mark"><RefreshCw size={20} strokeWidth={2.2} /></span>
+        <span className="brand__mark"><img src="/logo.png" alt="" /></span>
         <span>Canvas Task Sync</span>
       </NavLink>
       <nav className="desktop-nav" aria-label="Primary navigation">
@@ -63,7 +62,7 @@ export function AppShell() {
     <div className="app-main">
       <header className="topbar">
         <div className="mobile-brand">
-          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><RefreshCw size={19} strokeWidth={2.2} /></span><span>Canvas Task Sync</span></NavLink>
+          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><img src="/logo.png" alt="" /></span><span>Canvas Task Sync</span></NavLink>
           <NavLink to="/settings" aria-label="Open settings"><Menu size={22} /></NavLink>
         </div>
         <CourseSwitcher courses={data?.courses ?? []} selectedCourseId={selectedCourseId} onSelect={setSelectedCourseId} />

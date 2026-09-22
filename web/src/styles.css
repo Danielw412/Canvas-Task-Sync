@@ -103,7 +103,19 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
   letter-spacing: -.025em;
   white-space: nowrap;
 }
-.brand svg, .mobile-brand svg:first-child { color: var(--primary); }
+.brand__mark {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(16 24 40 / .06);
+}
+.brand__mark img { display: block; width: 100%; height: 100%; object-fit: contain; }
 
 .desktop-nav { display: grid; gap: 5px; margin-top: 20px; }
 .nav-item {

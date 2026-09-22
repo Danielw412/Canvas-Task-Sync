@@ -3,6 +3,12 @@
   "name": "Canvas Task Sync Source Connector",
   "version": "0.3.0",
   "description": "Captures selected course resources for the local Canvas Task Sync app.",
+  "icons": {
+    "16": "icon.png",
+    "32": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
   "permissions": [
     "activeTab",
     "alarms",
@@ -33,7 +39,11 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Capture agenda source"
+    "default_title": "Capture agenda source",
+    "default_icon": {
+      "16": "icon.png",
+      "32": "icon.png"
+    }
   },
   "options_page": "options.html"
 }
