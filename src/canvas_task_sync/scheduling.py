@@ -4,7 +4,9 @@ import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from canvas_task_sync.configuration import CourseSettings
 from canvas_task_sync.gemini import normalized_text, token_similarity
@@ -254,10 +256,34 @@ def _stated_row_date(day_texts: list[str], weekday: int, agenda_start: date) -> 
     return value
 
 
+def _declared_row_dates(block: AgendaBlock) -> tuple[date, date] | None:
+    """Return the dates the source itself states for a block's row.
+
+    A daily slide's heading ("Days 23 and 24: September 18 and 21") names its class days, so
+    its row needs no weekday walk from the start of the week.
+    """
+    values = block.metadata.get("row_dates")
+    if not isinstance(values, list) or not values:
+        return None
+    try:
+        parsed = sorted(date.fromisoformat(str(value)) for value in values)
+    except ValueError:
+        return None
+    return parsed[0], parsed[-1]
+
+
 def row_date_ranges(capture: SourceCapture) -> dict[tuple[str, int], tuple[date, date]]:
+    stated: dict[tuple[str, int], tuple[date, date]] = {}
+    for block in capture.blocks:
+        if block.row_index is None:
+            continue
+        row_dates = _declared_row_dates(block)
+        if row_dates is not None:
+            stated.setdefault((block.element_id, block.row_index), row_dates)
+
     agenda_range = find_agenda_range(capture)
     if agenda_range is None:
-        return {}
+        return stated
     agenda_start, _ = agenda_range
 
     rows: dict[tuple[str, int], str] = {}
@@ -266,11 +292,13 @@ def row_date_ranges(capture: SourceCapture) -> dict[tuple[str, int], tuple[date,
         if block.row_index is None or not block.row_label:
             continue
         key = (block.element_id, block.row_index)
+        if key in stated:
+            continue
         rows.setdefault(key, block.row_label)
         if block.role == BlockRole.DAY:
             day_texts[key].append(block.text)
 
-    result: dict[tuple[str, int], tuple[date, date]] = {}
+    result: dict[tuple[str, int], tuple[date, date]] = dict(stated)
     element_ids = sorted({element_id for element_id, _ in rows})
     for element_id in element_ids:
         cursor = agenda_start
@@ -654,11 +682,82 @@ def _is_canvas_assignment_url(value: str) -> bool:
     return bool(CANVAS_ASSIGNMENT_PATH_PATTERN.search(value))
 
 
+def _linked_assignment(
+    task: ExtractedTask, block: AgendaBlock
+) -> tuple[dict[str, Any] | None, str]:
+    """Return the one Canvas assignment linked from the task's phrase, and the text tying them.
+
+    Slide links are phrased as instructions ("Submit here"), so their text rarely resembles
+    the task title. Containment is the association instead: the link text lies inside the exact
+    evidence or, failing that, inside the one source line that holds the evidence. Two links at
+    the tightest scope are ambiguous and never widen to the line.
+    """
+    evidence = normalized_text(task.source_text)
+    links = [
+        (str(link.get("url", "")), normalized_text(str(link.get("text", ""))), link)
+        for link in block.metadata.get("assignment_links", [])
+        if isinstance(link, dict)
+    ]
+    links = [item for item in links if item[1] and _is_canvas_assignment_url(item[0])]
+    if not evidence or not links:
+        return None, ""
+    scopes = [task.source_text] + [
+        line for line in block.text.splitlines() if evidence in normalized_text(line)
+    ]
+    for scope in scopes:
+        padded = f" {normalized_text(scope)} "
+        found = {url: link for url, text, link in links if f" {text} " in padded}
+        if len(found) == 1:
+            return next(iter(found.values())), scope
+        if found:
+            return None, ""
+    return None, ""
+
+
+def _mentions_timing(text: str, reference: date | None) -> bool:
+    """Return whether text states a day, a date, or any timing of its own."""
+    return bool(
+        WEEKDAY_PATTERN.search(text)
+        or SAME_DAY_TIMING_PATTERN.search(text)
+        or NEXT_CLASS_TIMING_PATTERN.search(text)
+        or VAGUE_TIMING_PATTERN.search(text)
+        or _calendar_date_mentions(text, reference)
+    )
+
+
+def _canvas_due_date(
+    task: ExtractedTask,
+    block: AgendaBlock,
+    *,
+    timezone_name: str,
+    reference: date | None,
+) -> date | None:
+    """Return the due date of the Canvas assignment linked from the task, in local time.
+
+    It only fills in timing the source leaves unstated: when the evidence or its line names a
+    day or date, the stated-day policy decides instead, so the two can never disagree silently.
+    """
+    link, scope = _linked_assignment(task, block)
+    value = link.get("due_at") if link else None
+    if not value or _mentions_timing(scope, reference):
+        return None
+    try:
+        due = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=UTC)
+    return due.astimezone(ZoneInfo(timezone_name)).date()
+
+
 def _assignment_url(
     task: ExtractedTask,
     block: AgendaBlock,
     capture: SourceCapture,
 ) -> str | None:
+    linked, _ = _linked_assignment(task, block)
+    if linked is not None:
+        return str(linked["url"])
     raw_links = block.metadata.get("assignment_links", [])
     links = [
         (str(link.get("url", "")), str(link.get("text", "")))
@@ -958,11 +1057,23 @@ def build_draft_tasks(
                 and relation == DueRelation.NONE
             ):
                 relation = DueRelation.NEXT_CLASS
+            # A Canvas assignment linked from the task's own phrase carries the deadline the
+            # teacher set. It replaces inferred timing only: a date or day the source states
+            # still wins, and an assessment stays on the day it is given.
+            canvas_due: date | None = None
+            if not is_assessment:
+                canvas_due = _canvas_due_date(
+                    task,
+                    block,
+                    timezone_name=course.timezone,
+                    reference=row_range[1] if row_range else agenda_reference,
+                )
             deadline_bearing_classwork = (
                 relation == DueRelation.EXPLICIT_DATE
                 or is_same_day_action
                 or is_assessment
                 or explicit_weekday is not None
+                or canvas_due is not None
             )
             if (
                 effective_classification == TaskClassification.CLASSWORK
@@ -1025,6 +1136,9 @@ def build_draft_tasks(
             elif explicit_weekday is not None:
                 due_date = explicit_weekday
                 due_basis = "Weekday explicitly stated in source evidence"
+            elif canvas_due is not None:
+                due_date = canvas_due
+                due_basis = "Due date of the Canvas assignment linked in source evidence"
             elif relation == DueRelation.SAME_DAY:
                 if VAGUE_TIMING_PATTERN.search(task.source_text):
                     # "Exam will be next week" announces an assessment; it is not on this row.

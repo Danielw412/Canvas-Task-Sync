@@ -14,7 +14,7 @@ The web app and Chrome extension are control/acquisition layers around that same
 
 - `sync_service.py` — main orchestration. Builds immutable `PreparedPlan`s, hashes config/source/remote state, revalidates before writes, then delegates apply. Start here for end-to-end sync flow; keep domain policy in the modules below instead of growing this file.
 - `gemini.py` — Gemini prompt/schema, model fallback, extraction modes, evidence reconciliation, and extraction quality checks. Gemini determines semantic meaning only; it does **not** own dates, IDs, or final sync decisions.
-- `scheduling.py` — authoritative deadline/date policy and conversion from extracted candidates to deterministic draft tasks. Date bugs belong here.
+- `scheduling.py` — authoritative deadline/date policy and conversion from extracted candidates to deterministic draft tasks. Date bugs belong here. A row may state its own dates (`metadata.row_dates`, as a daily slide's heading does) instead of being walked from the start of the week, and the due date of the one Canvas assignment linked from a task's evidence fills in timing the source leaves unstated — never for an assessment, and never over a stated date or weekday.
 - `identity.py` — durable logical IDs and conservative matching across source edits/reordering. Never base primary identity on Gemini wording. Evidence is compared with dates stripped, and differing item numbers ("Unit 2" vs "Unit 3") never match.
 - `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior, and carry-over: each Canvas week is its own source, so an open task from an earlier week's agenda is adopted (not duplicated) when the item reappears.
 - `google_tasks.py` — Google Tasks transport only. Updates deliberately preserve completion/user-controlled fields.
@@ -28,7 +28,8 @@ The web app and Chrome extension are control/acquisition layers around that same
 ### Source acquisition: `src/canvas_task_sync/sources/`
 
 - `__init__.py` — source registration and `CourseAgendaSource`, which owns Canvas-first vs configured-fallback selection.
-- `canvas.py` — Canvas API agenda discovery, same-origin link following, week selection, assignment/source context, canonical capture hashing.
+- `canvas.py` — Canvas API agenda discovery, same-origin link following, week selection, assignment/source context, canonical capture hashing. It also ranks the published Slides decks a course embeds, reads the most agenda-like one, and lets a daily deck compete with Canvas pages for the week; slide links to module items resolve through the module listing to the Canvas assignment (with its `due_at`).
+- `published_slides.py` — reads a "Publish to web" Slides deck (`/presentation/d/e/2PACX-.../pub`) from its public viewer page: per-slide SVG, text boxes, links, and class-day headings. Acquisition only, and fetched with a separate credential-free session — the Canvas bearer token must never reach `docs.google.com`.
 - `google_slides.py` — target-page Slides API capture and optional thumbnail retrieval.
 - `browser_connector.py` — adapts the in-memory Chrome capture envelope to `SourceCapture`.
 - `base.py` — `SourceAdapter` contract.
@@ -121,7 +122,7 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Deadlines and identity are deterministic application policy. If Gemini output conflicts with exact evidence, keep the item uncertain rather than guessing.
 - An unchanged source page reuses its cached extraction. Keep volatile Google Tasks context out of the extraction cache key; it changes after every write and made due dates flip between runs.
 - Preserve user completion state and user-authored notes. Google Tasks writes should touch only managed title/notes/due fields.
-- Canvas bearer tokens stay local and may only be sent to the configured same-origin Canvas API.
+- Canvas bearer tokens stay local and may only be sent to the configured same-origin Canvas API. A published Slides deck is public: fetch it with its own credential-free session, never the Canvas session and never Google credentials.
 - Browser captures remain bounded and memory-only; do not persist screenshots/page content or accept credential-like metadata.
 - Keep the web server loopback-only. Do not weaken host/origin/CSRF/extension-token checks.
 - Persisted run/support data must pass the redaction layer.

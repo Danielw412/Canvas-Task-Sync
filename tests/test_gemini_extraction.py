@@ -375,3 +375,80 @@ def test_truncated_structured_response_is_reported_distinctly():
         backend.generate(prompt="agenda", image_bytes=None, image_mime_type=None)
 
     assert "gemini-3.6-flash: invalid or truncated JSON response" in str(caught.value)
+
+
+def _slide_block(anchor: str, row_label: str, text: str) -> AgendaBlock:
+    return AgendaBlock(
+        anchor=anchor,
+        element_id="published_slides:deck",
+        kind="slide_text",
+        row_index={"Monday": 0, "Tuesday": 1}[row_label],
+        row_label=row_label,
+        text=text,
+    )
+
+
+@pytest.mark.parametrize(
+    ("anchor", "evidence", "row_label", "expected"),
+    [
+        # A truncated anchor is recovered when one block states the exact evidence.
+        (
+            "canvas:slides:t2",
+            "A correlation worksheet; Submit here.",
+            "Tuesday",
+            "canvas:slides:t2",
+        ),
+        ("canvas:slides:g1:t2", "A correlation worksheet; Submit here.", None, "canvas:slides:t2"),
+        # Evidence repeated on several slides is narrowed by the row Gemini named...
+        ("canvas:slides:bad", "We will test on WEDNESDAY.", "Tuesday", "canvas:slides:t3"),
+        # ...and stays unresolved without one.
+        ("canvas:slides:bad", "We will test on WEDNESDAY.", None, None),
+    ],
+)
+def test_unknown_anchor_is_recovered_only_from_unique_exact_evidence(
+    anchor, evidence, row_label, expected
+):
+    blocks = [
+        _slide_block(
+            "canvas:slides:t1", "Monday", "Memory Review #1\nWe will test on WEDNESDAY."
+        ),
+        _slide_block(
+            "canvas:slides:t2",
+            "Tuesday",
+            "Correlational Studies\nA correlation worksheet; Submit here.",
+        ),
+        _slide_block("canvas:slides:t3", "Tuesday", "We will test on WEDNESDAY."),
+    ]
+    capture = SourceCapture(
+        source_key="canvas:12477:week:2026-09-21",
+        source_url="https://canvas.example/courses/12477",
+        source_type="canvas",
+        page_hash="c" * 64,
+        transcript="",
+        blocks=blocks,
+        selection={"week_start": "2026-09-21"},
+    )
+    candidate = GeminiTaskCandidate(
+        source_anchor=anchor,
+        source_text=evidence,
+        row_label=row_label,
+        classification=TaskClassification.HOMEWORK,
+        action_kind=ActionKind.SUBMIT,
+        title="Agenda item",
+        due_relation=DueRelation.NEXT_CLASS,
+        confidence=Confidence.HIGH,
+    )
+    course = CourseSettings.model_validate(
+        {
+            "name": "AP Psychology",
+            "prefix": "PSYCH",
+            "task_list": "School",
+            "source": {"type": "none", "extraction": {"mode": "text"}},
+            "canvas_course_id": "12477",
+        }
+    )
+
+    outcome = GeminiExtractor(FakeBackend([[candidate]])).extract(capture, course)
+
+    assert [task.source_anchor for task in outcome.tasks] == ([expected] if expected else [])
+    assert len(outcome.uncertain) == (0 if expected else 1)
