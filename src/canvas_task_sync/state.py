@@ -176,6 +176,14 @@ class StateStore:
             order_by="anchor, ordinal, logical_id",
         )
 
+    def course_records(self, course_id: str) -> list[StateRecord]:
+        """Every mapping for a course, across agenda weeks and fallback sources."""
+        return self._read_records(
+            where="WHERE course_id = ?",
+            parameters=(course_id,),
+            order_by="source_key, anchor, ordinal, logical_id",
+        )
+
     def all_records(self) -> list[StateRecord]:
         return self._read_records()
 

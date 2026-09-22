@@ -459,6 +459,207 @@ def test_duplicate_managed_logical_id_is_a_conflict():
     assert uncertain[0].conflict is True
 
 
+THIS_WEEK = "canvas:11126:week:2026-09-21"
+LAST_WEEK = "canvas:11126:week:2026-09-14"
+
+
+def _exam_draft(source_key, due, source_text="October 6 FRQ section"):
+    return _draft(
+        due=due, title="[PHYSICS] Unit 2 FRQ Exam", task_type=TaskType.TEST
+    ).model_copy(update={"source_key": source_key, "source_text": source_text})
+
+
+def _week_record(draft, logical_id, remote_id, source_key):
+    return _record(draft, logical_id, remote_id=remote_id).model_copy(
+        update={"source_key": source_key, "task_type": draft.task_type}
+    )
+
+
+def _remote(remote_id, draft, *, status="needsAction"):
+    return RemoteTask(
+        id=remote_id,
+        title=draft.title,
+        notes=compose_task_notes("", draft),
+        due=f"{draft.due_date.isoformat()}T00:00:00.000Z" if draft.due_date else None,
+        status=status,
+        tasklist_id="list-1",
+        tasklist_title="School",
+    )
+
+
+def _week_plan(drafts, *, carryover, remotes, source_key=THIS_WEEK, week=date(2026, 9, 21)):
+    return SyncPlanner().plan(
+        course_id="spanish",
+        source_key=source_key,
+        task_list="School",
+        extraction_mode=ExtractionMode.TEXT,
+        fallback_reasons=[],
+        drafts=drafts,
+        uncertain=[],
+        ignored=[],
+        state_records=[],
+        remote_tasks=remotes,
+        carryover_records=carryover,
+        week_start=week,
+        today=week,
+        include_past=False,
+        dry_run=True,
+    )
+
+
+def test_rescheduled_item_from_last_weeks_agenda_updates_the_existing_task():
+    old = _exam_draft(LAST_WEEK, date(2026, 10, 5), "October 5 FRQ section")
+    record = _week_record(old, "exam-id", "exam-remote", LAST_WEEK)
+
+    plan = _week_plan(
+        [_exam_draft(THIS_WEEK, date(2026, 10, 6))],
+        carryover=[record],
+        remotes=[_remote("exam-remote", old)],
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.UPDATE]
+    assert plan.actions[0].logical_id == "exam-id"
+    assert plan.actions[0].remote_task_id == "exam-remote"
+    assert plan.actions[0].due_date == date(2026, 10, 6)
+    assert "due date" in plan.actions[0].reason
+
+
+@pytest.mark.parametrize(
+    ("old_due", "status"),
+    [
+        (date(2026, 10, 5), "completed"),  # Finished work is never re-opened or moved.
+        (date(2026, 9, 18), "needsAction"),  # Due before this week: a new occurrence.
+    ],
+)
+def test_finished_or_past_tasks_from_older_agendas_are_not_adopted(old_due, status):
+    old = _exam_draft(LAST_WEEK, old_due, "October 5 FRQ section")
+    record = _week_record(old, "exam-id", "exam-remote", LAST_WEEK)
+
+    plan = _week_plan(
+        [_exam_draft(THIS_WEEK, date(2026, 10, 6))],
+        carryover=[record],
+        remotes=[_remote("exam-remote", old, status=status)],
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.CREATE]
+    assert plan.actions[0].logical_id != "exam-id"
+
+
+def test_older_agenda_does_not_change_a_task_a_newer_agenda_tracks():
+    newer = _exam_draft(THIS_WEEK, date(2026, 10, 6))
+    record = _week_record(newer, "exam-id", "exam-remote", THIS_WEEK)
+
+    plan = _week_plan(
+        [_exam_draft(LAST_WEEK, date(2026, 9, 28), "September 28 FRQ section")],
+        carryover=[record],
+        remotes=[_remote("exam-remote", newer)],
+        source_key=LAST_WEEK,
+        week=date(2026, 9, 14),
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.IGNORED]
+    assert "newer agenda" in plan.actions[0].reason
+    assert plan.actions[0].remote_task_id == "exam-remote"
+
+
+def test_duplicate_open_tasks_are_reported_instead_of_adding_another():
+    first = _exam_draft(LAST_WEEK, date(2026, 10, 5), "October 5 FRQ section")
+    second = _exam_draft(LAST_WEEK, date(2026, 10, 6), "October 6 FRQ section")
+    records = [
+        _week_record(first, "first-id", "first-remote", LAST_WEEK),
+        _week_record(second, "second-id", "second-remote", LAST_WEEK),
+    ]
+    remotes = [_remote("first-remote", first), _remote("second-remote", second)]
+
+    plan = _week_plan(
+        [_exam_draft("canvas:11126:week:2026-09-28", date(2026, 10, 7))],
+        carryover=records,
+        remotes=remotes,
+        source_key="canvas:11126:week:2026-09-28",
+        week=date(2026, 9, 28),
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.UNCERTAIN]
+    assert plan.actions[0].conflict is True
+    assert "resolve the duplicates" in plan.actions[0].reason
+
+    # When the copies come from different weeks, the latest agenda's task is the live one.
+    records[1] = _week_record(second, "second-id", "second-remote", THIS_WEEK)
+    plan = _week_plan(
+        [_exam_draft("canvas:11126:week:2026-09-28", date(2026, 10, 7))],
+        carryover=records,
+        remotes=remotes,
+        source_key="canvas:11126:week:2026-09-28",
+        week=date(2026, 9, 28),
+    )
+
+    assert [action.kind for action in plan.actions] == [SyncActionKind.UPDATE]
+    assert plan.actions[0].logical_id == "second-id"
+
+
+def test_recurring_generic_work_on_a_new_date_is_a_new_task():
+    last = _draft(due=date(2026, 9, 22), title="[SPANISH] VHL practice").model_copy(
+        update={"source_key": LAST_WEEK}
+    )
+    record = _week_record(last, "vhl-id", "vhl-remote", LAST_WEEK)
+    remotes = [_remote("vhl-remote", last)]
+
+    new_date = _week_plan(
+        [_draft(due=date(2026, 9, 24), title="[SPANISH] VHL practice").model_copy(
+            update={"source_key": THIS_WEEK}
+        )],
+        carryover=[record],
+        remotes=remotes,
+    )
+    same_date = _week_plan(
+        [_draft(due=date(2026, 9, 22), title="[SPANISH] VHL practice").model_copy(
+            update={"source_key": THIS_WEEK}
+        )],
+        carryover=[record],
+        remotes=remotes,
+    )
+
+    assert [action.kind for action in new_date.actions] == [SyncActionKind.CREATE]
+    assert [action.kind for action in same_date.actions] == [SyncActionKind.UNCHANGED]
+    assert same_date.actions[0].logical_id == "vhl-id"
+
+
+def test_unchanged_evidence_keeps_the_known_date_title_and_details():
+    original = _draft(due=date(2026, 8, 13), title="[SPANISH] Complete Class Activity")
+    record = _record(original, "durable-id").model_copy(
+        update={"details": "Finish the class activity.", "due_basis": "next class"}
+    )
+    remote = RemoteTask(
+        id="remote-1",
+        title=original.title,
+        notes="Finish the class activity.",
+        due="2026-08-13T00:00:00.000Z",
+        tasklist_id="list-1",
+        tasklist_title="School",
+    )
+    # A re-extraction of the same evidence lost the date and reworded the rest.
+    flaky = _draft(
+        due=None,
+        title="[SPANISH] Complete class activity",
+        due_uncertain=True,
+        due_uncertain_reason="Next-class work could not be tied to a dated agenda row.",
+    ).model_copy(update={"details": "Complete and finish the class activity."})
+
+    plan = _plan([flaky], records=[record], remotes=[remote])
+
+    assert plan.actions[0].kind == SyncActionKind.UNCHANGED
+    assert plan.actions[0].due_date == date(2026, 8, 13)
+    assert plan.actions[0].due_uncertain is False
+    assert plan.actions[0].desired.title == "[SPANISH] Complete Class Activity"
+
+    # When the source itself changed, the new reading is followed.
+    edited = flaky.model_copy(update={"source_text": "Completar la actividad (sin fecha)"})
+    plan = _plan([edited], records=[record], remotes=[remote])
+
+    assert plan.actions[0].kind == SyncActionKind.UPDATE
+    assert plan.actions[0].due_date is None
+
+
 def test_extraction_uncertainty_is_informational_not_a_conflict():
     plan = SyncPlanner().plan(
         course_id="spanish",

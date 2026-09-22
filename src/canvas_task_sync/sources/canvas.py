@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable
+from bisect import bisect_right
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
@@ -63,10 +64,20 @@ AGENDA_TERMS = (
     "homework",
 )
 DAY_NAME_PATTERN = (
-    r"(?:m|t|w|th|f|mon|tue|tues|wed|thu|thur|thurs|fri|monday|tuesday|wednesday|thursday|friday)"
+    r"(?:m|t|w|th|f|mon|tue|tues|wed|weds|thu|thur|thurs|fri|"
+    r"monday|tuesday|wednesday|thursday|friday)"
 )
 DAY_RE = re.compile(rf"^{DAY_NAME_PATTERN}\.?$", re.I)
 DATED_DAY_RE = re.compile(rf"^(?P<day>{DAY_NAME_PATTERN})\.?,?\s+(?P<date>.+)$", re.I | re.S)
+# Schedule notes a school adds under a day name: "B Day", "(A)", "Day 3", "Early dismissal".
+# Deliberately a whitelist, so "Monday / Quiz" stays content instead of becoming a label.
+DAY_ANNOTATION_RE = re.compile(
+    r"^\(?(?:[a-h]|[a-h]\s*day|day\s*[a-h0-9]{1,2}|[a-h]/[a-h]|block\s*[a-z0-9]{1,2}|"
+    r"odd|even|half\s+day|early\s+(?:dismissal|release)|late\s+start|"
+    r"delayed\s+opening|no\s+school)\)?$",
+    re.I,
+)
+DAY_CELL_MAX_CHARS = 60
 SEMANTIC_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li"}
 LINE_BREAK_TAGS = {
     "address",
@@ -96,6 +107,11 @@ LINE_BREAK_TAGS = {
     "ul",
 }
 HEADER_CELL_MAX_CHARS = 80
+WEEK_HEADING_MAX_CHARS = 120
+# Words and symbols a week heading may carry besides its date ("🗓️ Week of ...").
+WEEK_HEADING_FILLER_RE = re.compile(
+    r"\b(?:week|of|for|the|learning|targets?|agenda|and|to|through)\b|[^a-z0-9]+"
+)
 WEEK_LABEL_PREFIX_RE = re.compile(r"(?:learning\s+targets\s+)?for\s+the\s+week\s*:?\s*$", re.I)
 ROW_CELL_ROLE_PRIORITY = {BlockRole.ASSIGNMENTS: 3, BlockRole.LEARNING: 2, BlockRole.UNKNOWN: 1}
 THIS_WEEK_RE = re.compile(
@@ -434,7 +450,80 @@ def _direct_children(node: HtmlNode, tags: set[str]) -> list[HtmlNode]:
     return [child for child in node.children if isinstance(child, HtmlNode) and child.tag in tags]
 
 
-def _line_text(node: HtmlNode) -> str:
+def _nearest_table(node: HtmlNode) -> HtmlNode | None:
+    cursor = node.parent
+    while cursor is not None and cursor.tag != "table":
+        cursor = cursor.parent
+    return cursor
+
+
+def _week_heading_start(text: str, target_week_start: date) -> date | None:
+    """Return the week announced by heading-like text such as "Week of September 14".
+
+    Only short text that is essentially the heading counts, so a note such as
+    "Unit 2 Exam: September 28-29" inside an agenda does not split it into sections.
+    """
+    normalized = " ".join(text.split())
+    if not normalized or len(normalized) > WEEK_HEADING_MAX_CHARS:
+        return None
+    for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+        for found in pattern.finditer(normalized):
+            ranged = pattern is MONTH_DATE_RE and found.group("range")
+            if not (_has_week_label(normalized, found) or ranged):
+                continue
+            rest = f"{normalized[: found.start()]} {normalized[found.end() :]}".casefold()
+            if len(WEEK_HEADING_FILLER_RE.sub("", rest)) > 4:
+                continue
+            start = _matched_date(found, target_week_start)
+            if start is not None:
+                return start
+    return None
+
+
+def _week_section_filter(
+    node: HtmlNode, target_week_start: date
+) -> Callable[[HtmlNode], bool] | None:
+    """Scope a node that holds several weeks' agendas to the target week's section.
+
+    Pages such as "Past Agendas" put each week's heading beside, not inside, its table,
+    so the only node that contains the target heading also contains every older week.
+    Each element belongs to the last week heading at or before its end in document
+    order. Returns None when the node does not mix weeks, so it is used unchanged.
+    """
+    spans: dict[int, tuple[int, int]] = {}
+    markers: list[tuple[int, bool]] = []
+    counter = 0
+
+    def visit(element: HtmlNode) -> None:
+        nonlocal counter
+        start = counter
+        counter += 1
+        for child in element.children:
+            if isinstance(child, HtmlNode):
+                visit(child)
+        spans[id(element)] = (start, counter - 1)
+        if element.tag not in {"table", "thead", "tbody", "tfoot", "tr"}:
+            week = _week_heading_start(element.text(" "), target_week_start)
+            if week is not None:
+                markers.append((start, -2 <= (week - target_week_start).days <= 4))
+
+    visit(node)
+    if not any(is_target for _, is_target in markers) or all(
+        is_target for _, is_target in markers
+    ):
+        return None
+    markers.sort()
+    positions = [position for position, _ in markers]
+
+    def keep(element: HtmlNode) -> bool:
+        _, end = spans.get(id(element), (0, 0))
+        index = bisect_right(positions, end) - 1
+        return index >= 0 and markers[index][1]
+
+    return keep
+
+
+def _line_text(node: HtmlNode, *, skip_nested_tables: bool = False) -> str:
     """Return node text with one line per paragraph/list item so list entries stay distinct."""
     lines: list[str] = []
     current: list[str] = []
@@ -449,6 +538,8 @@ def _line_text(node: HtmlNode) -> str:
         if isinstance(item, str):
             current.append(item)
             return
+        if skip_nested_tables and item is not node and item.tag == "table":
+            return  # A nested table is captured as its own rows.
         breaks_line = item.tag in LINE_BREAK_TAGS
         if breaks_line:
             flush()
@@ -463,16 +554,38 @@ def _line_text(node: HtmlNode) -> str:
 
 
 def _day_label(value: str) -> str | None:
-    """Return the weekday label for a day cell such as "Th" or "Monday September 14th"."""
+    """Return the weekday label for a day cell such as "Th" or "Monday September 14th".
+
+    Day cells often carry a date and a short schedule note on further lines
+    ("Monday / September 21st / B Day"). Anything longer, or with instructions after
+    the day name, is content rather than a label.
+    """
     stripped = value.strip()
     if DAY_RE.fullmatch(stripped):
         return stripped.rstrip(".")
-    dated = DATED_DAY_RE.fullmatch(stripped)
-    if dated is None:
+    if len(stripped) > DAY_CELL_MAX_CHARS:
         return None
-    date_text = " ".join(dated.group("date").split())
-    if MONTH_DATE_RE.fullmatch(date_text) or NUMERIC_DATE_RE.fullmatch(date_text):
-        return dated.group("day")
+    first, _, rest = stripped.partition("\n")
+    first = first.strip()
+    if DAY_RE.fullmatch(first):
+        label = first.rstrip(".")
+        dated_line = False
+    else:
+        dated = DATED_DAY_RE.fullmatch(first)
+        if dated is None:
+            return None
+        label = dated.group("day")
+        rest = f"{dated.group('date')}\n{rest}"
+        dated_line = True
+    # Joining lines also rejoins a date split over lines ("September" / "10th").
+    remainder = " ".join(rest.split())
+    without_dates = remainder
+    for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+        without_dates = " ".join(pattern.sub(" ", without_dates).split())
+    if dated_line and without_dates == remainder:
+        return None  # "Monday Quiz": text after the day name must start with a date.
+    if not without_dates or DAY_ANNOTATION_RE.fullmatch(without_dates):
+        return label
     return None
 
 
@@ -531,9 +644,16 @@ def _assignment_links(node: HtmlNode, base_url: str) -> list[dict[str, str]]:
     return links
 
 
-def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock]:
+def _agenda_blocks(
+    node: HtmlNode,
+    document: CanvasDocument,
+    target_week_start: date | None = None,
+) -> list[AgendaBlock]:
     blocks: list[AgendaBlock] = []
     order = 0
+    in_target_week = (
+        _week_section_filter(node, target_week_start) if target_week_start else None
+    )
 
     def append(
         text: str,
@@ -569,13 +689,15 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
 
     table_nodes = ([node] if node.tag == "table" else []) + list(node.descendants({"table"}))
     for table_index, table in enumerate(table_nodes):
-        rows = list(table.descendants({"tr"}))
+        # A nested table's rows belong to it alone; counting them for the outer table too
+        # captured every nested row twice.
+        rows = [row for row in table.descendants({"tr"}) if _nearest_table(row) is table]
         headers: list[str] = []
         for row_index, row in enumerate(rows):
             cells = _direct_children(row, {"td", "th"})
-            if not cells:
+            if not cells or (in_target_week is not None and not in_target_week(row)):
                 continue
-            values = [_line_text(cell) for cell in cells]
+            values = [_line_text(cell, skip_nested_tables=True) for cell in cells]
             if not headers and _is_header_row(cells, values):
                 headers = values
             day_labels = [_day_label(value) for value in values]
@@ -621,7 +743,9 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
         id(descendant) for table in table_nodes for descendant in [table, *table.descendants()]
     }
     for semantic in node.descendants(SEMANTIC_TAGS):
-        if id(semantic) in table_descendants:
+        if id(semantic) in table_descendants or (
+            in_target_week is not None and not in_target_week(semantic)
+        ):
             continue
         text = semantic.text(" ")
         role = BlockRole.HEADER if semantic.tag.startswith("h") else BlockRole.UNKNOWN
@@ -632,7 +756,7 @@ def _agenda_blocks(node: HtmlNode, document: CanvasDocument) -> list[AgendaBlock
             assignment_links=_assignment_links(semantic, document.html_url),
         )
 
-    if not blocks:
+    if not blocks and in_target_week is None:
         append(node.text(" "), "canvas_html", BlockRole.UNKNOWN)
     return blocks
 
@@ -971,7 +1095,12 @@ class CanvasAgendaSource:
                 f"after checking {len(documents)} content item(s)."
             )
         score, document, node, matched = max(ranked, key=lambda item: item[0])
-        blocks = _agenda_blocks(node, document)
+        blocks = _agenda_blocks(node, document, self.target_week_start)
+        if not blocks:
+            raise CanvasAgendaNotFound(
+                "The Canvas agenda page mixes several weeks and none of its content "
+                f"belongs to the week of {self.target_week_start.isoformat()}."
+            )
         transcript = _transcript(blocks)
         canonical = {
             "course_id": self.course_id,

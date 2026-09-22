@@ -359,11 +359,13 @@ class SyncService:
         )
         existing_assignments = _assignment_context(recent_course_tasks)
         gemini_model_chain = self.settings.gemini_model_chain_for(course)
+        # The Google Tasks context is deliberately not part of the key. It changes after
+        # every write (including this sync's own), which re-sent unchanged pages to Gemini
+        # and let due dates flip between runs. An unchanged page reuses its extraction.
         extraction_cache_key = (
             f"{self.settings.gemini_cache_key_for(course)}"
             f"|reasoning:{course.gemini_reasoning}"
             f"|instructions:{_stable_hash(course.ai_instructions)[:16]}"
-            f"|context:{_stable_hash(existing_assignments)[:16]}"
         )
         sink.emit(
             RunStage.AUTHENTICATE_SERVICES,
@@ -410,6 +412,11 @@ class SyncService:
                 configured_mode=course.source.extraction.mode,
             )
             state_records = state.records(course_id, capture.source_key)
+            carryover_records = [
+                record
+                for record in state.course_records(course_id)
+                if record.source_key != capture.source_key
+            ]
         extraction_was_cached = outcome is not None
         if outcome is None:
             effective_mode = course.source.extraction.mode
@@ -533,7 +540,7 @@ class SyncService:
 
         stage_started = perf_counter()
         mapped_task_ids: dict[str, list[str]] = {}
-        for record in state_records:
+        for record in [*state_records, *carryover_records]:
             if record.tasklist_id and record.google_task_id:
                 mapped_task_ids.setdefault(record.tasklist_id, []).append(
                     record.google_task_id
@@ -582,6 +589,9 @@ class SyncService:
             remote_tasks=remote_tasks,
             collision_remote_tasks=recent_course_tasks,
             course_prefix=course.prefix,
+            carryover_records=carryover_records,
+            week_start=target_week_start,
+            today=_today(course.timezone),
             include_past=include_past,
             dry_run=True,
         )

@@ -610,6 +610,72 @@ def test_dated_day_cells_schedule_weekday_deadlines_and_duplicate_columns_collap
     ]
 
 
+def test_day_cells_with_schedule_notes_are_still_dated_day_labels():
+    body = """
+    <table>
+      <caption><h4>WEEK OF SEPTEMBER 21-25</h4></caption>
+      <tr><th>Days</th><th>Learning Activities</th><th>Assignments / Homework</th></tr>
+      <tr><td><p>Monday</p><p>September 21st</p><p>B Day</p></td>
+        <td>Stoichiometry</td><td>Access Unit 3 packet here.</td></tr>
+      <tr><td><p>Tuesday</p><p>September</p><p>22nd</p><p>(A)</p></td>
+        <td>Solutions</td><td>Friday Quiz</td></tr>
+    </table>
+    """
+    capture = front_page_source("12506", body, date(2026, 9, 21)).capture(
+        include_image=False
+    )
+    dates = row_date_ranges(capture)
+
+    day_cells = [block for block in capture.blocks if block.role == BlockRole.DAY]
+    assert [block.row_label for block in day_cells] == ["Monday", "Tuesday"]
+    assert [dates[(block.element_id, block.row_index)][0] for block in day_cells] == [
+        date(2026, 9, 21),
+        date(2026, 9, 22),
+    ]
+    # A weekday followed by content is content, not a day label.
+    quiz = next(block for block in capture.blocks if block.text == "Friday Quiz")
+    assert quiz.role == BlockRole.ASSIGNMENTS
+    assert quiz.row_label == "Tuesday"
+
+
+def linear_algebra_week(heading: str, monday_assignment: str) -> str:
+    return f"""
+    <div>
+      <div><h1>🗓️ {heading}</h1></div>
+      <div><p><strong>Learning Targets for the Week:</strong> Ax=b</p></div>
+      <table>
+        <tr><td></td><td>Learning Activities</td><td>Assignments</td></tr>
+        <tr><td>M</td><td>Lesson</td><td>{monday_assignment}</td></tr>
+        <tr><td>T</td><td>Lesson</td><td>Pearson</td></tr>
+      </table>
+      <div><p>📚 See previous weeks</p></div>
+    </div>
+    """
+
+
+def test_page_of_past_weeks_is_scoped_to_the_target_week_section():
+    # Each week's heading sits beside its table, so only the page as a whole contains
+    # the target heading. The last week is also wrapped in an outer table.
+    body = (
+        linear_algebra_week("Week of September 14 to September 18", "Open Pearson")
+        + linear_algebra_week("Week of September 7 to September 11", "Chapter 0 homework")
+        + "<table><tr><td>"
+        + linear_algebra_week("Week of August 31 to September 4", "1.2 Pearson")
+        + "</td></tr></table>"
+    )
+
+    current = front_page_source("11517", body, date(2026, 9, 14)).capture(include_image=False)
+    assert "Open Pearson" in current.transcript
+    assert "Chapter 0 homework" not in current.transcript
+    assert "1.2 Pearson" not in current.transcript
+    assert "September 7" not in current.transcript
+
+    nested = front_page_source("11517", body, date(2026, 8, 31)).capture(include_image=False)
+    assert "Open Pearson" not in nested.transcript
+    # The nested table's rows are captured once, not again as rows of the outer table.
+    assert [block.text for block in nested.blocks].count("1.2 Pearson") == 1
+
+
 def test_narrative_first_row_is_not_a_column_header_and_list_items_stay_separate():
     body = physics_agenda_table(
         "August 17",

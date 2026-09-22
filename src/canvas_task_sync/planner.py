@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections import Counter
 from datetime import date
 
 from canvas_task_sync.gemini import normalized_text
 from canvas_task_sync.google_tasks import GoogleTasksClient, date_from_google_due
-from canvas_task_sync.identity import resolve_logical_ids
+from canvas_task_sync.identity import carryover_matches, resolve_logical_ids
 from canvas_task_sync.managed_notes import (
     compose_task_notes,
     has_managed_delimiter,
@@ -88,6 +90,48 @@ def _course_prefix(prefix: str, title: str) -> bool:
     return folded == header or folded.startswith(f"{header} ")
 
 
+SOURCE_WEEK_PATTERN = re.compile(r":week:(\d{4}-\d{2}-\d{2})$")
+
+
+def _source_week(source_key: str) -> date | None:
+    match = SOURCE_WEEK_PATTERN.search(source_key)
+    return date.fromisoformat(match.group(1)) if match else None
+
+
+def _record_due(record: StateRecord) -> date | None:
+    return date.fromisoformat(record.due_date) if record.due_date else None
+
+
+def _stabilized(desired: DesiredTask, record: StateRecord, today: date | None) -> DesiredTask:
+    """Keep what the last sync wrote while the exact source evidence is unchanged.
+
+    Every re-extraction rewords titles and details slightly and can lose a relative
+    deadline. Those differences are noise when the evidence is identical, and turning a
+    known due date into "uncertain" would erase a deadline the source never withdrew. A
+    changed source is followed as usual.
+    """
+    if normalized_text(record.source_text) != normalized_text(desired.source_text):
+        return desired
+    update: dict[str, object] = {}
+    if record.title and normalized_text(record.title) == normalized_text(desired.title):
+        update["title"] = record.title
+    if record.details:
+        update["details"] = record.details
+    kept = _record_due(record)
+    if desired.due_date is None and desired.due_uncertain and kept and not record.due_uncertain:
+        update.update(
+            due_date=kept,
+            due_uncertain=False,
+            due_uncertain_reason=None,
+            due_basis=(
+                f"{record.due_basis or 'Previously scheduled date'}; kept because this "
+                "extraction could not confirm a date from unchanged evidence"
+            ),
+            historical=bool(today and kept < today),
+        )
+    return desired.model_copy(update=update) if update else desired
+
+
 class SyncPlanner:
     def plan(
         self,
@@ -108,6 +152,9 @@ class SyncPlanner:
         tasklist_ids: dict[str, str] | None = None,
         collision_remote_tasks: list[RemoteTask] | None = None,
         course_prefix: str | None = None,
+        carryover_records: list[StateRecord] | None = None,
+        week_start: date | None = None,
+        today: date | None = None,
     ) -> SyncPlan:
         tasklist_ids = tasklist_ids or {task_list: ""}
         id_to_title = {identifier: title for title, identifier in tasklist_ids.items()}
@@ -172,6 +219,17 @@ class SyncPlanner:
         effective_records = [*state_records, *recovered_records]
         state_by_logical = {record.logical_id: record for record in effective_records}
         logical_ids = resolve_logical_ids(drafts, effective_records)
+        carried_over, superseded, ambiguous = self._carry_over(
+            drafts,
+            logical_ids,
+            known=set(state_by_logical),
+            records=carryover_records or [],
+            remotes={(task.tasklist_id, task.id): task for task in active_remote},
+            week_start=week_start or today,
+        )
+        for index, record in carried_over.items():
+            logical_ids[index] = record.logical_id
+            state_by_logical[record.logical_id] = record
         desired_tasks: list[DesiredTask] = []
         for index, draft in enumerate(drafts):
             logical_id = logical_ids[index]
@@ -205,6 +263,8 @@ class SyncPlanner:
                     "due_uncertain": False,
                     "due_uncertain_reason": None,
                 })
+            elif mapped:
+                desired = _stabilized(desired, mapped, today)
             desired_tasks.append(desired)
 
         actions: list[SyncAction] = []
@@ -244,7 +304,48 @@ class SyncPlanner:
         used_remote_keys: set[tuple[str | None, str]] = set()
         collision_remote_tasks = collision_remote_tasks or active_remote
 
-        for desired in desired_tasks:
+        for index, desired in enumerate(desired_tasks):
+            if index in superseded:
+                newer = superseded[index]
+                actions.append(
+                    SyncAction(
+                        kind=SyncActionKind.IGNORED,
+                        title=desired.title,
+                        logical_id=desired.logical_id,
+                        due_date=desired.due_date,
+                        reason=(
+                            "A newer agenda week already tracks this item; the older agenda "
+                            "will not change it."
+                        ),
+                        evidence=desired.source_text,
+                        source_anchor=desired.source_anchor,
+                        remote_task_id=newer.google_task_id,
+                        desired=desired,
+                        task_list=id_to_title.get(
+                            newer.tasklist_id, desired.destination_task_list
+                        ),
+                    )
+                )
+                continue
+            if index in ambiguous:
+                actions.append(
+                    SyncAction(
+                        kind=SyncActionKind.UNCERTAIN,
+                        title=desired.title,
+                        logical_id=desired.logical_id,
+                        due_date=desired.due_date,
+                        reason=(
+                            f"{ambiguous[index]} unfinished tasks from other agenda weeks "
+                            "match this item; resolve the duplicates so it can be tracked."
+                        ),
+                        conflict=True,
+                        evidence=desired.source_text,
+                        source_anchor=desired.source_anchor,
+                        desired=desired,
+                        task_list=desired.destination_task_list,
+                    )
+                )
+                continue
             state_record = state_by_logical.get(desired.logical_id)
             marker_remotes = marker_matches.get(desired.logical_id, [])
             if len(marker_remotes) > 1:
@@ -468,6 +569,91 @@ class SyncPlanner:
             fallback_reasons=fallback_reasons,
             actions=actions,
         )
+
+    @staticmethod
+    def _carry_over(
+        drafts: list[DraftTask],
+        logical_ids: dict[int, str],
+        *,
+        known: set[str],
+        records: list[StateRecord],
+        remotes: dict[tuple[str | None, str], RemoteTask],
+        week_start: date | None,
+    ) -> tuple[dict[int, StateRecord], dict[int, StateRecord], dict[int, int]]:
+        """Link items this agenda does not track yet to tasks made from another agenda.
+
+        Each agenda week is its own source, so an exam announced again next week, often
+        with a new date, would otherwise become a second task. A still-open task from an
+        earlier agenda that is due this week or later is adopted and updated instead. A
+        newer agenda's task is never changed by an older one, and several open matches
+        are left for a person rather than guessed.
+
+        Returns adopted records, drafts a newer agenda already tracks, and drafts with
+        several open matches (by count).
+        """
+        carried: dict[int, StateRecord] = {}
+        superseded: dict[int, StateRecord] = {}
+        ambiguous: dict[int, int] = {}
+        live = [
+            record
+            for record in records
+            if record.logical_id not in known
+            and not record.manually_managed
+            and record.google_task_id
+            and (record.tasklist_id, record.google_task_id) in remotes
+        ]
+        if not live:
+            return carried, superseded, ambiguous
+
+        claims: dict[int, StateRecord] = {}
+        for index, draft in enumerate(drafts):
+            if logical_ids[index] in known:
+                continue
+            newer: list[StateRecord] = []
+            adoptable: list[StateRecord] = []
+            for match in carryover_matches(draft, live):
+                record = match.record
+                due = _record_due(record)
+                if not match.reschedulable and due != draft.due_date:
+                    continue  # A recurring generic item on a new date is a new occurrence.
+                record_week = _source_week(record.source_key)
+                if week_start and record_week and record_week > week_start:
+                    if draft.due_date is None or draft.due_date >= record_week:
+                        newer.append(record)
+                    continue
+                remote = remotes[(record.tasklist_id, str(record.google_task_id))]
+                if remote.status == "completed" or (week_start and due and due < week_start):
+                    continue
+                adoptable.append(record)
+            if newer:
+                superseded[index] = newer[0]
+                continue
+            if len(adoptable) > 1:
+                same_date = [
+                    record for record in adoptable if _record_due(record) == draft.due_date
+                ]
+                if len(same_date) == 1:
+                    adoptable = same_date
+            if len(adoptable) > 1:
+                # The latest agenda's task supersedes stale copies left by older agendas.
+                weeks = [_source_week(record.source_key) or date.min for record in adoptable]
+                latest = [
+                    record
+                    for record, week in zip(adoptable, weeks, strict=True)
+                    if week == max(weeks)
+                ]
+                if len(latest) == 1:
+                    adoptable = latest
+            if len(adoptable) == 1:
+                claims[index] = adoptable[0]
+            elif adoptable:
+                ambiguous[index] = len(adoptable)
+
+        claimed = Counter(record.logical_id for record in claims.values())
+        for index, record in claims.items():
+            if claimed[record.logical_id] == 1:
+                carried[index] = record
+        return carried, superseded, ambiguous
 
 
 def apply_sync_plan(

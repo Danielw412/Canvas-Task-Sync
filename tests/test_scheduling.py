@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from canvas_task_sync.gemini import GeminiExtractor
 from canvas_task_sync.models import (
     ActionKind,
@@ -711,3 +713,291 @@ def test_weekday_only_explicit_due_date_resolves_within_the_agenda_week(
     assert drafts[0].due_date == date(2026, 5, 28)
     assert drafts[0].due_uncertain is False
     assert drafts[0].due_basis == "Weekday explicitly stated in source evidence"
+
+
+def _row_task(source_text, **overrides):
+    # Row r2 of the fixture is Tuesday May 26, 2026, in the Assignments column.
+    fields = {
+        "source_anchor": "table:agenda_table:r2:c2",
+        "source_text": source_text,
+        "row_label": "T",
+        "classification": TaskClassification.HOMEWORK,
+        "action_kind": ActionKind.COMPLETE,
+        "title_stem": "Assignment",
+        "confidence": Confidence.HIGH,
+    }
+    return ExtractedTask(**{**fields, **overrides})
+
+
+def _single_draft(capture, course, task):
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="fixture",
+        course=course,
+        capture=capture,
+        tasks=[task],
+        today=date(2026, 5, 1),
+    )
+    assert not uncertain
+    assert len(drafts) == 1
+    return drafts[0]
+
+
+@pytest.mark.parametrize(
+    ("source_text", "explicit_due_date", "expected"),
+    [
+        # Abbreviated month with a period: the shape of the Frankenstein deadline.
+        ("Frankenstein due Oct. 8. Here is the Intro to novel.", "Oct. 8", date(2026, 10, 8)),
+        ("Revised paragraph due Sept 21", "Sept. 21", date(2026, 9, 21)),
+        ("All unit 2 exams must be completed by October 9th", "October 9th", date(2026, 10, 9)),
+        # Gemini sometimes returns a timestamp or the wrong year; the evidence decides.
+        ("Frankenstein due Oct. 8.", "2026-10-08T00:00:00", date(2026, 10, 8)),
+        ("Exam will be on Monday, 8/31.", "2020-08-31", date(2026, 8, 31)),
+        # No usable proposal: a single date in the evidence is the deadline.
+        ("Due on Monday August 24: Unit 1 Assignment 1", None, date(2026, 8, 24)),
+        ("Frankenstein due Oct. 8.", "the date listed", date(2026, 10, 8)),
+    ],
+)
+def test_explicit_dates_resolve_from_evidence_in_common_teacher_formats(
+    spanish_capture, spanish_course, source_text, explicit_due_date, expected
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            source_text,
+            due_relation=DueRelation.EXPLICIT_DATE,
+            explicit_due_date=explicit_due_date,
+        ),
+    )
+
+    assert draft.due_date == expected
+    assert draft.due_uncertain is False
+    assert draft.due_basis == "Explicit date stated in source evidence"
+
+
+def test_weekday_with_a_calendar_date_uses_that_date_not_the_next_weekday(
+    spanish_capture, spanish_course
+):
+    # Gemini called this same_day. On the May 26 row, "Monday" alone would mean June 1.
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Exam will be on Monday, 8/31.",
+            task_type=TaskType.TEST,
+            action_kind=ActionKind.OTHER,
+            title_stem="Crime and Punishment Exam",
+            due_relation=DueRelation.SAME_DAY,
+        ),
+    )
+
+    assert draft.due_date == date(2026, 8, 31)
+
+
+def test_weekday_and_date_that_disagree_stay_uncertain(spanish_capture, spanish_course):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Quiz Tuesday, 8/31",  # August 31, 2026 is a Monday.
+            task_type=TaskType.QUIZ,
+            action_kind=ActionKind.OTHER,
+            title_stem="Vocabulary",
+            due_relation=DueRelation.EXPLICIT_DATE,
+            explicit_due_date="Tuesday",
+        ),
+    )
+
+    assert draft.due_date is None
+    assert draft.due_uncertain is True
+    assert "disagree" in draft.due_uncertain_reason
+
+
+@pytest.mark.parametrize(
+    ("relation", "explicit_due_date"),
+    [(DueRelation.SAME_DAY, None), (DueRelation.EXPLICIT_DATE, "next week")],
+)
+def test_assessment_announced_for_next_week_is_not_placed_on_its_row(
+    spanish_capture, spanish_course, relation, explicit_due_date
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Exam will be next week.",
+            task_type=TaskType.TEST,
+            action_kind=ActionKind.OTHER,
+            title_stem="Crime and Punishment Exam",
+            due_relation=relation,
+            explicit_due_date=explicit_due_date,
+        ),
+    )
+
+    assert draft.due_date is None
+    assert draft.due_uncertain is True
+    assert "vague" in draft.due_uncertain_reason
+
+
+@pytest.mark.parametrize(
+    ("source_text", "action_kind", "relation", "explicit_due_date", "expected", "basis"),
+    [
+        # A same-day deadline in the evidence beats the next-class homework default.
+        (
+            "Time in class for Pearson Study Plan. Closes at 9 pm",
+            ActionKind.COMPLETE,
+            DueRelation.NEXT_CLASS,
+            None,
+            date(2026, 5, 26),
+            "Same-day deadline stated in source evidence",
+        ),
+        # "Tomorrow" beats the same-day default for bring actions.
+        (
+            "Bring your copy of the novel to class tomorrow.",
+            ActionKind.BRING,
+            DueRelation.SAME_DAY,
+            None,
+            date(2026, 5, 27),
+            "Next class stated in source evidence",
+        ),
+        # An explicit relation whose "date" is relative wording falls back to row policy.
+        (
+            "Complete the reading survey for start of class tomorrow.",
+            ActionKind.COMPLETE,
+            DueRelation.EXPLICIT_DATE,
+            "tomorrow",
+            date(2026, 5, 27),
+            "Next class stated in source evidence",
+        ),
+    ],
+)
+def test_timing_stated_in_the_evidence_outranks_relation_defaults(
+    spanish_capture,
+    spanish_course,
+    source_text,
+    action_kind,
+    relation,
+    explicit_due_date,
+    expected,
+    basis,
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            source_text,
+            action_kind=action_kind,
+            due_relation=relation,
+            explicit_due_date=explicit_due_date,
+        ),
+    )
+
+    assert (draft.due_date, draft.due_basis) == (expected, basis)
+
+
+def test_undated_explicit_assessment_falls_back_to_its_agenda_row(
+    spanish_capture, spanish_course
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Take the Unit 2 Atomic Theory Free Response Test In Class",
+            task_type=TaskType.TEST,
+            action_kind=ActionKind.OTHER,
+            title_stem="Unit 2 Atomic Theory Test",
+            due_relation=DueRelation.EXPLICIT_DATE,
+            explicit_due_date="in class",
+        ),
+    )
+
+    assert draft.due_date == date(2026, 5, 26)
+    assert draft.due_basis == "Assessment scheduled on its agenda row"
+
+
+def test_fraction_is_not_read_as_a_calendar_date(spanish_capture, spanish_course):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Finish 1/2 of the packet for tomorrow",
+            due_relation=DueRelation.EXPLICIT_DATE,
+            explicit_due_date=None,
+        ),
+    )
+
+    assert draft.due_date == date(2026, 5, 27)
+
+
+@pytest.mark.parametrize(
+    ("title_stem", "task_type", "expected"),
+    [
+        ("Unit 2 Exam FRQ Section", TaskType.TEST, "[SPANISH] Unit 2 FRQ Exam"),
+        ("Unit 2 FRQ Section Exam", TaskType.TEST, "[SPANISH] Unit 2 FRQ Exam"),
+        ("Crime and Punishment Exam", TaskType.TEST, "[SPANISH] Crime and Punishment Exam"),
+        ("Section A Test", TaskType.TEST, "[SPANISH] Section A Test"),
+        ("Course Final", TaskType.TEST, "[SPANISH] Course Final"),
+        ("Quiz on Chapter 3", TaskType.QUIZ, "[SPANISH] Chapter 3 Quiz"),
+        ("Vocabulary", TaskType.QUIZ, "[SPANISH] Vocabulary Quiz"),
+    ],
+)
+def test_assessment_titles_have_one_canonical_form(
+    spanish_capture, spanish_course, title_stem, task_type, expected
+):
+    draft = _single_draft(
+        spanish_capture,
+        spanish_course,
+        _row_task(
+            "Assessment in class",
+            task_type=task_type,
+            action_kind=ActionKind.OTHER,
+            title_stem=title_stem,
+            due_relation=DueRelation.SAME_DAY,
+        ),
+    )
+
+    assert draft.title == expected
+
+
+def test_date_stated_in_a_day_cell_wins_over_counting_from_the_week_heading():
+    # The heading still names last week, but each day cell states its own date.
+    blocks = [
+        AgendaBlock(
+            anchor="header",
+            element_id="agenda",
+            kind="heading",
+            role=BlockRole.HEADER,
+            text="September 14-18, 2026",
+        ),
+        AgendaBlock(
+            anchor="table:agenda:r1:c0",
+            element_id="agenda",
+            kind="table_cell",
+            role=BlockRole.DAY,
+            row_index=1,
+            column_index=0,
+            row_label="Monday",
+            text="Monday\nSeptember 21st\nB Day",
+        ),
+        AgendaBlock(
+            anchor="table:agenda:r2:c0",
+            element_id="agenda",
+            kind="table_cell",
+            role=BlockRole.DAY,
+            row_index=2,
+            column_index=0,
+            row_label="Tuesday",
+            text="Tuesday\nSeptember 29th",  # The wrong weekday for that date: ignored.
+        ),
+    ]
+    capture = SourceCapture(
+        source_key="canvas:chem:week:2026-09-21",
+        source_url="https://canvas.example/chem",
+        page_hash="fixture",
+        transcript="\n".join(block.text for block in blocks),
+        blocks=blocks,
+    )
+
+    dates = row_date_ranges(capture)
+
+    assert dates[("agenda", 1)] == (date(2026, 9, 21), date(2026, 9, 21))
+    assert dates[("agenda", 2)] == (date(2026, 9, 22), date(2026, 9, 22))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -230,6 +230,84 @@ def test_course_ai_instructions_change_prompt_and_extraction_cache_key(
     assert "Do not create homework tasks for reading assignments." in str(
         backend.kwargs[1]["prompt"]
     )
+
+
+def test_unchanged_page_reuses_its_extraction_after_the_sync_writes_tasks(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    # The recent-task context sent to Gemini changes after every write. Keying the cache
+    # on it re-extracted unchanged pages, and due dates flipped between runs.
+    service, _source, tasks, backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    first = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    service.apply(first)
+    assert tasks.created
+
+    second = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+
+    assert backend.calls == 1
+    assert second.extraction_was_cached is True
+    assert second.extraction_cache_key == first.extraction_cache_key
+
+
+def test_next_weeks_agenda_adopts_tasks_created_from_last_weeks_agenda(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, source, tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    week = date(2026, 5, 25)
+    first = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        target_week_start=week,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    service.apply(first)
+    created = len(tasks.created)
+    # The same items listed again on the next agenda, which is a separate source.
+    source.capture_value = spanish_capture.model_copy(
+        update={"source_key": "canvas:spanish:week:2026-05-25"}
+    )
+
+    second = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        target_week_start=week,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+
+    kinds = [action.kind.value for action in second.plan.actions if action.desired]
+    assert kinds and set(kinds) == {"unchanged"}
+    service.apply(second)
+    assert len(tasks.created) == created
+    with StateStore(service.settings.resolved_state_path, writable=False) as state:
+        assert len(state.records("spanish", "canvas:spanish:week:2026-05-25")) == created
 
 
 def test_course_model_preferences_override_project_chain_and_cache_key(

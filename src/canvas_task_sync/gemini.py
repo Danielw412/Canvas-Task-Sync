@@ -24,7 +24,7 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 
-EXTRACTOR_VERSION = "visual-agenda-v10-multiday-assessments-and-reasoning"
+EXTRACTOR_VERSION = "visual-agenda-v11-verbatim-dates"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
 MIN_GEMINI_DELAY_SECONDS = 10.0
 MAX_OUTPUT_TOKENS = 16_384
@@ -427,6 +427,8 @@ Rules:
   assignments or assessments and do not invent a second wording variant; still return the current
   source candidate once so the deterministic reconciliation layer can update or preserve it.
 - Skip holidays, learning targets, and teacher narration about grading or introducing material.
+- Skip make-up, retake, and late-work policies (for example "All make up exams must be
+  completed by ...") unless the source assigns that work to every student.
 - Use one task per distinct action.
 - Use concise English title text without the course prefix, normally 2-5 words in sentence case.
 - Fill details with one to three concise sentences explaining what the student must do, using only
@@ -438,9 +440,13 @@ Rules:
 - source_anchor must be one of the supplied anchors when it can be identified.
 - Items visibly in the Assignments column are normally homework with next_class timing.
 - Row-bound {same_day} actions normally use same_day timing.
-- Only use explicit_date when the source itself states the date.
-- For an assessment without a date in its wording, return same_day so application code can use
-  the dated agenda row. Never use next_class for a quiz, test, or exam.
+- Only use explicit_date when the source itself states the date or weekday. Copy
+  explicit_due_date exactly as the source writes it, for example "Oct. 8" or "Monday, 8/31";
+  do not reformat it, add a year, or convert relative wording such as "tomorrow" into a date.
+- For an assessment on its agenda row without a date in its wording, return same_day so
+  application code can use the dated agenda row. Never use next_class for a quiz, test, or exam.
+- When the source gives only vague timing, such as "next week" or "TBD", use due_relation=none
+  and add a warning; do not guess a day.
 - Never calculate or invent a calendar date. Return only the semantic due relation.
 - Use confidence=high only when the action, source evidence, and row are legible.
 

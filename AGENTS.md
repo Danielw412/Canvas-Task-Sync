@@ -15,8 +15,8 @@ The web app and Chrome extension are control/acquisition layers around that same
 - `sync_service.py` — main orchestration. Builds immutable `PreparedPlan`s, hashes config/source/remote state, revalidates before writes, then delegates apply. Start here for end-to-end sync flow; keep domain policy in the modules below instead of growing this file.
 - `gemini.py` — Gemini prompt/schema, model fallback, extraction modes, evidence reconciliation, and extraction quality checks. Gemini determines semantic meaning only; it does **not** own dates, IDs, or final sync decisions.
 - `scheduling.py` — authoritative deadline/date policy and conversion from extracted candidates to deterministic draft tasks. Date bugs belong here.
-- `identity.py` — durable logical IDs and conservative matching across source edits/reordering. Never base primary identity on Gemini wording.
-- `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior.
+- `identity.py` — durable logical IDs and conservative matching across source edits/reordering. Never base primary identity on Gemini wording. Evidence is compared with dates stripped, and differing item numbers ("Unit 2" vs "Unit 3") never match.
+- `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior, and carry-over: each Canvas week is its own source, so an open task from an earlier week's agenda is adopted (not duplicated) when the item reappears.
 - `google_tasks.py` — Google Tasks transport only. Updates deliberately preserve completion/user-controlled fields.
 - `state.py` — durable sync identity mappings + extraction cache in `.canvas-task-sync/state.sqlite3`.
 - `memory.py` — `release_memory()`: collect, then hand glibc's freed pages back. Called when the
@@ -119,6 +119,7 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Never auto-delete a Google Task, recreate a mapped task that was deleted remotely, or claim an ambiguous unmanaged collision.
 - Apply only the reviewed/prepared state: config, source capture, and relevant remote tasks are re-hashed/revalidated before writes.
 - Deadlines and identity are deterministic application policy. If Gemini output conflicts with exact evidence, keep the item uncertain rather than guessing.
+- An unchanged source page reuses its cached extraction. Keep volatile Google Tasks context out of the extraction cache key; it changes after every write and made due dates flip between runs.
 - Preserve user completion state and user-authored notes. Google Tasks writes should touch only managed title/notes/due fields.
 - Canvas bearer tokens stay local and may only be sent to the configured same-origin Canvas API.
 - Browser captures remain bounded and memory-only; do not persist screenshots/page content or accept credential-like metadata.

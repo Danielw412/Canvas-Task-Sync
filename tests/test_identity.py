@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 
-from canvas_task_sync.identity import initial_logical_id, resolve_logical_ids
+from canvas_task_sync.identity import (
+    CarryoverMatch,
+    carryover_matches,
+    initial_logical_id,
+    resolve_logical_ids,
+)
 from canvas_task_sync.models import (
     ActionKind,
     DraftTask,
@@ -144,6 +149,107 @@ def test_unique_table_row_move_retains_identity():
     original = _draft(anchor="table:agenda_table:r2:c2")
     moved = _draft(anchor="table:agenda_table:r7:c2")
     assert resolve_logical_ids([moved], [_record(original, "moved-id")]) == {0: "moved-id"}
+
+
+def test_rescheduled_exam_sections_keep_their_identity():
+    anchor = "canvas:physics-agenda:1"
+    frq = _draft(anchor=anchor, ordinal=0, source_text="September 28 FRQ section",
+                 title="[PHYSICS] Unit 2 FRQ Exam", fingerprint="frq-28")
+    mcq = _draft(anchor=anchor, ordinal=1, source_text="September 29 MCQ section",
+                 title="[PHYSICS] Unit 2 MCQ Exam", fingerprint="mcq-29")
+    moved = [
+        _draft(anchor=anchor, ordinal=0, source_text="October 5 FRQ section",
+               title="[PHYSICS] Unit 2 FRQ Exam", fingerprint="frq-5"),
+        _draft(anchor=anchor, ordinal=1, source_text="October 6 MCQ section",
+               title="[PHYSICS] Unit 2 MCQ Exam", fingerprint="mcq-6"),
+    ]
+
+    resolved = resolve_logical_ids(moved, [_record(frq, "frq-id"), _record(mcq, "mcq-id")])
+
+    assert resolved == {0: "frq-id", 1: "mcq-id"}
+
+
+def test_replaced_row_content_is_not_paired_by_position():
+    # Pairing these would rename, and pass the completion of, an unrelated task.
+    original = _draft(source_text="Unit 1 Assignment 3 (U1A3)",
+                      title="[PHYSICS] Unit 1 Assignment 3", fingerprint="u1a3")
+    renumbered = _draft(source_text="Submit Unit 1 Assignment 4",
+                        title="[PHYSICS] Unit 1 Assignment 4", fingerprint="u1a4")
+    unrelated = _draft(source_text="Make sure you bring a book to class tomorrow",
+                       title="[ENGLISH] Bring a book", fingerprint="book")
+    survey = _draft(source_text="Complete Book Love reading survey for start of class",
+                    title="[ENGLISH] Book Love survey", fingerprint="survey")
+
+    assert resolve_logical_ids([renumbered], [_record(original, "u1a3-id")])[0] != "u1a3-id"
+    assert resolve_logical_ids([unrelated], [_record(survey, "survey-id")])[0] != "survey-id"
+
+
+def test_item_keeps_identity_when_order_based_anchors_shift():
+    original = _draft(anchor="canvas:week:12",
+                      source_text="Finish annotating prompt and outlining response for tomorrow.",
+                      title="[ENGLISH] Annotate prompt", fingerprint="annotate")
+    shifted = original.model_copy(update={"source_anchor": "canvas:week:13"})
+
+    assert resolve_logical_ids([shifted], [_record(original, "annotate-id")]) == {
+        0: "annotate-id"
+    }
+
+
+def test_carryover_matches_the_same_item_despite_wording_but_not_other_numbers():
+    last_week = _record(
+        _draft(source_text="Unit 1 Assignment 2 (U1A2)",
+               title="[PHYSICS] Unit 1 Assignment 2 (U1A2)"),
+        "u1a2",
+    )
+    submitted = _draft(source_text="Submit Unit 1 Assignment 2 (U1A2)",
+                       title="[PHYSICS] Submit Unit 1 Assignment 2 (U1A2)")
+    exam = _record(
+        _draft(source_text="October 5 FRQ section", title="[PHYSICS] Unit 2 FRQ Exam")
+        .model_copy(update={"task_type": TaskType.TEST}),
+        "exam",
+    )
+    moved_exam = _draft(
+        source_text="October 6 FRQ section", title="[PHYSICS] Unit 2 FRQ Section Exam"
+    ).model_copy(update={"task_type": TaskType.TEST})
+    pearson = _record(_draft(source_text="1.4 Pearson", title="[LINALG] Pearson"), "p14")
+    next_pearson = _draft(source_text="1.5 Pearson", title="[LINALG] Pearson")
+    paragraph = _record(
+        _draft(source_text="Complete paragraph for Monday", title="[ENGLISH] Paragraph"),
+        "para",
+    )
+    other_paragraph = _draft(source_text="Outline a new prompt response",
+                             title="[ENGLISH] Paragraph")
+
+    assert carryover_matches(submitted, [last_week]) == [
+        CarryoverMatch(last_week, reschedulable=True)
+    ]
+    assert carryover_matches(moved_exam, [exam]) == [CarryoverMatch(exam, reschedulable=True)]
+    assert carryover_matches(next_pearson, [pearson]) == []
+    assert carryover_matches(other_paragraph, [paragraph]) == []
+
+
+def test_only_restated_dates_let_a_generic_title_follow_a_reschedule():
+    novel = _record(
+        _draft(source_text="Frankenstein due Oct. 8.", title="[ENGLISH] Read Frankenstein"),
+        "novel",
+    )
+    moved_novel = _draft(source_text="Frankenstein due Oct. 13.",
+                         title="[ENGLISH] Read Frankenstein")
+    practice = _record(
+        _draft(source_text="Completar actividades de práctica - VHL",
+               title="[SPANISH] VHL practice"),
+        "vhl",
+    )
+    next_practice = _draft(source_text="Completar actividades de práctica - VHL",
+                           title="[SPANISH] VHL practice")
+
+    assert carryover_matches(moved_novel, [novel]) == [
+        CarryoverMatch(novel, reschedulable=True)
+    ]
+    # Weekly practice recurs: it matches only a task on the same date (planner's rule).
+    assert carryover_matches(next_practice, [practice]) == [
+        CarryoverMatch(practice, reschedulable=False)
+    ]
 
 
 def test_ambiguous_duplicate_row_move_does_not_guess():

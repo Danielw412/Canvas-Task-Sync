@@ -35,22 +35,59 @@ MONTHS = {
     "october": 10,
     "november": 11,
     "december": 12,
+    # Teachers abbreviate freely ("Oct. 8", "Sept 21"); an unparsed month silently drops
+    # an explicit deadline.
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
-MONTH_PATTERN = "|".join(name.title() for name in MONTHS)
+MONTH_PATTERN = "|".join(sorted(MONTHS, key=len, reverse=True))
+ORDINAL = r"(?:st|nd|rd|th)?"
 DATE_RANGE_PATTERN = re.compile(
-    rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<start>\d{{1,2}})\s*"
-    rf"(?:[-\u2013\u2014]\s*(?:(?P<end_month>{MONTH_PATTERN})\s+)?"
-    rf"(?P<end>\d{{1,2}}))?\s*,\s*(?P<year>\d{{4}})\b",
+    rf"\b(?P<month>{MONTH_PATTERN})\.?\s+(?P<start>\d{{1,2}}){ORDINAL}\s*"
+    rf"(?:[-\u2013\u2014]\s*(?:(?P<end_month>{MONTH_PATTERN})\.?\s+)?"
+    rf"(?P<end>\d{{1,2}}){ORDINAL})?\s*,\s*(?P<year>\d{{4}})\b",
     re.IGNORECASE,
 )
-ISO_DATE_PATTERN = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+# Gemini sometimes returns a timestamp ("2026-10-08T00:00:00"), so no trailing word boundary.
+ISO_DATE_PATTERN = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 MONTH_DAY_PATTERN = re.compile(
-    rf"\b(?P<month>{MONTH_PATTERN})\s+(?P<day>\d{{1,2}})(?:\s*,\s*(?P<year>\d{{4}}))?\b",
+    rf"\b(?P<month>{MONTH_PATTERN})\.?\s+(?P<day>\d{{1,2}}){ORDINAL}"
+    rf"(?:\s*,\s*(?P<year>\d{{4}}))?\b",
     re.IGNORECASE,
 )
 NUMERIC_MONTH_DAY_PATTERN = re.compile(
     r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})(?:/(?P<year>\d{2}|\d{4}))?\b"
 )
+# "Complete 1/2 of the packet" is a fraction, not January 2.
+FRACTION_SUFFIX_PATTERN = re.compile(r"\s*of\b", re.IGNORECASE)
+TIME_OF_DAY_PATTERN = re.compile(
+    r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|\b\d{1,2}:\d{2}\b",
+    re.IGNORECASE,
+)
+LIST_ENUMERATOR_PATTERN = re.compile(r"^\s*\d{1,2}[.)]\s+", re.MULTILINE)
+# Timing too vague to place on a calendar. An assessment "next week" is not on its row.
+VAGUE_TIMING_PATTERN = re.compile(
+    r"\b(?:next\s+week|later\s+this\s+week|upcoming|coming\s+up|tb[ad]|"
+    r"to\s+be\s+(?:announced|determined)|(?:date\s+)?(?:is\s+)?unclear|"
+    r"not\s+yet\s+(?:scheduled|announced)|will\s+be\s+announced)\b",
+    re.IGNORECASE,
+)
+SAME_DAY_TIMING_PATTERN = re.compile(
+    r"\b(?:today|tonight|end\s+of\s+(?:the\s+)?(?:class|period|day)|"
+    r"(?:at|by)\s+midnight|closes?\s+at|due\s+(?:at|by)\s+\d)",
+    re.IGNORECASE,
+)
+NEXT_CLASS_TIMING_PATTERN = re.compile(r"\b(?:tomorrow|next\s+class)\b", re.IGNORECASE)
 
 DAY_ALIASES = {
     "m": 0,
@@ -63,6 +100,7 @@ DAY_ALIASES = {
     "tuesday": 1,
     "w": 2,
     "wed": 2,
+    "weds": 2,
     "wednesday": 2,
     "th": 3,
     "thu": 3,
@@ -106,6 +144,15 @@ SECTION_NAME_PATTERN = re.compile(
     r"\b(?P<name>free\s+response|multiple\s+choice)\b",
     re.IGNORECASE,
 )
+BARE_SECTION_ACRONYM_PATTERN = re.compile(
+    r"\b(?P<acronym>[A-Z]{2,5})\s+(?i:section|part)\b"
+)
+ASSESSMENT_WORD_PATTERN = re.compile(r"\b(?:quiz|test|exam|midterm|final)\b", re.IGNORECASE)
+# "Section"/"Part" is filler unless it names the section ("Part 2", "Section A").
+SECTION_FILLER_PATTERN = re.compile(
+    r"\b(?:section|part)s?\b(?!\s+(?:\d|[A-Za-z]\b))", re.IGNORECASE
+)
+ASSESSMENT_LEAD_PATTERN = re.compile(r"^(?:on|over|for|about|covering)\s+", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -187,6 +234,26 @@ def _on_or_after(value: date, weekday: int) -> date:
     return value + timedelta(days=(weekday - value.weekday()) % 7)
 
 
+def _stated_row_date(day_texts: list[str], weekday: int, agenda_start: date) -> date | None:
+    """Return the date a day cell states ("Monday September 21st"), when it is unambiguous.
+
+    A stated date is more reliable than counting weekdays from the week heading, which
+    drifts when a table skips a day or its heading is off by one. It is used only when
+    it agrees with the row's weekday and falls near the selected agenda week.
+    """
+    values = {
+        mention.value
+        for text in day_texts
+        for mention in _calendar_date_mentions(text, agenda_start)
+    }
+    if len(values) != 1:
+        return None
+    (value,) = values
+    if value.weekday() != weekday or not -7 <= (value - agenda_start).days <= 13:
+        return None
+    return value
+
+
 def row_date_ranges(capture: SourceCapture) -> dict[tuple[str, int], tuple[date, date]]:
     agenda_range = find_agenda_range(capture)
     if agenda_range is None:
@@ -194,10 +261,14 @@ def row_date_ranges(capture: SourceCapture) -> dict[tuple[str, int], tuple[date,
     agenda_start, _ = agenda_range
 
     rows: dict[tuple[str, int], str] = {}
+    day_texts: dict[tuple[str, int], list[str]] = defaultdict(list)
     for block in capture.blocks:
         if block.row_index is None or not block.row_label:
             continue
-        rows.setdefault((block.element_id, block.row_index), block.row_label)
+        key = (block.element_id, block.row_index)
+        rows.setdefault(key, block.row_label)
+        if block.role == BlockRole.DAY:
+            day_texts[key].append(block.text)
 
     result: dict[tuple[str, int], tuple[date, date]] = {}
     element_ids = sorted({element_id for element_id, _ in rows})
@@ -216,7 +287,9 @@ def row_date_ranges(capture: SourceCapture) -> dict[tuple[str, int], tuple[date,
             if day_range is None:
                 continue
             start_weekday, end_weekday = day_range
-            row_start = _on_or_after(cursor, start_weekday)
+            row_start = _stated_row_date(
+                day_texts.get((element_id, row_index), []), start_weekday, agenda_start
+            ) or _on_or_after(cursor, start_weekday)
             row_end = _on_or_after(row_start, end_weekday)
             if row_end < row_start:
                 row_end += timedelta(days=7)
@@ -296,6 +369,8 @@ def _calendar_date_mentions(
             ),
         )
     for match in NUMERIC_MONTH_DAY_PATTERN.finditer(text):
+        if FRACTION_SUFFIX_PATTERN.match(text, match.end()):
+            continue
         append(
             match,
             _date_for_month_day(
@@ -312,27 +387,129 @@ def _calendar_dates_in_text(text: str, source_date: date | None) -> set[date]:
     return {mention.value for mention in _calendar_date_mentions(text, source_date)}
 
 
-def _explicit_date(
-    task: ExtractedTask,
-    reference_date: date | None,
-    *,
-    supporting_text: str = "",
-    row_date: date | None = None,
-) -> date | None:
-    if not task.explicit_due_date:
+def _named_weekdays(text: str) -> set[int]:
+    return {DAY_ALIASES[match.group(1).casefold()] for match in WEEKDAY_PATTERN.finditer(text)}
+
+
+def _stated_timing(text: str) -> DueRelation | None:
+    """Return the relation the evidence itself states ("closes at 9 pm", "for tomorrow")."""
+    same_day = SAME_DAY_TIMING_PATTERN.search(text) is not None
+    next_class = NEXT_CLASS_TIMING_PATTERN.search(text) is not None
+    if same_day == next_class:
         return None
-    proposed_dates = _calendar_dates_in_text(task.explicit_due_date, reference_date)
+    return DueRelation.SAME_DAY if same_day else DueRelation.NEXT_CLASS
+
+
+def strip_date_references(text: str) -> str:
+    """Return evidence without dates, weekdays, times, or list numbering.
+
+    A rescheduled item keeps its wording but changes its dates ("September 28 FRQ
+    section" becomes "October 5 FRQ section"), so identity must compare what is left.
+    """
+    value = LIST_ENUMERATOR_PATTERN.sub(" ", text)
+    for pattern in (
+        ISO_DATE_PATTERN,
+        MONTH_DAY_PATTERN,
+        NUMERIC_MONTH_DAY_PATTERN,
+        TIME_OF_DAY_PATTERN,
+        WEEKDAY_PATTERN,
+    ):
+        value = pattern.sub(" ", value)
+    return " ".join(value.split())
+
+
+def has_calendar_date(text: str) -> bool:
+    # Only presence matters; a leap-year reference accepts every month/day, even Feb 29.
+    return bool(_calendar_date_mentions(text, date(2024, 1, 1)))
+
+
+def identity_numbers(text: str) -> set[str]:
+    """Numbers that name an item ("Unit 2", "chapter 3", "1.4"), excluding dates and times."""
+    return set(re.findall(r"\d+", strip_date_references(text)))
+
+
+@dataclass(frozen=True)
+class _ExplicitResolution:
+    due_date: date | None = None
+    basis: str = "Due date uncertain"
+    uncertain_reason: str | None = None
+    # Set when the evidence carries no date at all, so the ordinary row policy applies.
+    fallback: DueRelation | None = None
+
+
+UNSUPPORTED_EXPLICIT_DATE = _ExplicitResolution(
+    uncertain_reason="The proposed explicit date is not present in the exact source evidence."
+)
+
+
+def _resolve_explicit_due(
+    task: ExtractedTask,
+    *,
+    reference_date: date | None,
+    supporting_text: str,
+    row_date: date | None,
+    explicit_weekday: date | None,
+    default_same_day: bool,
+) -> _ExplicitResolution:
+    """Resolve an explicit deadline from the exact evidence, using Gemini only as a pointer.
+
+    Gemini's ``explicit_due_date`` is free text: it may be missing, carry the wrong year,
+    or name a weekday. The evidence decides. A concrete proposal must agree with a date
+    in the evidence (year aside); a proposal without a date defers to the evidence.
+    """
+    stated = "Explicit date stated in source evidence"
+    proposal = task.explicit_due_date or ""
     evidence_dates = _calendar_dates_in_text(task.source_text, reference_date)
-    evidence_dates.update(_calendar_dates_in_text(supporting_text, reference_date))
-    if row_date is not None:
-        evidence_dates.add(row_date)
-    supported = proposed_dates & evidence_dates
-    return min(supported) if len(supported) == 1 else None
+    proposed = _calendar_date_mentions(proposal, reference_date)
+    if proposed:
+        support = evidence_dates | _calendar_dates_in_text(supporting_text, reference_date)
+        if row_date is not None:
+            support.add(row_date)
+        wanted = {(mention.value.month, mention.value.day) for mention in proposed}
+        matched = {value for value in support if (value.month, value.day) in wanted}
+        if len(matched) == 1:
+            return _ExplicitResolution(due_date=matched.pop(), basis=stated)
+        return UNSUPPORTED_EXPLICIT_DATE
+
+    if len(evidence_dates) == 1:
+        (value,) = evidence_dates
+        named = _named_weekdays(task.source_text)
+        if named and value.weekday() not in named:
+            return _ExplicitResolution(
+                uncertain_reason="The weekday and calendar date in the source evidence disagree."
+            )
+        return _ExplicitResolution(due_date=value, basis=stated)
+    if evidence_dates:
+        named = _named_weekdays(proposal)
+        candidates = {value for value in evidence_dates if value.weekday() in named}
+        if len(candidates) == 1:
+            return _ExplicitResolution(due_date=candidates.pop(), basis=stated)
+        return _ExplicitResolution(
+            uncertain_reason="The source evidence names more than one date."
+        )
+    if explicit_weekday is not None:
+        # Evidence such as "Due Thursday at midnight" names only a weekday.
+        return _ExplicitResolution(
+            due_date=explicit_weekday,
+            basis="Weekday explicitly stated in source evidence",
+        )
+    if VAGUE_TIMING_PATTERN.search(task.source_text) or VAGUE_TIMING_PATTERN.search(proposal):
+        return _ExplicitResolution(
+            uncertain_reason="The source gives only vague timing for this item."
+        )
+    stated = _stated_timing(task.source_text)
+    if stated is not None:
+        return _ExplicitResolution(fallback=stated)
+    if default_same_day:
+        # Assessments and row-bound actions without a date belong on their agenda row.
+        return _ExplicitResolution(fallback=DueRelation.SAME_DAY)
+    return UNSUPPORTED_EXPLICIT_DATE
 
 
 def _explicit_weekday_date(
     source_text: str,
     row_range: tuple[date, date] | None,
+    evidence_dates: set[date] | None = None,
 ) -> date | None:
     if row_range is None:
         return None
@@ -340,6 +517,10 @@ def _explicit_weekday_date(
     if not matches:
         return None
     weekday = DAY_ALIASES[matches[-1].group(1).casefold()]
+    # "Exam will be on Monday, 8/31" names a calendar Monday, not the next Monday.
+    stated = sorted(value for value in evidence_dates or () if value.weekday() == weekday)
+    if len(stated) == 1:
+        return stated[0]
     return _on_or_after(row_range[0], weekday)
 
 
@@ -365,7 +546,9 @@ def _fingerprint(task: ExtractedTask) -> str:
 
 
 def _assessment_part_label(segment: str, index: int) -> str:
-    acronym = SECTION_ACRONYM_PATTERN.search(segment)
+    acronym = SECTION_ACRONYM_PATTERN.search(segment) or BARE_SECTION_ACRONYM_PATTERN.search(
+        segment
+    )
     if acronym is not None:
         return acronym.group("acronym").upper()
     named = SECTION_NAME_PATTERN.search(segment)
@@ -387,10 +570,35 @@ def _assessment_part_title(title: str, label: str, task_type: TaskType) -> str:
     return " ".join(part for part in (cleaned, label, terminal) if part)
 
 
+def _canonical_assessment_title(title: str, task_type: TaskType) -> str:
+    """Put the assessment word last and drop filler "section" words.
+
+    Gemini names the same exam "Unit 2 Exam FRQ Section" one run and "Unit 2 FRQ Section
+    Exam" the next; one canonical form ("Unit 2 FRQ Exam") keeps titles and matching stable.
+    Titles that already read naturally are returned unchanged.
+    """
+    words = list(ASSESSMENT_WORD_PATTERN.finditer(title))
+    if not words:
+        return f"{title} {'Quiz' if task_type == TaskType.QUIZ else 'Test'}"
+    if (
+        len(words) == 1
+        and words[0].end() == len(title)
+        and not SECTION_FILLER_PATTERN.search(title)
+    ):
+        return title
+    body = SECTION_FILLER_PATTERN.sub(" ", ASSESSMENT_WORD_PATTERN.sub(" ", title))
+    body = ASSESSMENT_LEAD_PATTERN.sub("", " ".join(body.split()).strip(" -:"))
+    if not body:
+        return title
+    return f"{body} {words[-1].group(0).title()}"
+
+
 def _normalized_assessment_title(task: ExtractedTask) -> str:
     title = " ".join(task.title_stem.split()).strip(" -:[]")
     if task.task_type == TaskType.QUIZ:
-        return title if re.search(r"\bquiz$", title, re.I) else f"{title} Quiz"
+        if re.search(r"\bquiz$", title, re.I):
+            return title
+        return _canonical_assessment_title(title, task.task_type)
 
     acronym_match = SECTION_ACRONYM_PATTERN.search(task.source_text)
     if acronym_match is not None:
@@ -406,9 +614,7 @@ def _normalized_assessment_title(task: ExtractedTask) -> str:
         base = " ".join(base.split()).strip(" -:[]")
         return " ".join(part for part in (base, label, terminal) if part)
 
-    if re.search(r"\b(test|exam|midterm|final)$", title, re.I):
-        return title
-    return f"{title} Test"
+    return _canonical_assessment_title(title, task.task_type)
 
 
 def _split_multi_date_assessment(
@@ -726,9 +932,14 @@ def build_draft_tasks(
 
             is_assignment = block.role == BlockRole.ASSIGNMENTS
             is_same_day_action = task.action_kind in course.source.extraction.same_day_action_kinds
+            source_date = row_range[1] if row_range else None
+            calendar_reference = source_date or agenda_reference
+            evidence_dates = _calendar_dates_in_text(task.source_text, calendar_reference)
             # A weekday outside a dated row still belongs to the captured agenda week.
             agenda_week = (agenda_reference, agenda_reference) if agenda_reference else None
-            explicit_weekday = _explicit_weekday_date(task.source_text, row_range or agenda_week)
+            explicit_weekday = _explicit_weekday_date(
+                task.source_text, row_range or agenda_week, evidence_dates
+            )
             relation = task.due_relation
             is_assessment = task.task_type in {TaskType.QUIZ, TaskType.TEST}
             if explicit_weekday is None and relation != DueRelation.EXPLICIT_DATE:
@@ -767,8 +978,29 @@ def build_draft_tasks(
                 )
                 continue
 
-            source_date = row_range[1] if row_range else None
-            calendar_reference = source_date or agenda_reference
+            explicit: _ExplicitResolution | None = None
+            if relation == DueRelation.EXPLICIT_DATE:
+                explicit = _resolve_explicit_due(
+                    task,
+                    reference_date=calendar_reference,
+                    supporting_text=block.text,
+                    row_date=source_date,
+                    explicit_weekday=explicit_weekday,
+                    default_same_day=is_assessment or is_same_day_action,
+                )
+                if explicit.fallback is not None:
+                    relation = explicit.fallback
+                    explicit = None
+            # Timing the evidence states outranks Gemini's relation and the row defaults:
+            # "Closes at 9 pm" is due that day, and "bring it to class tomorrow" is not.
+            stated_timing = None
+            if explicit is None and explicit_weekday is None and not evidence_dates:
+                stated_timing = _stated_timing(task.source_text)
+                if stated_timing is not None and relation in {
+                    DueRelation.SAME_DAY,
+                    DueRelation.NEXT_CLASS,
+                }:
+                    relation = stated_timing
             if relation == DueRelation.NEXT_CLASS:
                 latest_occurrence = _latest_contiguous_occurrence_date(
                     task,
@@ -785,32 +1017,21 @@ def build_draft_tasks(
             due_basis = "No supported due date"
             due_uncertain = False
             due_uncertain_reason: str | None = None
-            if relation == DueRelation.EXPLICIT_DATE:
-                due_date = _explicit_date(
-                    task,
-                    calendar_reference,
-                    supporting_text=block.text,
-                    row_date=source_date,
-                )
-                if due_date is not None:
-                    due_basis = "Explicit date stated in source evidence"
-                elif explicit_weekday is not None and not _calendar_dates_in_text(
-                    task.source_text, calendar_reference
-                ):
-                    # Evidence such as "Due Thursday at midnight" names only a weekday.
-                    due_date = explicit_weekday
-                    due_basis = "Weekday explicitly stated in source evidence"
-                else:
-                    due_uncertain = True
-                    due_uncertain_reason = (
-                        "The proposed explicit date is not present in the exact source evidence."
-                    )
-                    due_basis = "Due date uncertain"
+            if explicit is not None:
+                due_date = explicit.due_date
+                due_basis = explicit.basis
+                due_uncertain = explicit.due_date is None
+                due_uncertain_reason = explicit.uncertain_reason
             elif explicit_weekday is not None:
                 due_date = explicit_weekday
                 due_basis = "Weekday explicitly stated in source evidence"
             elif relation == DueRelation.SAME_DAY:
-                if source_date is None:
+                if VAGUE_TIMING_PATTERN.search(task.source_text):
+                    # "Exam will be next week" announces an assessment; it is not on this row.
+                    due_uncertain = True
+                    due_uncertain_reason = "The source gives only vague timing for this item."
+                    due_basis = "Due date uncertain"
+                elif source_date is None:
                     due_uncertain = True
                     due_uncertain_reason = (
                         "Same-day action could not be tied to a dated agenda row."
@@ -819,7 +1040,9 @@ def build_draft_tasks(
                 else:
                     due_date = source_date
                     due_basis = (
-                        "Assessment scheduled on its agenda row"
+                        "Same-day deadline stated in source evidence"
+                        if stated_timing == DueRelation.SAME_DAY
+                        else "Assessment scheduled on its agenda row"
                         if is_assessment
                         else f"{task.action_kind.value} action due on its agenda row"
                     )
@@ -832,7 +1055,11 @@ def build_draft_tasks(
                     due_basis = "Due date uncertain"
                 else:
                     due_date = next_class_day(source_date, course.meeting_weekdays)
-                    due_basis = "Work with no stated date due next configured school day"
+                    due_basis = (
+                        "Next class stated in source evidence"
+                        if stated_timing == DueRelation.NEXT_CLASS
+                        else "Work with no stated date due next configured school day"
+                    )
                     if row_range and source_date > row_range[1]:
                         due_basis = (
                             "Repeated work due after its latest consecutive agenda occurrence"
