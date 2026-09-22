@@ -26,6 +26,12 @@ GOOGLE_WORKSPACE_PATHS = {
     "google_docs": re.compile(r"/document/(?:u/\d+/)?d/"),
     "google_sheets": re.compile(r"/spreadsheets/(?:u/\d+/)?d/"),
 }
+# "Publish to web" links (/d/e/2PACX-...) carry no file ID the APIs or the extension accept.
+PUBLISHED_WORKSPACE_PATH = re.compile(r"^/(?:presentation|document|spreadsheets)/d/e/")
+PUBLISHED_URL_ERROR = (
+    "url is a 'Publish to web' link (/d/e/...), which has no Google file ID. Use the editor URL, "
+    "or embed the published deck in Canvas, where Canvas discovery reads it automatically"
+)
 
 GEMINI_MODEL_OPTIONS = (
     "gemini-3.7-flash",
@@ -54,6 +60,12 @@ def _google_workspace_source_type(value: str) -> str | None:
         ),
         None,
     )
+
+
+def _reject_published_url(value: str) -> None:
+    parsed = urlparse(value)
+    if parsed.hostname == "docs.google.com" and PUBLISHED_WORKSPACE_PATH.match(parsed.path):
+        raise ValueError(PUBLISHED_URL_ERROR)
 
 
 class ExtractionSettings(BaseModel):
@@ -92,6 +104,7 @@ class GoogleSlidesSourceSettings(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_google_slides_url(cls, value: str) -> str:
+        _reject_published_url(value)
         if _google_workspace_source_type(value) != "google_slides":
             raise ValueError("url must be a Google Slides presentation URL")
         return value
@@ -148,6 +161,7 @@ class BrowserSourceSettings(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_google_workspace_url(cls, value: str) -> str:
+        _reject_published_url(value)
         if _google_workspace_source_type(value) is None:
             raise ValueError("url must be a Google Slides, Docs, or Sheets URL")
         return value

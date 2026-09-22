@@ -122,6 +122,17 @@ Week matching is start-date based. A target week beginning August 17 accepts hea
 does not disqualify an otherwise strong match. Internal Canvas page and assignment links are
 followed through same-origin API endpoints, and the bearer token is never sent to external links.
 
+A course may keep its agenda in a Google Slides deck published to the web and embedded in a Canvas
+page (`docs.google.com/presentation/d/e/2PACX-.../pubembed`), one slide per class day headed like
+`Day 25: September 22` or `Days 23 and 24: September 18 and 21`. Discovery reads the deck from
+its public viewer page with a separate session that carries no credentials, dates each slide from
+its heading, and keeps the slides that fall in the target week. Decks embedded on agenda-titled
+pages are tried before lecture decks, and a daily deck competes with the Canvas pages: a labeled
+`Week of` table still wins, a stale weekly page does not. Slide links to Canvas module items are
+resolved to their assignments, so a task can carry the Canvas link and due date. A `/d/e/`
+link pasted into a Slides or browser source is rejected because it has no file ID; the Canvas
+embed is the supported path.
+
 Extraction modes:
 
 - `image`: the PNG is the only agenda content sent to Gemini; target-page text is still used locally
@@ -441,6 +452,12 @@ The target-page date heading and row labels are parsed deterministically:
 - A weekday explicitly stated in the source (for example, "Bring the FRQ Thursday") overrides the
   ordinary same-row action rule.
 - A compound `W-Th` row ends Thursday, so next class is Friday.
+- A daily slide states its own dates, so a `Days 23 and 24: September 18 and 21` slide ends Monday
+  the 21st and its next-class work is due Tuesday.
+- When the exact evidence (or the one source line holding it) contains the text of exactly one
+  linked Canvas assignment, that assignment's due date fills in timing the source leaves unstated,
+  such as "Submit here" on a slide. A stated date, weekday, or "tomorrow" in that line still wins,
+  and a quiz or test stays on the day it is given.
 - A repeated Monday after Friday resolves to the following week.
 - Explicit dates are accepted only when the exact source evidence supports them.
 - Ordinary class activities, holidays, learning targets, and teacher narration are ignored.

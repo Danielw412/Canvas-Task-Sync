@@ -24,7 +24,7 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 
-EXTRACTOR_VERSION = "visual-agenda-v12-verbatim-dates-and-day-offsets"
+EXTRACTOR_VERSION = "visual-agenda-v13-daily-slides-and-day-offsets"
 TASK_LIST_ADAPTER = TypeAdapter(list[GeminiTaskCandidate])
 MIN_GEMINI_DELAY_SECONDS = 10.0
 MAX_OUTPUT_TOKENS = 16_384
@@ -321,14 +321,31 @@ def _resolve_anchor(
         _, score = _best_exact_line(block, candidate.source_text)
         return block, score
 
+    # An unknown anchor (Gemini truncated or misspelled it) is recovered from the exact
+    # evidence when exactly one content block states it, narrowed by row when it repeats.
+    content = [block for block in blocks if block.role.value not in {"header", "day"}]
+    exact = [
+        block
+        for block in content
+        if _exact_source_phrase(block.text, candidate.source_text) is not None
+    ]
+    if len(exact) > 1 and candidate.row_label:
+        exact = [
+            block
+            for block in exact
+            if normalized_text(block.row_label or "") == normalized_text(candidate.row_label)
+        ]
+    if len(exact) == 1:
+        return exact[0], 1.0
+    if exact:
+        # The same words on several rows are ambiguous; similarity must not pick one.
+        return None, 0.0
+
     candidates = [
         block
-        for block in blocks
-        if block.role.value not in {"header", "day"}
-        and (
-            not candidate.row_label
-            or normalized_text(block.row_label or "") == normalized_text(candidate.row_label)
-        )
+        for block in content
+        if not candidate.row_label
+        or normalized_text(block.row_label or "") == normalized_text(candidate.row_label)
     ]
     scored = sorted(
         (
@@ -367,6 +384,29 @@ def _anchor_catalog(capture: SourceCapture, *, include_text: bool) -> str:
     return "\n".join(lines)
 
 
+DAILY_SLIDES_FORMAT = """SOURCE FORMAT: a daily slide deck. Each slide is one class day. Its heading
+block (role=day) and every block from the same slide carry that slide's day= and date= context.
+- The main text of a slide is the plan for that class. Topics, recaps, notes, demonstrations,
+  reviews, and other in-class activities are ordinary classwork unless the slide gives a deadline
+  or says to submit, bring, or present something.
+- Short side notes on a slide ("For Friday: ...", "DUE [FRIDAY]: ...", "We will test on
+  WEDNESDAY.") announce deadlines. Copy the exact phrase that names the day into source_text so
+  application code can date it; never convert the day into a date yourself.
+- Slides often repeat an announcement. Return it once, from the earliest slide in the supplied
+  week that states it, so the task keeps the same source as later slides are added.
+- Work that the slide links to a Canvas assignment is turned in on Canvas and is a task even
+  without a stated deadline, unless the slide says it is ungraded or optional. Use the
+  assignment's name to write a specific title instead of the link wording ("Submit here").
+- A link list under a block only describes where its linked phrases lead. It is context, never
+  evidence: never copy it into source_text."""
+
+
+def _source_format_notes(capture: SourceCapture) -> str:
+    if capture.source_metadata.get("agenda_format") == "daily_slides":
+        return f"\n{DAILY_SLIDES_FORMAT}\n"
+    return ""
+
+
 def build_prompt(
     capture: SourceCapture,
     course: CourseSettings,
@@ -402,7 +442,7 @@ def build_prompt(
 {authority}
 
 {course_instruction_block}
-
+{_source_format_notes(capture)}
 Rules:
 - Classify an actual scheduled quiz as task_type=quiz and an actual scheduled test, exam,
   midterm, or final as task_type=test. Study guides, studying, preparation, corrections, and
@@ -523,6 +563,8 @@ class GeminiExtractor:
                 )
                 retry_reasons.append("unresolved source anchor")
                 continue
+            if candidate.source_anchor != block.anchor:
+                retry_reasons.append(f"source anchor recovered from evidence at {block.anchor}")
 
             visual_only = bool(block.metadata.get("visual_only"))
             if visual_only:

@@ -16,6 +16,18 @@ from zoneinfo import ZoneInfo
 import requests
 
 from canvas_task_sync.models import AgendaBlock, BlockRole, SourceCapture
+from canvas_task_sync.sources.published_slides import (
+    PublishedDeck,
+    PublishedSlide,
+    PublishedSlidesError,
+    SlideHeading,
+    SlideLink,
+    fetch_published_deck,
+    overlaps_week,
+    published_deck_id,
+    slide_heading,
+    weekday_label,
+)
 
 MONTHS = {
     "jan": 1,
@@ -119,6 +131,22 @@ THIS_WEEK_RE = re.compile(
     re.IGNORECASE,
 )
 CANVAS_ASSIGNMENT_PATH_RE = re.compile(r"/courses/\d+/assignments/\d+(?:/|$)")
+# A course may embed a few published decks; each viewer page is fetched in full.
+MAX_EMBEDDED_DECKS = 3
+# A deck is a daily agenda only when several slides carry class-day headings.
+MIN_DATED_DECK_SLIDES = 2
+# A deck competes with Canvas pages on their scale: as strong as an exact week match, plus
+# coverage. A labeled "Week of" agenda table still outranks it; a stale weekly page does not.
+DECK_BASE_SCORE = 120
+DECK_SCORE_PER_DAY = 10
+DECK_MAX_COVERAGE_SCORE = 40
+GOOGLE_FILE_KINDS = {
+    "document": "Google Docs document",
+    "spreadsheets": "Google Sheets spreadsheet",
+    "presentation": "Google Slides presentation",
+    "forms": "Google Form",
+    "drawings": "Google Drawing",
+}
 
 
 class CanvasSourceError(RuntimeError):
@@ -776,14 +804,76 @@ def _sufficient_agenda_content(node: HtmlNode) -> bool:
     )
 
 
+def _link_description(link: dict[str, Any]) -> str:
+    title = str(link.get("title") or "").strip()
+    labels = {
+        "canvas_assignment": "Canvas assignment",
+        "canvas_quiz": "Canvas quiz",
+        "canvas_page": "Canvas page",
+        "canvas": "Canvas",
+    }
+    label = labels.get(str(link.get("kind")))
+    if label is None:
+        return title or str(link.get("host") or "web page")
+    return f'{label} "{title}"' if title else label
+
+
 def _transcript(blocks: list[AgendaBlock]) -> str:
     sections: list[str] = []
     for block in blocks:
         context = [f"anchor={block.anchor}", f"role={block.role.value}", f"order={block.order}"]
         if block.row_label:
             context.append(f"day={block.row_label}")
-        sections.append(f"[{' '.join(context)}]\n{block.text}")
+        row_dates = block.metadata.get("row_dates")
+        if row_dates:
+            context.append(f"date={','.join(row_dates)}")
+        section = f"[{' '.join(context)}]\n{block.text}"
+        links = block.metadata.get("links") or []
+        if links:
+            # Link targets are context for Gemini, not evidence, so they stay out of block text.
+            described = "\n".join(
+                f'- "{link["text"]}" -> {_link_description(link)}' for link in links
+            )
+            section += f"\n(links in this text; context only, never evidence)\n{described}"
+        sections.append(section)
     return "\n\n".join(sections)
+
+
+def _embedded_deck_ids(body: str) -> list[str]:
+    """Return published Slides decks embedded in Canvas HTML, in document order."""
+    found: list[str] = []
+    for frame in _parse_html(body).root.descendants({"iframe"}):
+        deck_id = published_deck_id(frame.attrs.get("src", ""))
+        if deck_id and deck_id not in found:
+            found.append(deck_id)
+    return found
+
+
+def _describe_web_link(url: str) -> dict[str, str]:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").removeprefix("www.")
+    if host == "docs.google.com":
+        kind = next(
+            (
+                label
+                for segment, label in GOOGLE_FILE_KINDS.items()
+                if parsed.path.startswith(f"/{segment}/")
+            ),
+            None,
+        )
+        if kind:
+            if parsed.path.rstrip("/").endswith("/copy"):
+                kind = f"{kind} (make a copy)"
+            return {"kind": "google_file", "title": kind, "host": host}
+    return {"kind": "web", "host": host}
+
+
+@dataclass(frozen=True)
+class _DeckAgenda:
+    score: int
+    deck: PublishedDeck
+    document: CanvasDocument
+    slides: list[tuple[PublishedSlide, SlideHeading]]
 
 
 def _internal_api_url(value: str, base_url: str, course_id: str) -> str | None:
@@ -878,6 +968,7 @@ class CanvasAgendaSource:
         max_documents: int = 250,
         timezone_name: str = "UTC",
         current_week_start: date | None = None,
+        published_session: requests.Session | None = None,
     ) -> None:
         resolved_base = (base_url or os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
         resolved_token = (
@@ -900,6 +991,12 @@ class CanvasAgendaSource:
         self.base_url = resolved_base
         self.client = CanvasApiClient(resolved_base, resolved_token, session=session)
         self.max_documents = max_documents
+        # Published decks are public pages on docs.google.com. They are fetched with a separate,
+        # credential-free session so the Canvas bearer token can never reach them.
+        self._published_session = published_session
+        self._module_items: dict[str, dict[str, Any]] = {}
+        self._assignments: dict[str, dict[str, Any]] = {}
+        self._quiz_assignments: dict[str, dict[str, Any]] = {}
 
     def _document(
         self, payload: dict[str, Any], kind: str, context: str = ""
@@ -984,6 +1081,8 @@ class CanvasAgendaSource:
                     or []
                 )
             for item in items:
+                if item.get("id") is not None:
+                    self._module_items[str(item["id"])] = item
                 endpoint = item.get("url")
                 if endpoint:
                     queued.append(
@@ -1020,6 +1119,10 @@ class CanvasAgendaSource:
             or []
         )
         for assignment in assignments:
+            if assignment.get("id") is not None:
+                self._assignments[str(assignment["id"])] = assignment
+            if assignment.get("quiz_id") is not None:
+                self._quiz_assignments[str(assignment["quiz_id"])] = assignment
             if assignment.get("description"):
                 add(assignment, "assignment")
 
@@ -1036,6 +1139,268 @@ class CanvasAgendaSource:
                 kind = "assignment" if "/assignments/" in normalized else "page"
                 add(payload, kind, context)
         return documents, warnings
+
+    def _assignment_link(
+        self,
+        assignment_id: str,
+        title: str,
+        *,
+        kind: str = "canvas_assignment",
+    ) -> dict[str, Any]:
+        assignment = self._assignments.get(assignment_id) or {}
+        link: dict[str, Any] = {
+            "kind": kind,
+            "title": str(assignment.get("name") or title),
+            "assignment_url": (
+                f"{self.base_url}/courses/{self.course_id}/assignments/{assignment_id}"
+            ),
+        }
+        if assignment.get("due_at"):
+            link["due_at"] = str(assignment["due_at"])
+        return link
+
+    def _canvas_link(self, url: str) -> dict[str, Any] | None:
+        """Describe a link to this Canvas origin, resolving module items to their content.
+
+        Slides link to module items ("/modules/items/930780"). The module listing gathered
+        during discovery says which assignment or page each item is, without another request.
+        """
+        parsed = urlparse(url)
+        base = urlparse(self.base_url)
+        if (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc):
+            return None
+        match = re.match(r"^/courses/(?P<course>\d+)(?:/(?P<rest>.*))?$", parsed.path)
+        if match is None or match.group("course") != self.course_id:
+            return {"kind": "canvas"}
+        rest = (match.group("rest") or "").strip("/")
+        item_match = re.fullmatch(r"modules/items/(\d+)", rest)
+        if item_match:
+            item = self._module_items.get(item_match.group(1))
+            if item is None:
+                return {"kind": "canvas"}
+            title = str(item.get("title") or "")
+            content_id = str(item.get("content_id") or "")
+            if item.get("type") == "Assignment" and content_id.isdigit():
+                return self._assignment_link(content_id, title)
+            if item.get("type") == "Quiz":
+                quiz_assignment = self._quiz_assignments.get(content_id)
+                if quiz_assignment is not None:
+                    return self._assignment_link(
+                        str(quiz_assignment["id"]), title, kind="canvas_quiz"
+                    )
+                return {"kind": "canvas_quiz", "title": title}
+            if item.get("type") == "Page":
+                return {"kind": "canvas_page", "title": title}
+            return {"kind": "canvas", "title": title}
+        assignment_match = re.match(r"assignments/(\d+)(?:/|$)", rest)
+        if assignment_match:
+            return self._assignment_link(assignment_match.group(1), "")
+        if rest.startswith("pages/"):
+            return {"kind": "canvas_page"}
+        return {"kind": "canvas"}
+
+    def _embedded_decks(self, documents: list[CanvasDocument]) -> list[tuple[str, CanvasDocument]]:
+        """Return embedded decks, most agenda-like first, each with the page that best hosts it.
+
+        Courses also embed published lecture decks on every notes page, so fetching in
+        discovery order could spend every fetch on notes. A deck on a page titled as an agenda
+        comes first, then one on the front page or syllabus. Its host is the smallest such
+        page, which is the page dedicated to the deck rather than one that merely repeats it.
+        """
+        hosts: dict[str, tuple[tuple[int, int, int], CanvasDocument]] = {}
+        for index, document in enumerate(documents):
+            if "/presentation/d/e/" not in document.body:
+                continue
+            labels = f"{document.title} {document.context}".casefold()
+            priority = (
+                2
+                if "agenda" in labels
+                else 1
+                if document.kind in {"front_page", "syllabus"}
+                else 0
+            )
+            rank = (-priority, len(document.body), index)
+            for deck_id in _embedded_deck_ids(document.body):
+                if deck_id not in hosts or rank < hosts[deck_id][0]:
+                    hosts[deck_id] = (rank, document)
+        ordered = sorted(hosts.items(), key=lambda item: (item[1][0][0], item[1][0][2]))
+        return [(deck_id, document) for deck_id, (_, document) in ordered]
+
+    def _deck_agenda(
+        self, documents: list[CanvasDocument], warnings: list[str]
+    ) -> tuple[_DeckAgenda | None, list[str]]:
+        """Read the course's daily-agenda deck, if it embeds one, for the target week.
+
+        Decks are read in agenda-likeness order until one proves to be a daily agenda (several
+        slides with class-day headings); later decks are never fetched.
+        """
+        embedded = self._embedded_decks(documents)
+        if not embedded:
+            return None, []
+
+        notes: list[str] = []
+        best: _DeckAgenda | None = None
+        week_end = self.target_week_start + timedelta(days=6)
+        session = self._published_session or requests.Session()
+        try:
+            for deck_id, document in embedded[:MAX_EMBEDDED_DECKS]:
+                try:
+                    deck = fetch_published_deck(deck_id, session=session)
+                except PublishedSlidesError as error:
+                    warnings.append(f"published Slides deck in {document.title}: {error}")
+                    notes.append(
+                        f'The published Slides deck in "{document.title}" could not be read: '
+                        f"{error}"
+                    )
+                    continue
+                if deck.missing_slide_ids:
+                    warnings.append(
+                        f"published Slides deck in {document.title}: "
+                        f"{len(deck.missing_slide_ids)} slide(s) were not in the viewer page"
+                    )
+                dated = [
+                    (slide, heading)
+                    for slide in deck.slides
+                    if (heading := slide_heading(slide, self.target_week_start)) is not None
+                ]
+                if len(dated) < MIN_DATED_DECK_SLIDES:
+                    continue
+                in_week = sorted(
+                    (item for item in dated if overlaps_week(item[1], self.target_week_start)),
+                    key=lambda item: (item[1].start, item[1].end, item[0].position),
+                )
+                if not in_week:
+                    notes.append(
+                        f'The published Slides agenda in "{document.title}" has no slide dated '
+                        "in that week yet."
+                    )
+                    break
+                days = {
+                    value
+                    for _, heading in in_week
+                    for value in heading.dates
+                    if self.target_week_start <= value <= week_end
+                }
+                score = DECK_BASE_SCORE + min(
+                    DECK_MAX_COVERAGE_SCORE, DECK_SCORE_PER_DAY * len(days)
+                )
+                best = _DeckAgenda(score, deck, document, in_week)
+                break
+        finally:
+            if self._published_session is None:
+                session.close()
+        return best, notes
+
+    def _slide_links(
+        self, links: tuple[SlideLink, ...]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        records: list[dict[str, Any]] = []
+        assignment_links: list[dict[str, str]] = []
+        for link in links:
+            described = self._canvas_link(link.url) or _describe_web_link(link.url)
+            assignment_url = described.pop("assignment_url", None)
+            due_at = described.pop("due_at", None)
+            records.append({"text": link.text, "url": link.url, **described})
+            if assignment_url:
+                linked = {
+                    "url": assignment_url,
+                    "text": link.text,
+                    "title": str(described.get("title") or ""),
+                }
+                if due_at:
+                    linked["due_at"] = due_at
+                assignment_links.append(linked)
+        return records, assignment_links
+
+    def _deck_capture(
+        self,
+        agenda: _DeckAgenda,
+        documents: list[CanvasDocument],
+        warnings: list[str],
+    ) -> SourceCapture:
+        deck = agenda.deck
+        element_id = f"published_slides:{deck.published_id}"
+        blocks: list[AgendaBlock] = []
+        for row_index, (slide, heading) in enumerate(agenda.slides):
+            row_label = weekday_label(heading.dates)
+            row_dates = [value.isoformat() for value in heading.dates]
+            # Google object IDs are unique within a deck, so the slide ID anchors its heading
+            # and each text box ID anchors its text. One short ID per anchor is also what
+            # Gemini copies back reliably; slide-plus-shape anchors came back truncated.
+            parts: list[tuple[str, str, BlockRole, str, tuple[SlideLink, ...]]] = [
+                (slide.slide_id, "slide_heading", BlockRole.DAY, heading.text, ())
+            ]
+            for text in slide.texts:
+                body = text.text
+                if text.shape_id == heading.shape_id:
+                    body = body.partition("\n")[2]
+                if body.strip():
+                    parts.append((text.shape_id, "slide_text", BlockRole.UNKNOWN, body, text.links))
+            for object_id, kind, role, body, links in parts:
+                records, assignment_links = self._slide_links(links)
+                blocks.append(
+                    AgendaBlock(
+                        anchor=f"canvas:slides:{_safe_anchor(object_id)}",
+                        element_id=element_id,
+                        kind=kind,
+                        role=role,
+                        row_index=row_index,
+                        row_label=row_label,
+                        text=body.strip(),
+                        order=len(blocks) + 1,
+                        slide_id=slide.slide_id,
+                        metadata={
+                            "canvas_kind": "published_slides",
+                            "row_dates": row_dates,
+                            "links": records,
+                            "assignment_links": assignment_links,
+                        },
+                    )
+                )
+        document_key = f"published_slides:{deck.published_id}"
+        canonical = {
+            "course_id": self.course_id,
+            "week_start": self.target_week_start.isoformat(),
+            "document": {"key": document_key, "kind": "published_slides", "title": deck.title},
+            "blocks": [block.model_dump(mode="json") for block in blocks],
+        }
+        page_hash = hashlib.sha256(
+            json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        first_heading = agenda.slides[0][1]
+        return SourceCapture(
+            source_key=f"canvas:{self.course_id}:week:{self.target_week_start.isoformat()}",
+            source_url=agenda.document.html_url,
+            source_type="canvas",
+            resource_id=self.course_id,
+            page_id=document_key,
+            page_hash=page_hash,
+            transcript=_transcript(blocks),
+            blocks=blocks,
+            captured_at=datetime.now(UTC),
+            selection={
+                "week_start": self.target_week_start.isoformat(),
+                "matched_text": first_heading.text,
+                "slide_ids": [slide.slide_id for slide, _ in agenda.slides],
+            },
+            source_metadata={
+                "title": deck.title,
+                "canvas_kind": "published_slides",
+                "agenda_format": "daily_slides",
+                "embedded_in": agenda.document.title,
+                "match_score": agenda.score,
+                "matched_start": first_heading.start.isoformat(),
+                "canvas_updated_on": None,
+                "deck_revision": deck.revision,
+                "deck_slide_count": len(deck.slides),
+                "slides_in_week": len(agenda.slides),
+                "documents_checked": len(documents),
+                "warnings": warnings,
+                "screenshot_available": False,
+            },
+        )
 
     def capture(self, *, include_image: bool) -> SourceCapture:
         if include_image:
@@ -1088,13 +1453,22 @@ class CanvasAgendaSource:
                 day in lowered for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
             )
             ranked.append((score + min(40, sufficiency * 5), document, node, matched))
-        if not ranked:
+        best_page = max(ranked, key=lambda item: item[0]) if ranked else None
+        deck_agenda, deck_notes = self._deck_agenda(documents, warnings)
+        if deck_agenda is not None and (best_page is None or deck_agenda.score >= best_page[0]):
+            return self._deck_capture(deck_agenda, documents, warnings)
+        if best_page is None:
             raise CanvasAgendaNotFound(
-                "No sufficiently specific Canvas agenda was found for the week of "
-                f"{self.target_week_start.isoformat()} "
-                f"after checking {len(documents)} content item(s)."
+                " ".join(
+                    [
+                        "No sufficiently specific Canvas agenda was found for the week of "
+                        f"{self.target_week_start.isoformat()} "
+                        f"after checking {len(documents)} content item(s).",
+                        *deck_notes,
+                    ]
+                )
             )
-        score, document, node, matched = max(ranked, key=lambda item: item[0])
+        score, document, node, matched = best_page
         blocks = _agenda_blocks(node, document, self.target_week_start)
         if not blocks:
             raise CanvasAgendaNotFound(
