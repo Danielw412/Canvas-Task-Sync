@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { mutate } from 'swr'
+import logoUrl from '../assets/logo.png'
 import { mutateJson, useOverview } from '../lib/api'
 import { useApp } from './AppContext'
 import { CourseSwitcher } from './CourseSwitcher'
@@ -49,7 +50,7 @@ export function AppShell() {
   return <div className="app-shell">
     <aside className="sidebar">
       <NavLink to="/" className="brand" aria-label="Canvas Task Sync overview">
-        <span className="brand__mark"><img src="/logo.png" alt="" /></span>
+        <span className="brand__mark"><img src={logoUrl} alt="" /></span>
         <span>Canvas Task Sync</span>
       </NavLink>
       <nav className="desktop-nav" aria-label="Primary navigation">
@@ -62,7 +63,7 @@ export function AppShell() {
     <div className="app-main">
       <header className="topbar">
         <div className="mobile-brand">
-          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><img src="/logo.png" alt="" /></span><span>Canvas Task Sync</span></NavLink>
+          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><img src={logoUrl} alt="" /></span><span>Canvas Task Sync</span></NavLink>
           <NavLink to="/settings" aria-label="Open settings"><Menu size={22} /></NavLink>
         </div>
         <CourseSwitcher courses={data?.courses ?? []} selectedCourseId={selectedCourseId} onSelect={setSelectedCourseId} />
