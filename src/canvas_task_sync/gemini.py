@@ -401,6 +401,20 @@ block (role=day) and every block from the same slide carry that slide's day= and
   evidence: never copy it into source_text."""
 
 
+def _agenda_override_notes(capture: SourceCapture) -> str:
+    override = capture.source_metadata.get("agenda_override")
+    if capture.source_type != "canvas" or not isinstance(override, dict):
+        return ""
+    return (
+        "\n\nTEMPORARY AGENDA OVERRIDE: The course owner explicitly assigned this table "
+        "to the week "
+        f"of {override['target_week_start']}. Its heading date "
+        f"{override['expected_heading_date']} is incorrect. Use the selected week for weekday "
+        "context only. Preserve exact source evidence and every explicitly stated assignment "
+        "or assessment date; never shift those dates to fit the overridden week."
+    )
+
+
 def _source_format_notes(capture: SourceCapture) -> str:
     if capture.source_metadata.get("agenda_format") == "daily_slides":
         return f"\n{DAILY_SLIDES_FORMAT}\n"
@@ -441,7 +455,7 @@ def build_prompt(
 
 {authority}
 
-{course_instruction_block}
+{course_instruction_block}{_agenda_override_notes(capture)}
 {_source_format_notes(capture)}
 Rules:
 - Classify an actual scheduled quiz as task_type=quiz and an actual scheduled test, exam,

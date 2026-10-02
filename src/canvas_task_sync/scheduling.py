@@ -202,6 +202,11 @@ def parse_agenda_range(text: str) -> tuple[date, date] | None:
 
 
 def find_agenda_range(capture: SourceCapture) -> tuple[date, date] | None:
+    override = capture.source_metadata.get("agenda_override")
+    if capture.source_type == "canvas" and isinstance(override, dict):
+        # The explicitly selected week corrects only the heading, never an item's deadline.
+        start = date.fromisoformat(override["target_week_start"])
+        return start, start + timedelta(days=6)
     for block in capture.blocks:
         parsed = parse_agenda_range(block.text)
         if parsed:

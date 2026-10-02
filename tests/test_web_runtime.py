@@ -9,7 +9,11 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-from canvas_task_sync.configuration import NoFallbackSourceSettings, ProjectSettings
+from canvas_task_sync.configuration import (
+    CanvasAgendaOverride,
+    NoFallbackSourceSettings,
+    ProjectSettings,
+)
 from canvas_task_sync.configuration_service import ConfigurationService
 from canvas_task_sync.control_store import ControlStore
 from canvas_task_sync.models import (
@@ -56,6 +60,85 @@ def test_switching_to_no_fallback_removes_old_source_fields(tmp_path):
     assert source["type"] == "none"
     assert "url" not in source
     assert "page_id" not in source
+
+
+def test_course_api_saves_and_removes_an_override_without_changing_another_course(tmp_path):
+    config = _write_project(tmp_path)
+    service = ConfigurationService(config)
+    other = service.load().course("spanish").model_copy(deep=True)
+    service.save_course(CourseSave(id="other", settings=other), creating=True)
+    app = create_web_app(config)
+    with TestClient(app) as client:
+        before = client.get("/api/v1/courses").json()
+        course = next(item for item in before if item["id"] == "spanish")
+        other_before = next(item for item in before if item["id"] == "other")
+        settings = course["settings"]
+        settings["canvas_course_id"] = "12604"
+        settings["canvas_agenda_override"] = {
+            "page_slug": "weekly-agenda",
+            "table_number": 1,
+            "expected_heading_date": "2026-08-17",
+            "target_week_start": "2026-08-24",
+            "required_text": "Distinctive current worksheet",
+        }
+        response = client.put(
+            "/api/v1/courses/spanish",
+            headers=_csrf(client),
+            json={"id": "spanish", "settings": settings},
+        )
+        assert response.status_code == 200
+        saved = client.get("/api/v1/courses").json()
+        assert next(item for item in saved if item["id"] == "other") == other_before
+        stored = service.load().course("spanish").canvas_agenda_override
+        assert stored.target_week_start == date(2026, 8, 24)
+        assert stored.expires_on == date(2026, 8, 30)
+        assert "keep this course comment" in config.read_text()
+        settings["canvas_agenda_override"] = None
+        removed = client.put(
+            "/api/v1/courses/spanish",
+            headers=_csrf(client),
+            json={"id": "spanish", "settings": settings},
+        )
+        assert removed.status_code == 200
+        assert service.load().course("spanish").canvas_agenda_override is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"target_week_start": "2026-08-25"},
+        {"page_slug": "../other-course"},
+        {"page_slug": "https://other.example/agenda"},
+        {"table_number": 0},
+        {"table_number": 101},
+        {"required_text": "  "},
+    ],
+)
+def test_temporary_override_rejects_invalid_settings(changes):
+    with pytest.raises(ValueError):
+        CanvasAgendaOverride.model_validate(
+            {
+                "page_slug": "weekly-agenda",
+                "table_number": 1,
+                "expected_heading_date": "2026-08-17",
+                "target_week_start": "2026-08-24",
+                "required_text": "Distinctive current worksheet",
+                **changes,
+            }
+        )
+
+
+def test_temporary_override_requires_a_canvas_course(tmp_path):
+    course = ConfigurationService(_write_project(tmp_path)).load().course("spanish")
+    payload = course.model_dump()
+    payload["canvas_agenda_override"] = {
+        "page_slug": "weekly-agenda",
+        "expected_heading_date": "2026-08-17",
+        "target_week_start": "2026-08-24",
+        "required_text": "Distinctive current worksheet",
+    }
+    with pytest.raises(ValueError, match="canvas_course_id is required"):
+        type(course).model_validate(payload)
 
 
 def _write_project(root: Path, *, enabled: bool = True) -> Path:

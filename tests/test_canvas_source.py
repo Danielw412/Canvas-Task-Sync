@@ -5,7 +5,8 @@ from urllib.parse import urlparse
 
 import pytest
 
-from canvas_task_sync.configuration import CourseSettings
+from canvas_task_sync.configuration import CanvasAgendaOverride, CourseSettings
+from canvas_task_sync.gemini import build_prompt
 from canvas_task_sync.models import (
     AcquisitionStrategy,
     ActionKind,
@@ -19,17 +20,55 @@ from canvas_task_sync.models import (
     TaskType,
     WeekSelection,
 )
-from canvas_task_sync.scheduling import build_draft_tasks, row_date_ranges
-from canvas_task_sync.sources import CourseAgendaSource
+from canvas_task_sync.scheduling import build_draft_tasks, find_agenda_range, row_date_ranges
+from canvas_task_sync.sources import CourseAgendaSource, create_course_source_adapter
 from canvas_task_sync.sources.canvas import (
     CanvasAgendaNotFound,
+    CanvasAgendaOverrideError,
     CanvasAgendaSource,
     week_match_score,
 )
 from canvas_task_sync.week import selected_week_start
 
 TARGET_WEEK = date(2026, 8, 17)
+OVERRIDE_WEEK = date(2026, 8, 24)
 COURSE_IDS = ["12604", "11126", "11517", "12506"]
+
+
+def temporary_override(**changes):
+    return CanvasAgendaOverride.model_validate(
+        {
+            "page_slug": "weekly-agenda",
+            "table_number": 1,
+            "expected_heading_date": TARGET_WEEK,
+            "target_week_start": OVERRIDE_WEEK,
+            "required_text": "Complete current practice set 1",
+            **changes,
+        }
+    )
+
+
+def override_source(body, *, course_id="11126", override=None, **kwargs):
+    session = FakeSession(
+        {
+            f"/api/v1/courses/{course_id}/pages/weekly-agenda": {
+                "url": "weekly-agenda",
+                "title": "Course agenda",
+                "html_url": f"https://canvas.example/courses/{course_id}/pages/weekly-agenda",
+                "body": body,
+            }
+        }
+    )
+    return CanvasAgendaSource(
+        course_id=course_id,
+        target_week_start=OVERRIDE_WEEK,
+        current_week_start=OVERRIDE_WEEK,
+        base_url="https://canvas.example",
+        token="test-token",
+        session=session,
+        agenda_override=override or temporary_override(),
+        **kwargs,
+    )
 
 
 class FakeResponse:
@@ -692,6 +731,188 @@ def test_narrative_first_row_is_not_a_column_header_and_list_items_stay_separate
     )
     assert monday.role == BlockRole.ASSIGNMENTS
     assert monday.text == "Monday\nSubmit : Unit 1 Assignment 1\nUnit 1 Assignment 2"
+
+
+@pytest.mark.parametrize("course_id", COURSE_IDS)
+def test_temporary_override_scopes_one_table_and_schedules_the_intended_week(course_id):
+    current = physics_agenda_table(
+        "August 17, 2026",
+        "Complete current practice set 1",
+        "Submit lab on August 31",
+    )
+    older = physics_agenda_table("August 17, 2026", "Complete older worksheet", "Old work")
+    capture = override_source(current + older, course_id=course_id).capture(include_image=False)
+
+    assert capture.source_key == f"canvas:{course_id}:week:2026-08-24"
+    assert "older worksheet" not in capture.transcript
+    assert "August 17, 2026" in capture.transcript  # Raw source evidence is preserved.
+    assert "August 31" in capture.transcript
+    assert find_agenda_range(capture) == (OVERRIDE_WEEK, date(2026, 8, 30))
+    assert capture.source_metadata["agenda_override"]["expires_on"] == "2026-08-30"
+    monday = next(block for block in capture.blocks if "current practice" in block.text)
+    friday = next(block for block in capture.blocks if "Submit lab" in block.text)
+    assert row_date_ranges(capture)[(monday.element_id, monday.row_index)] == (
+        OVERRIDE_WEEK,
+        OVERRIDE_WEEK,
+    )
+    course = CourseSettings(
+        name="Any course",
+        prefix="COURSE",
+        task_list="School",
+        canvas_course_id=course_id,
+        source={"type": "none"},
+    )
+    tasks = [
+        ExtractedTask(
+            source_anchor=monday.anchor,
+            source_text="Complete current practice set 1",
+            row_label="M",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.COMPLETE,
+            title_stem="Practice set 1",
+            due_relation=DueRelation.NEXT_CLASS,
+            confidence=Confidence.HIGH,
+        ),
+        ExtractedTask(
+            source_anchor=friday.anchor,
+            source_text="Submit lab on August 31",
+            row_label="F",
+            classification=TaskClassification.HOMEWORK,
+            action_kind=ActionKind.SUBMIT,
+            title_stem="Lab",
+            due_relation=DueRelation.EXPLICIT_DATE,
+            explicit_due_date="2026-08-31",
+            confidence=Confidence.HIGH,
+        ),
+    ]
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id=course_id,
+        course=course,
+        capture=capture,
+        tasks=tasks,
+        today=OVERRIDE_WEEK,
+    )
+    assert not uncertain
+    assert {draft.title: draft.due_date for draft in drafts} == {
+        "[COURSE] Practice set 1": date(2026, 8, 25),
+        "[COURSE] Lab": date(2026, 8, 31),
+    }
+    prompt = build_prompt(capture, course, include_text=True)
+    assert "TEMPORARY AGENDA OVERRIDE" in prompt
+    assert "week of 2026-08-24" in prompt
+
+
+def test_temporary_override_accepts_a_heading_outside_the_table_and_ignores_layout_tables():
+    body = "<table><tr><td>Navigation</td></tr></table>" + agenda_html("August 17-21")
+    body = body.replace("Complete practice set 1", "Complete current practice set 1")
+    capture = override_source(body).capture(include_image=False)
+    assert "current practice" in capture.transcript
+    assert "Navigation" not in capture.transcript
+
+
+@pytest.mark.parametrize(
+    ("body", "changes", "message"),
+    [
+        (
+            physics_agenda_table("August 17", "Complete current practice set 1", "Work"),
+            {"table_number": 2},
+            "contains only",
+        ),
+        (physics_agenda_table("August 17", "Different work", "Work"), {}, "confirmation text"),
+        (
+            physics_agenda_table("August 10", "Complete current practice set 1", "Work"),
+            {},
+            "heading no longer matches",
+        ),
+        (
+            physics_agenda_table("August 24", "Complete current practice set 1", "Work"),
+            {},
+            "heading no longer matches",
+        ),
+        (
+            physics_agenda_table("August 17", "Complete current practice set 1", "Work") * 2,
+            {},
+            "confirmation text",
+        ),
+        (
+            physics_agenda_table("August 17", "Older work", "Work")
+            + physics_agenda_table("August 17", "Complete current practice set 1", "Work"),
+            {},
+            "confirmation text",
+        ),
+        (
+            physics_agenda_table("August 17", "Complete current practice set 1", "Work").replace(
+                "<td>M</td>", "<td>Monday August 17</td>"
+            ),
+            {},
+            "conflicts with a date",
+        ),
+    ],
+)
+def test_temporary_override_rejects_changed_or_ambiguous_sources(body, changes, message):
+    source = override_source(body, override=temporary_override(**changes))
+    with pytest.raises(CanvasAgendaOverrideError, match=message):
+        source.capture(include_image=False)
+
+
+@pytest.mark.parametrize(
+    "target, current", [(TARGET_WEEK, OVERRIDE_WEEK), (OVERRIDE_WEEK, date(2026, 8, 31))]
+)
+def test_temporary_override_is_inactive_for_other_weeks_and_after_expiry(target, current):
+    body = physics_agenda_table(target.strftime("%B %d"), "Normal agenda work", "Work")
+    source = front_page_source("11126", body, target)
+    source.agenda_override = temporary_override()
+    source.current_week_start = current
+    capture = source.capture(include_image=False)
+    assert "agenda_override" not in capture.source_metadata
+    assert "Normal agenda work" in capture.transcript
+
+
+def test_temporary_override_hash_covers_effective_week_and_source_changes():
+    body = physics_agenda_table("August 17", "Complete current practice set 1", "Work")
+    first = override_source(body).capture(include_image=False)
+    again = override_source(body).capture(include_image=False)
+    changed = override_source(body.replace("Work", "Updated work")).capture(include_image=False)
+    assert first.page_hash == again.page_hash
+    assert first.page_hash != changed.page_hash
+    alternate = temporary_override(target_week_start=date(2026, 8, 31))
+    source = override_source(body, override=alternate)
+    source.target_week_start = alternate.target_week_start
+    assert first.page_hash != source.capture(include_image=False).page_hash
+
+
+def test_temporary_override_guard_failure_does_not_silently_use_configured_fallback():
+    primary = override_source(
+        physics_agenda_table("August 10", "Complete current practice set 1", "Work")
+    )
+
+    def fallback():
+        pytest.fail("A failed override must stop instead of selecting a fallback")
+
+    source = CourseAgendaSource(lambda: primary, fallback, AcquisitionStrategy.AUTO)
+    with pytest.raises(CanvasAgendaOverrideError):
+        source.capture(include_image=False)
+
+
+def test_course_source_factory_passes_only_this_courses_override():
+    course = CourseSettings(
+        name="Any course",
+        prefix="COURSE",
+        task_list="School",
+        canvas_course_id="11126",
+        canvas_base_url="https://canvas.example",
+        canvas_agenda_override=temporary_override(),
+        source={"type": "none"},
+    )
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {"CANVAS_TOKEN": "test-token"}):
+        source = create_course_source_adapter(course, object(), target_week_start=OVERRIDE_WEEK)
+        assert source._primary().agenda_override == course.canvas_agenda_override
+        course.canvas_agenda_override = None
+        normal = create_course_source_adapter(course, object(), target_week_start=OVERRIDE_WEEK)
+        assert normal._primary().agenda_override is None
 
 
 def test_incidental_date_in_an_older_week_table_does_not_claim_the_next_week():

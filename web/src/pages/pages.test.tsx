@@ -202,6 +202,66 @@ describe('operational pages', () => {
     })
   })
 
+  it('saves and removes a temporary override for the selected course', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    let courses = structuredClone(overview.courses)
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (init?.method === 'PUT') courses = [{ ...courses[0], settings: JSON.parse(String(init.body)).settings }]
+      return jsonResponse(courses)
+    }))
+    renderPage(<CoursesPage />)
+    fireEvent.change(await screen.findByLabelText(/Canvas course ID/), { target: { value: '12604' } })
+    fireEvent.click(screen.getByLabelText('Use a temporary agenda override'))
+    fireEvent.change(screen.getByLabelText(/Target week starting Monday/), { target: { value: '2026-08-24' } })
+    fireEvent.change(screen.getByLabelText(/Heading date on Canvas/), { target: { value: '2026-08-17' } })
+    fireEvent.change(screen.getByLabelText(/Agenda page slug/), { target: { value: 'weekly-agenda' } })
+    fireEvent.change(screen.getByLabelText(/Confirmation text/), { target: { value: 'Distinctive current worksheet' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
+    await waitFor(() => expect(requests.some((item) => item.init?.method === 'PUT')).toBe(true))
+    expect(courses[0].settings.canvas_agenda_override).toEqual({
+      page_slug: 'weekly-agenda', table_number: 1,
+      expected_heading_date: '2026-08-17', target_week_start: '2026-08-24',
+      required_text: 'Distinctive current worksheet',
+    })
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Save changes' })[0]).toBeDisabled())
+    fireEvent.click(screen.getByLabelText('Use a temporary agenda override'))
+    expect(screen.queryByLabelText(/Confirmation text/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
+    await waitFor(() => expect(courses[0].settings.canvas_agenda_override).toBeNull())
+  })
+
+  it('blocks an incomplete override and a target week that does not start Monday', async () => {
+    const fetch = vi.fn(async () => jsonResponse(overview.courses))
+    vi.stubGlobal('fetch', fetch)
+    renderPage(<CoursesPage />)
+    fireEvent.click(await screen.findByLabelText('Use a temporary agenda override'))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
+    expect(toast).toHaveBeenCalledWith('A temporary agenda override requires a Canvas course ID.', 'warning')
+    fireEvent.change(screen.getByLabelText(/Canvas course ID/), { target: { value: '12604' } })
+    fireEvent.change(screen.getByLabelText(/Agenda page slug/), { target: { value: 'weekly-agenda' } })
+    fireEvent.change(screen.getByLabelText(/Confirmation text/), { target: { value: 'Distinctive current worksheet' } })
+    fireEvent.change(screen.getByLabelText(/Target week starting Monday/), { target: { value: '2026-08-25' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
+    expect(toast).toHaveBeenCalledWith('The override target week must begin on a Monday.', 'warning')
+    expect(fetch.mock.calls).toHaveLength(1)
+  })
+
+  it('shows expired overrides without enabling them for a new week', async () => {
+    const courses = structuredClone(overview.courses)
+    courses[0].settings.canvas_agenda_override = {
+      page_slug: 'weekly-agenda', table_number: 1,
+      expected_heading_date: '2020-01-06', target_week_start: '2020-01-13',
+      required_text: 'Distinctive current worksheet',
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(courses)))
+    renderPage(<CoursesPage />)
+    expect(await screen.findByText('Expired. Normal agenda discovery is in use.')).toBeVisible()
+    expect(screen.getByLabelText(/Target week starting Monday/)).toHaveValue('2020-01-13')
+  })
+
   it('renders desktop and mobile navigation from one route model', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview)))
     renderPage(<AppShell />)

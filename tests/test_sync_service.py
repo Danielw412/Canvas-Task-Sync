@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from canvas_task_sync.configuration import ProjectSettings
+from canvas_task_sync.configuration import CanvasAgendaOverride, ProjectSettings
 from canvas_task_sync.models import ExtractionMode, GeminiTaskCandidate, RemoteTask
 from canvas_task_sync.state import StateStore
 from canvas_task_sync.sync_service import (
@@ -159,6 +159,33 @@ def test_prepare_emits_stages_in_order_without_writing_state(
     assert prepared.plan.dry_run is True
     assert len(prepared.plan_hash) == 64
     assert backend.calls == 1
+    assert not service.settings.resolved_state_path.exists()
+
+
+def test_override_change_invalidates_a_preview_before_any_task_writes(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    course = service.settings.course("spanish")
+    course.canvas_course_id = "12604"
+    prepared = service.prepare(course_id="spanish", include_past=True, rebase_week=None)
+    course.canvas_agenda_override = CanvasAgendaOverride(
+        page_slug="weekly-agenda",
+        expected_heading_date=date(2026, 8, 17),
+        target_week_start=date(2026, 8, 24),
+        required_text="Distinctive current worksheet",
+    )
+    with pytest.raises(ValueError, match="Course configuration changed after this preview"):
+        service.apply(prepared)
+    assert tasks.created == []
     assert not service.settings.resolved_state_path.exists()
 
 

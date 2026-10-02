@@ -383,10 +383,16 @@ class SyncService:
 
         stage_started = perf_counter()
         capture = source.capture(include_image=False)
+        agenda_override = capture.source_metadata.get("agenda_override")
         sink.emit(
             RunStage.CAPTURE_SOURCE,
             "stage_completed",
-            f"Captured the configured {capture.source_type.replace('_', ' ')} source.",
+            (
+                "Captured the Canvas agenda using the temporary course override."
+                if agenda_override
+                else f"Captured the configured {capture.source_type.replace('_', ' ')} source."
+            ),
+            level=EventLevel.WARNING if agenda_override else EventLevel.INFO,
             metadata={
                 "source_type": capture.source_type,
                 "resource_id": capture.resource_id,
@@ -396,6 +402,7 @@ class SyncService:
                 "selection": capture.selection,
                 "capture_warnings": capture.source_metadata.get("warnings", []),
                 "acquisition_fallback": capture.source_metadata.get("acquisition_fallback"),
+                "agenda_override": agenda_override,
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )

@@ -213,6 +213,40 @@ The server always binds to `127.0.0.1`; it validates same-origin requests and re
 per-process CSRF token for every mutation. It is intended as a local control center, not a remotely
 hosted multi-user service.
 
+### Temporary Canvas agenda overrides
+
+In **Courses → Source & extraction → Temporary agenda override**, enable an override when
+a teacher has copied an agenda table without updating its week heading. This setting is available
+for every course with a Canvas course ID and is off by default.
+
+Select the intended week (starting Monday), the date currently in the heading, the page slug
+(the URL portion after `/pages/`), and the agenda table number, counted from the top. Layout and
+wrapper tables are excluded. Supply a distinctive phrase that appears in that table only.
+The run stops if the page, table, confirmation text, or heading cannot be verified, or if a day
+row explicitly states a date outside the intended week. A failed override does not silently
+switch to another source. Remove the override when the teacher corrects the heading.
+
+The override applies only to runs targeting the selected week and expires after that week's
+Sunday in the course timezone. Expired settings remain visible for review; normal discovery
+resumes without editing configuration or state. The raw agenda text and explicit assignment/exam
+deadlines are preserved; only the week context for undated weekday rows is corrected. Task identity
+uses the intended week. Override settings and selected content participate in cache hashing and
+preview revalidation, and their use is recorded in the run log. Save the setting and review an
+Advanced Preview before using it for automatic syncing.
+
+The equivalent per-course YAML setting is:
+
+```yaml
+canvas_agenda_override:
+  page_slug: weekly-agenda
+  table_number: 1
+  expected_heading_date: 2026-09-21
+  target_week_start: 2026-09-28
+  required_text: A phrase unique to the selected table
+```
+
+Set `canvas_agenda_override: null` or remove the field to disable it.
+
 ### Local JSON API
 
 The control center exposes a read-only API under `http://127.0.0.1:8890/api/v1` for local companion

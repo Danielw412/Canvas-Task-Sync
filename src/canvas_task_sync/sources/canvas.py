@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from canvas_task_sync.configuration import CanvasAgendaOverride
 from canvas_task_sync.models import AgendaBlock, BlockRole, SourceCapture
 from canvas_task_sync.sources.published_slides import (
     PublishedDeck,
@@ -155,6 +156,10 @@ class CanvasSourceError(RuntimeError):
 
 class CanvasAgendaNotFound(CanvasSourceError):
     pass
+
+
+class CanvasAgendaOverrideError(CanvasAgendaNotFound):
+    """An explicit override could not be verified; do not silently choose a fallback."""
 
 
 @dataclass
@@ -969,6 +974,7 @@ class CanvasAgendaSource:
         timezone_name: str = "UTC",
         current_week_start: date | None = None,
         published_session: requests.Session | None = None,
+        agenda_override: CanvasAgendaOverride | None = None,
     ) -> None:
         resolved_base = (base_url or os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
         resolved_token = (
@@ -984,6 +990,7 @@ class CanvasAgendaSource:
         self.course_id = course_id
         self.target_week_start = target_week_start
         self.timezone_name = timezone_name
+        self.agenda_override = agenda_override
         local_today = datetime.now(ZoneInfo(timezone_name)).date()
         self.current_week_start = current_week_start or (
             local_today - timedelta(days=local_today.weekday())
@@ -1402,9 +1409,169 @@ class CanvasAgendaSource:
             },
         )
 
+    def _override_heading_dates(self, parser: CanvasHtmlParser, table: HtmlNode) -> set[date]:
+        """Read the table's own heading, or a short heading immediately before its table."""
+        rows = [row for row in table.descendants({"tr"}) if _nearest_table(row) is table]
+        dates: set[date] = set()
+        if rows:
+            first = rows[0]
+            for node in [first, *_direct_children(first, {"td", "th"})]:
+                text = node.text(" ")
+                for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+                    for found in pattern.finditer(text):
+                        if _has_week_label(text, found) or text.strip() == found.group(0):
+                            parsed = _matched_date(found, self.target_week_start)
+                            if parsed is not None:
+                                dates.add(parsed)
+                heading = _week_heading_start(text, self.target_week_start)
+                if heading is not None:
+                    dates.add(heading)
+        if dates:
+            return dates
+        preceding: date | None = None
+        for node in parser.root.descendants():
+            if node is table:
+                break
+            if node.tag in SEMANTIC_TAGS and _nearest_table(node) is None:
+                heading = _week_heading_start(node.text(" "), self.target_week_start)
+                if heading is not None:
+                    preceding = heading
+        return {preceding} if preceding is not None else set()
+
+    def _override_capture(self, override: CanvasAgendaOverride) -> SourceCapture:
+        endpoint = f"/api/v1/courses/{self.course_id}/pages/{quote(override.page_slug, safe='')}"
+        try:
+            payload = self.client.get(endpoint)
+        except (requests.RequestException, ValueError, CanvasSourceError) as error:
+            raise CanvasAgendaOverrideError(
+                f"The temporary agenda override page could not be read ({type(error).__name__})."
+            ) from error
+        document = self._document(payload, "page") if isinstance(payload, dict) else None
+        if document is None or document.key != override.page_slug:
+            raise CanvasAgendaOverrideError(
+                "The temporary agenda override page is missing or empty."
+            )
+        parser = _parse_html(document.body)
+        tables = [
+            table
+            for table in parser.root.descendants({"table"})
+            if not any(table.descendants({"table"})) and _sufficient_agenda_content(table)
+        ]
+        if override.table_number > len(tables):
+            raise CanvasAgendaOverrideError(
+                f"The temporary override selects agenda table {override.table_number}, "
+                f"but the page contains only {len(tables)} agenda table(s)."
+            )
+        table = tables[override.table_number - 1]
+        phrase = override.required_text.casefold()
+        matching = [item for item in tables if phrase in item.text(" ").casefold()]
+        if len(matching) != 1 or matching[0] is not table:
+            raise CanvasAgendaOverrideError(
+                "The temporary override confirmation text must identify only the selected agenda "
+                "table. Check the table number and choose a distinctive phrase from its content."
+            )
+        headings = self._override_heading_dates(parser, table)
+        if headings != {override.expected_heading_date}:
+            raise CanvasAgendaOverrideError(
+                "The temporary override table's heading no longer matches "
+                f"{override.expected_heading_date.isoformat()}. Review or remove the override."
+            )
+        # Scope to this table before handling dates. The page can retain many older weeks.
+        blocks = _agenda_blocks(table, document)
+        for block in blocks:
+            if block.role != BlockRole.DAY:
+                continue
+            for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+                for found in pattern.finditer(block.text):
+                    stated = _matched_date(found, self.target_week_start)
+                    if stated is not None and not 0 <= (stated - self.target_week_start).days <= 6:
+                        raise CanvasAgendaOverrideError(
+                            "The temporary override conflicts with a date stated in an agenda "
+                            "day row. Only the week heading can be overridden."
+                        )
+        metadata = {
+            **override.model_dump(mode="json"),
+            "expires_on": override.expires_on.isoformat(),
+        }
+        return self._page_capture(
+            document,
+            blocks,
+            matched=WeekTextMatch(
+                override.expected_heading_date, 120, override.expected_heading_date.isoformat(), 0
+            ),
+            score=120,
+            documents_checked=1,
+            warnings=[
+                f"Temporary agenda override: table {override.table_number} is assigned to the "
+                f"week of {self.target_week_start.isoformat()}; its Canvas heading says "
+                f"{override.expected_heading_date.isoformat()}. Explicit deadlines are preserved."
+            ],
+            override_metadata=metadata,
+        )
+
+    def _page_capture(
+        self,
+        document: CanvasDocument,
+        blocks: list[AgendaBlock],
+        *,
+        matched: WeekTextMatch,
+        score: int,
+        documents_checked: int,
+        warnings: list[str],
+        override_metadata: dict[str, Any] | None = None,
+    ) -> SourceCapture:
+        canonical = {
+            "course_id": self.course_id,
+            "week_start": self.target_week_start.isoformat(),
+            "document": {"key": document.key, "kind": document.kind, "title": document.title},
+            "blocks": [block.model_dump(mode="json") for block in blocks],
+        }
+        if override_metadata is not None:
+            canonical["agenda_override"] = override_metadata
+        page_hash = hashlib.sha256(
+            json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        metadata = {
+            "title": document.title,
+            "canvas_kind": document.kind,
+            "match_score": score,
+            "matched_start": matched.start.isoformat(),
+            "canvas_updated_on": (document.updated_on.isoformat() if document.updated_on else None),
+            "documents_checked": documents_checked,
+            "warnings": warnings,
+            "screenshot_available": False,
+        }
+        if override_metadata is not None:
+            metadata["agenda_override"] = override_metadata
+        return SourceCapture(
+            source_key=f"canvas:{self.course_id}:week:{self.target_week_start.isoformat()}",
+            source_url=document.html_url,
+            source_type="canvas",
+            resource_id=self.course_id,
+            page_id=document.key,
+            page_hash=page_hash,
+            transcript=_transcript(blocks),
+            blocks=blocks,
+            captured_at=datetime.now(UTC),
+            selection={
+                "week_start": self.target_week_start.isoformat(),
+                "matched_text": matched.matched_text,
+            },
+            source_metadata=metadata,
+        )
+
     def capture(self, *, include_image: bool) -> SourceCapture:
         if include_image:
             raise CanvasSourceError("Canvas API agenda captures provide text, not screenshots.")
+        override = self.agenda_override
+        if (
+            override is not None
+            and self.target_week_start == override.target_week_start
+            and self.current_week_start <= override.target_week_start
+        ):
+            return self._override_capture(override)
         documents, warnings = self._discover()
         ranked: list[tuple[int, CanvasDocument, HtmlNode, WeekTextMatch]] = []
         for document in documents:
@@ -1475,42 +1642,11 @@ class CanvasAgendaSource:
                 "The Canvas agenda page mixes several weeks and none of its content "
                 f"belongs to the week of {self.target_week_start.isoformat()}."
             )
-        transcript = _transcript(blocks)
-        canonical = {
-            "course_id": self.course_id,
-            "week_start": self.target_week_start.isoformat(),
-            "document": {"key": document.key, "kind": document.kind, "title": document.title},
-            "blocks": [block.model_dump(mode="json") for block in blocks],
-        }
-        page_hash = hashlib.sha256(
-            json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        ).hexdigest()
-        return SourceCapture(
-            source_key=f"canvas:{self.course_id}:week:{self.target_week_start.isoformat()}",
-            source_url=document.html_url,
-            source_type="canvas",
-            resource_id=self.course_id,
-            page_id=document.key,
-            page_hash=page_hash,
-            transcript=transcript,
-            blocks=blocks,
-            captured_at=datetime.now(UTC),
-            selection={
-                "week_start": self.target_week_start.isoformat(),
-                "matched_text": matched.matched_text,
-            },
-            source_metadata={
-                "title": document.title,
-                "canvas_kind": document.kind,
-                "match_score": score,
-                "matched_start": matched.start.isoformat(),
-                "canvas_updated_on": (
-                    document.updated_on.isoformat() if document.updated_on else None
-                ),
-                "documents_checked": len(documents),
-                "warnings": warnings,
-                "screenshot_available": False,
-            },
+        return self._page_capture(
+            document,
+            blocks,
+            matched=matched,
+            score=score,
+            documents_checked=len(documents),
+            warnings=warnings,
         )

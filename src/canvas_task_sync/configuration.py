@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
@@ -189,6 +190,32 @@ SourceSettings = Annotated[
 ]
 
 
+class CanvasAgendaOverride(BaseModel):
+    """A user's explicit correction of one Canvas table's week, with a bounded lifetime."""
+
+    page_slug: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_-]+$")
+    table_number: int = Field(default=1, ge=1, le=100)
+    expected_heading_date: date
+    target_week_start: date
+    required_text: str = Field(min_length=1, max_length=200)
+
+    @field_validator("page_slug", "required_text", mode="before")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
+    @field_validator("target_week_start")
+    @classmethod
+    def validate_target_week(cls, value: date) -> date:
+        if value.weekday() != 0:
+            raise ValueError("The override target week must begin on a Monday.")
+        return value
+
+    @property
+    def expires_on(self) -> date:
+        return self.target_week_start + timedelta(days=6)
+
+
 class CourseSettings(BaseModel):
     enabled: bool = True
     name: str
@@ -203,10 +230,13 @@ class CourseSettings(BaseModel):
     meeting_days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri"])
     canvas_course_id: str | None = None
     canvas_base_url: str | None = None
+    canvas_agenda_override: CanvasAgendaOverride | None = None
     source: SourceSettings
 
     @model_validator(mode="after")
     def validate_agenda_sources(self) -> CourseSettings:
+        if self.canvas_agenda_override is not None and not self.canvas_course_id:
+            raise ValueError("canvas_course_id is required for a temporary Canvas agenda override")
         if self.source.type == "none" and not self.canvas_course_id:
             raise ValueError("canvas_course_id is required when no fallback source is configured")
         has_primary = self.gemini_model is not None

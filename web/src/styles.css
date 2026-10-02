@@ -721,6 +721,8 @@ code { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflo
 .form-section h3 { margin-bottom: 10px; font-size: 15px; }
 .form-grid { display: grid; gap: 12px; }
 .form-grid--two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.agenda-override-toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.agenda-override-toggle input { width: 16px; height: 16px; flex-shrink: 0; }
 .form-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .form-field { display: grid; gap: 5px; min-width: 0; color: #475467; font-size: 12px; }
 .form-field > span { font-weight: 530; }

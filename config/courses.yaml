@@ -52,6 +52,12 @@ courses:
     - thu
     - fri
     canvas_course_id: '11126'
+    canvas_agenda_override:
+      page_slug: 26-27-agenda-ap-physics-c
+      table_number: 1
+      expected_heading_date: 2026-09-21
+      target_week_start: 2026-09-28
+      required_text: Intro to unit 3
     gemini_reasoning: medium
     source:
       type: none

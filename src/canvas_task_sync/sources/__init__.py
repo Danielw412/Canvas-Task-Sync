@@ -13,7 +13,11 @@ from canvas_task_sync.configuration import (
 from canvas_task_sync.models import AcquisitionStrategy
 from canvas_task_sync.sources.base import IncrementalImageSourceAdapter, SourceAdapter
 from canvas_task_sync.sources.browser_connector import BrowserConnectorSource
-from canvas_task_sync.sources.canvas import CanvasAgendaSource, CanvasSourceError
+from canvas_task_sync.sources.canvas import (
+    CanvasAgendaOverrideError,
+    CanvasAgendaSource,
+    CanvasSourceError,
+)
 from canvas_task_sync.sources.google_slides import GoogleSlidesSource
 
 
@@ -55,6 +59,8 @@ class CourseAgendaSource:
             try:
                 self.selected = self._primary()
                 return self.selected.capture(include_image=include_image)
+            except CanvasAgendaOverrideError:
+                raise
             except CanvasSourceError as error:
                 if self.fallback_factory is None:
                     raise
@@ -115,6 +121,7 @@ def create_course_source_adapter(
             target_week_start=target_week_start,
             base_url=course.canvas_base_url,
             timezone_name=course.timezone,
+            agenda_override=course.canvas_agenda_override,
         )
 
     fallback_factory: Any | None = None

@@ -79,6 +79,14 @@ export interface NoFallbackSourceSettings {
   extraction: ExtractionSettings
 }
 
+export interface CanvasAgendaOverride {
+  page_slug: string
+  table_number: number
+  expected_heading_date: string
+  target_week_start: string
+  required_text: string
+}
+
 export interface CourseSettings {
   enabled: boolean
   name: string
@@ -93,6 +101,7 @@ export interface CourseSettings {
   meeting_days: string[]
   canvas_course_id?: string | null
   canvas_base_url?: string | null
+  canvas_agenda_override?: CanvasAgendaOverride | null
   source: GoogleSlidesSourceSettings | BrowserSourceSettings | NoFallbackSourceSettings
 }
 

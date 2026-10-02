@@ -2,8 +2,10 @@ import { AlertTriangle, ArrowRight, CheckCircle2, ExternalLink, Plus, Save, Sear
 import { useMemo, useState } from 'react'
 import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
+import { AgendaOverrideForm } from '../components/AgendaOverrideForm'
 import { Button, CheckRow, EmptyState, Modal } from '../components/ui'
 import { fetchJson, mutateJson } from '../lib/api'
+import { agendaOverrideValidationMessage } from '../lib/agenda-override'
 import type { CourseSettings, CourseView, GeminiModel, GeminiReasoning } from '../types'
 
 const GEMINI_MODELS: GeminiModel[] = [
@@ -102,6 +104,11 @@ export default function CoursesPage() {
 
   async function save() {
     if (!activeDraft) return
+    const overrideError = agendaOverrideValidationMessage(activeDraft.settings)
+    if (overrideError) {
+      toast(overrideError, 'warning')
+      return
+    }
     setBusy(true)
     try {
       const url = activeDraft.creating ? '/api/v1/courses' : `/api/v1/courses/${activeDraft.id}`
@@ -216,6 +223,7 @@ function SourceForm({ settings, update }: { settings: CourseSettings; update: (r
       <Field label="Fallback acquisition" help="Optional. Used only when Canvas cannot provide a verified agenda, or when selected manually."><select value={settings.source.type} onChange={(event) => switchSource(event.target.value as 'none' | 'google_slides' | 'browser')}><option value="none">No fallback · Canvas API only</option><option value="google_slides">Google Slides API · Direct fallback</option><option value="browser">Chrome source connector · Last resort</option></select></Field>
       {settings.source.type === 'none' ? <p className="form-help">Canvas API content is the only agenda source. A failed or unverified week match stops safely for review.</p> : <><Field label={settings.source.type === 'browser' ? 'Google file URL' : 'Presentation URL'} help={settings.source.type === 'browser' ? 'Paste a Google Slides, Docs, or Sheets edit URL.' : 'Paste the Google Slides share or edit link.'}><input type="url" value={settings.source.url} onChange={(event) => update((value) => { if (value.source.type !== 'none') value.source.url = event.target.value })} /></Field>{settings.source.type === 'google_slides' ? <Field label="Slide page ID" help="The stable page ID after slide=id. in the URL."><input value={settings.source.page_id} onChange={(event) => update((value) => { if (value.source.type === 'google_slides') value.source.page_id = event.target.value })} /></Field> : <div className="form-grid form-grid--two"><Field label="Expected format"><select value={settings.source.source_format} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.source_format = event.target.value as typeof value.source.source_format })}><option value="auto">Detect from URL</option><option value="google_slides">Google Slides</option><option value="google_docs">Google Docs</option><option value="google_sheets">Google Sheets</option></select></Field><Field label="Capture freshness"><select value={settings.source.freshness_seconds} onChange={(event) => update((value) => { if (value.source.type === 'browser') value.source.freshness_seconds = Number(event.target.value) })}><option value={300}>5 minutes</option><option value={900}>15 minutes</option><option value={1800}>30 minutes</option><option value={3600}>1 hour</option></select></Field></div>}</>}
     </div>
+    <AgendaOverrideForm settings={settings} update={update} />
     <div className="form-section"><h3>Extraction</h3><div className="form-grid form-grid--two"><Field label="Gemini mode"><select value={settings.source.extraction.mode} onChange={(event) => update((value) => { value.source.extraction.mode = event.target.value as CourseSettings['source']['extraction']['mode'] })}><option value="auto">Auto</option><option value="hybrid">Hybrid</option><option value="image">Image</option><option value="text">Text</option></select></Field>{settings.source.type === 'google_slides' ? <Field label="Thumbnail size"><select value={settings.source.extraction.thumbnail_size} onChange={(event) => update((value) => { value.source.extraction.thumbnail_size = event.target.value as 'small' | 'medium' | 'large' })}><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></Field> : <Field label="Acquisition"><input value={settings.source.type === 'browser' ? 'Browser extension capture' : 'Canvas API text'} disabled /></Field>}</div><ModelPreferences settings={settings} update={update} /><Field label="Course notes / AI instructions" help="Applied only to this course when Gemini decides which grounded tasks to create. Changes invalidate the extraction cache."><textarea rows={5} value={settings.ai_instructions} onChange={(event) => update((value) => { value.ai_instructions = event.target.value })} placeholder="Example: Do not create homework tasks for reading assignments in this course." /></Field><p className="form-help">Canvas API captures use text directly. A direct Google API source is the next fallback; Chrome capture is used only when configured or explicitly selected.</p></div>
     <div className="form-section"><h3>Destination</h3><div className="form-grid form-grid--three"><Field label="Assignments list"><input value={settings.task_list} onChange={(event) => update((value) => { value.task_list = event.target.value })} /></Field><Field label="Tests & quizzes list"><input value={settings.assessment_task_list} onChange={(event) => update((value) => { value.assessment_task_list = event.target.value })} /></Field><Field label="Task title prefix"><input value={settings.prefix} onChange={(event) => update((value) => { value.prefix = event.target.value.toUpperCase() })} /></Field></div></div>
   </>
