@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
+import requests
 
-from canvas_task_sync.configuration import CanvasAgendaOverride, ProjectSettings
+from canvas_task_sync.configuration import (
+    CanvasAgendaOverride,
+    NoFallbackSourceSettings,
+    ProjectSettings,
+)
 from canvas_task_sync.models import ExtractionMode, GeminiTaskCandidate, RemoteTask
 from canvas_task_sync.state import StateStore
 from canvas_task_sync.sync_service import (
@@ -758,3 +764,341 @@ def test_an_agent_turn_stopped_by_cancellation_reports_the_cancellation(
             rebase_week=None,
             cancellation=CancellationToken(lambda: cancelled["value"]),
         )
+
+
+# --- Agenda verification (Claude and Codex only) ------------------------------------------
+
+VERIFY_WEEK = date(2026, 8, 24)
+CANVAS = "https://canvas.example"
+CANVAS_PREFIX = "/api/v1/courses/11126"
+
+
+class CanvasCourse:
+    """A Canvas course whose pages a test can edit between runs."""
+
+    def __init__(self, body: str) -> None:
+        self.body = body
+        self.calls: list[str] = []
+        self.headers: dict[str, str] = {}
+
+    def get(self, url, *, params=None, timeout=None, **_kwargs):
+        del params, timeout
+        path = urlparse(url).path
+        self.calls.append(path)
+        page = {
+            "url": "weekly-agenda",
+            "title": "Weekly agenda",
+            "html_url": f"{CANVAS}/courses/11126/pages/weekly-agenda",
+            "body": self.body,
+        }
+        routes = {
+            f"{CANVAS_PREFIX}/front_page": {"url": "home", "title": "Home", "body": "<p>Hi</p>"},
+            CANVAS_PREFIX: {},
+            f"{CANVAS_PREFIX}/modules": [],
+            f"{CANVAS_PREFIX}/pages": [page],
+            f"{CANVAS_PREFIX}/pages/weekly-agenda": page,
+            f"{CANVAS_PREFIX}/assignments": [
+                {"id": 501, "name": "Practice set 4", "due_at": "2026-08-26T03:59:00Z"}
+            ],
+        }
+        if path not in routes:
+            raise requests.HTTPError(f"404 for {path}")
+
+        class Response:
+            links: dict[str, object] = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return routes[path]
+
+        return Response()
+
+
+def _table(heading: str, work: str) -> str:
+    return (
+        f"<table><tr><th>{heading}</th><th>Learning Activities</th><th>Assignments</th></tr>"
+        f"<tr><td>Monday</td><td>{work}</td><td><a href='{CANVAS}/courses/11126/assignments/"
+        "501'>Practice set 4</a></td></tr><tr><td>Tuesday</td><td>Lab</td>"
+        "<td>Bring calculator</td></tr></table>"
+    )
+
+
+class VerifyingAgent:
+    """One fake Claude backend: it verifies agendas and extracts nothing."""
+
+    def __init__(self, verdicts, counter) -> None:
+        self.verdicts = verdicts
+        self.counter = counter
+        self.used_model = "claude-opus-5-5"
+        self.provider_label = "Claude"
+        self.fallback_reasons: list[str] = []
+
+    def run_structured(self, prompt, turn, parse):
+        self.counter["verify"] += 1
+        reply = self.verdicts.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return parse(reply)
+
+    def generate(self, **_kwargs):
+        self.counter["extract"] += 1
+        return []
+
+
+def _verifying_service(
+    tmp_path, spanish_course, body, verdicts, *, provider="claude", fallback=None
+):
+    from canvas_task_sync.configuration import ExtractionAgentSettings
+    from canvas_task_sync.sources import CourseAgendaSource
+    from canvas_task_sync.sources.canvas import CanvasAgendaSource
+
+    course = spanish_course.model_copy(deep=True)
+    course.canvas_course_id = "11126"
+    course.canvas_base_url = CANVAS
+    course.source = NoFallbackSourceSettings(extraction={"mode": "text"})
+    settings = ProjectSettings(
+        root_dir=tmp_path,
+        state_path=Path(".canvas-task-sync/state.sqlite3"),
+        gemini_model="test-model",
+        extraction_agent=ExtractionAgentSettings(provider=provider),
+        courses={"physics": course},
+    )
+    canvas = CanvasCourse(body)
+    counter = {"verify": 0, "extract": 0}
+    factory_options: list[dict[str, object]] = []
+
+    def source_factory(course, credentials, *, target_week_start, acquisition_strategy, **kw):
+        del credentials
+        factory_options.append(kw)
+        return CourseAgendaSource(
+            lambda: CanvasAgendaSource(
+                course_id=course.canvas_course_id,
+                target_week_start=target_week_start,
+                current_week_start=VERIFY_WEEK,
+                base_url=CANVAS,
+                token="test-token",
+                session=canvas,
+                timezone_name=course.timezone,
+            ),
+            (lambda: fallback) if fallback is not None else None,
+            acquisition_strategy,
+            kw.get("agenda_resolver"),
+        )
+
+    gemini = FakeBackend([])
+    service = SyncService(
+        settings,
+        credentials_loader=lambda *_args, **_kwargs: object(),
+        source_factory=source_factory,
+        tasks_client_factory=lambda _credentials: FakeTasks(),
+        backend_factory=lambda **_kwargs: gemini,
+        agent_backend_factory=lambda _agent: VerifyingAgent(verdicts, counter),
+    )
+    return service, canvas, counter, factory_options, gemini
+
+
+def _verified_located() -> dict[str, object]:
+    return {
+        "status": "verified",
+        "agenda": {"kind": "page", "id": "weekly-agenda", "table_number": 1,
+                   "distinctive_text": None},
+        "summary": "Table 1 links this week's practice set.",
+        "evidence": [
+            {
+                "kind": "assignment_due",
+                "source": {"kind": "assignment", "id": "501"},
+                "quote": "Practice set 4",
+                "stated_date": "2026-08-25",
+                "supports": "requested_week",
+                "note": "",
+            }
+        ],
+        "concerns": [],
+    }
+
+
+def _prepare(service, sink=None, **kwargs):
+    return service.prepare(
+        course_id="physics",
+        include_past=True,
+        rebase_week=None,
+        target_week_start=VERIFY_WEEK,
+        progress=sink,
+        **kwargs,
+    )
+
+
+def test_a_verified_agenda_is_previewed_applied_by_replay_and_then_reused(
+    tmp_path, spanish_course
+):
+    body = _table("Unit 3", "Start Unit 3 lab") + _table("Week of August 17", "Old review")
+    verdicts = [_verified_located()]
+    service, _canvas, counter, options, _gemini = _verifying_service(
+        tmp_path, spanish_course, body, verdicts
+    )
+    sink = RecordingSink()
+    prepared = _prepare(service, sink)
+
+    assert counter == {"verify": 1, "extract": 1}
+    assert "agenda_resolver" in options[0]
+    verification = prepared.agenda_verification
+    assert verification.status.value == "verified" and not verification.uses_candidate
+    assert verification.agent_key == "claude:claude-sonnet-5-5|effort:medium"
+    capture_events = [event for event in sink.events if event[0] == RunStage.CAPTURE_SOURCE]
+    assert [event[1] for event in capture_events] == [
+        "agenda_verification_started",
+        "agenda_verified",
+        "stage_completed",
+    ]
+    assert capture_events[-1][2] == "Captured the Canvas agenda Claude located for this week."
+    assert capture_events[-1][3]["agenda_verification"]["status"] == "verified"
+    assert not service.settings.resolved_state_path.exists()
+
+    # The stored preview revalidates by replaying the decision: no second agent turn.
+    from canvas_task_sync.sync_service import prepared_plan_from_json
+
+    service.apply(prepared_plan_from_json(prepared.model_dump_json()))
+    assert counter["verify"] == 1
+    with StateStore(service.settings.resolved_state_path, writable=False) as state:
+        stored = state.cached_agenda_verification(
+            course_id="physics",
+            source_key="canvas:11126:week:2026-08-24",
+            fingerprint=verification.fingerprint,
+            verifier_version=verification.version,
+            agent_key=verification.agent_key,
+        )
+    assert stored is not None and '"cached"' not in stored
+
+    sink = RecordingSink()
+    again = _prepare(service, sink)
+    assert counter["verify"] == 1
+    assert again.agenda_verification.cached and again.page_hash == prepared.page_hash
+    reused = next(event for event in sink.events if event[1] == "agenda_verified")
+    assert "Reused the verification" in reused[2]
+
+
+def test_a_mislabeled_agenda_stops_the_run_before_extraction(tmp_path, spanish_course):
+    from canvas_task_sync.agenda_verification import AgendaVerificationError
+
+    body = _table("Week of August 17", "Start Unit 3 lab") + _table(
+        "Week of August 17", "Old review"
+    )
+    verdict = _verified_located()
+    verdict["status"] = "suspected_mislabeled"
+    verdict["agenda"]["distinctive_text"] = "Start Unit 3 lab"
+    service, _canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path, spanish_course, body, [verdict]
+    )
+    sink = RecordingSink()
+    with pytest.raises(AgendaVerificationError, match="temporary agenda override") as raised:
+        _prepare(service, sink)
+    assert raised.value.verification.override_suggestion.required_text == "Start Unit 3 lab"
+    assert counter == {"verify": 1, "extract": 0}
+    assert sink.events[-1][1] == "agenda_unverified"
+    assert not service.settings.resolved_state_path.exists()
+
+
+def test_gemini_never_verifies_or_discovers_agendas(tmp_path, spanish_course):
+    from canvas_task_sync.sources.canvas import CanvasAgendaNotFound
+
+    body = _table("Week of August 24", "Start Unit 3 lab")
+    service, _canvas, counter, options, gemini = _verifying_service(
+        tmp_path, spanish_course, body, [], provider="gemini"
+    )
+    prepared = _prepare(service)
+    assert options == [{}] and prepared.agenda_verification is None
+    assert counter == {"verify": 0, "extract": 0} and gemini.calls == 1
+    missing, _canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path, spanish_course, _table("Unit 3", "Start Unit 3 lab"), [], provider="gemini"
+    )
+    with pytest.raises(CanvasAgendaNotFound):
+        _prepare(missing)
+    assert counter["verify"] == 0
+
+
+def test_a_changed_alternative_agenda_makes_the_preview_stale(tmp_path, spanish_course):
+    body = _table("Unit 3", "Start Unit 3 lab") + _table("Week of August 17", "Old review")
+    service, canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path, spanish_course, body, [_verified_located()]
+    )
+    prepared = _prepare(service)
+    canvas.body = body.replace("Start Unit 3 lab", "Start Unit 3 lab report")
+    with pytest.raises(ValueError, match="changed after this preview"):
+        service.apply(prepared)
+    assert counter["verify"] == 1
+    assert not service.settings.resolved_state_path.exists()
+
+
+def test_an_agent_that_cannot_verify_fails_the_run_and_cancellation_is_reported(
+    tmp_path, spanish_course
+):
+    from canvas_task_sync.agenda_verification import AgendaVerificationUnavailable
+    from canvas_task_sync.agent_backends import AgentExtractionError
+
+    body = _table("Week of August 24", "Start Unit 3 lab")
+    service, _canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path,
+        spanish_course,
+        body,
+        [AgentExtractionError("Claude Code is not signed in.")],
+    )
+    with pytest.raises(AgendaVerificationUnavailable, match="not signed in"):
+        _prepare(service)
+    assert counter["extract"] == 0
+
+    cancelled = {"value": False}
+
+    def interrupted(*_args):
+        cancelled["value"] = True
+        raise AgentExtractionError("The run was cancelled.")
+
+    service, _canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path, spanish_course, body, []
+    )
+    service.agent_backend_factory = lambda _agent: type(
+        "Interrupted", (), {"run_structured": interrupted}
+    )()
+    with pytest.raises(SyncCancelled):
+        _prepare(service, cancellation=CancellationToken(lambda: cancelled["value"]))
+
+
+def test_an_unverified_canvas_agenda_falls_back_and_the_rejection_is_replayed_and_reused(
+    tmp_path, spanish_course, spanish_capture
+):
+    unresolved = {
+        "status": "unresolved",
+        "agenda": None,
+        "summary": "Nothing confirms this week.",
+        "evidence": [],
+        "concerns": [],
+    }
+    fallback = FakeSource(spanish_capture)
+    body = _table("Week of August 24", "Start Unit 3 lab")
+    service, canvas, counter, _options, _gemini = _verifying_service(
+        tmp_path, spanish_course, body, [unresolved, dict(unresolved)], fallback=fallback
+    )
+    sink = RecordingSink()
+    prepared = _prepare(service, sink)
+    assert prepared.page_hash == spanish_capture.page_hash
+    assert prepared.agenda_verification.status.value == "unresolved"
+    captured = next(
+        event
+        for event in sink.events
+        if event[0] == RunStage.CAPTURE_SOURCE and event[1] == "stage_completed"
+    )
+    assert captured[3]["acquisition_fallback"]["agenda_verification"] == "unresolved"
+    assert counter == {"verify": 1, "extract": 1}
+
+    # Apply replays the rejection through the same fallback, then caches it.
+    service.apply(prepared)
+    assert counter["verify"] == 1
+    again = _prepare(service)
+    assert counter["verify"] == 1 and again.agenda_verification.cached
+    assert again.page_hash == spanish_capture.page_hash
+
+    # A changed Canvas agenda is a new question for the agent.
+    canvas.body = _table("Week of August 24", "Start Unit 3 lab, part 2")
+    _prepare(service)
+    assert counter["verify"] == 2

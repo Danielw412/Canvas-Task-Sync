@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -132,6 +133,8 @@ THIS_WEEK_RE = re.compile(
     re.IGNORECASE,
 )
 CANVAS_ASSIGNMENT_PATH_RE = re.compile(r"/courses/\d+/assignments/\d+(?:/|$)")
+# A page URL slug starts with a letter or digit, so "." and ".." never reach an API path.
+PAGE_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.%-]{0,254}")
 # A course may embed a few published decks; each viewer page is fetched in full.
 MAX_EMBEDDED_DECKS = 3
 # A deck is a daily agenda only when several slides carry class-day headings.
@@ -844,6 +847,57 @@ def _transcript(blocks: list[AgendaBlock]) -> str:
     return "\n\n".join(sections)
 
 
+def _agenda_tables(parser: CanvasHtmlParser) -> list[HtmlNode]:
+    """The page's agenda tables in document order, as an override's table number counts them.
+
+    Layout tables that wrap other tables are skipped; so is a table without agenda content.
+    """
+    return [
+        table
+        for table in parser.root.descendants({"table"})
+        if not any(table.descendants({"table"})) and _sufficient_agenda_content(table)
+    ]
+
+
+def _dates_in(text: str, reference: date) -> list[date]:
+    found: list[date] = []
+    for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+        for match in pattern.finditer(text):
+            value = _matched_date(match, reference)
+            if value is not None and value not in found:
+                found.append(value)
+    return found
+
+
+def _labeled_week_dates(text: str, reference: date) -> list[date]:
+    """Dates that text announces as a week: a short heading, or an explicit week label."""
+    found: list[date] = []
+    heading = _week_heading_start(text, reference)
+    if heading is not None:
+        found.append(heading)
+    for pattern in (MONTH_DATE_RE, NUMERIC_DATE_RE):
+        for match in pattern.finditer(text):
+            if _has_week_label(text, match):
+                value = _matched_date(match, reference)
+                if value is not None and value not in found:
+                    found.append(value)
+    return found
+
+
+@dataclass(frozen=True)
+class AgendaWeekFacts:
+    """What a capture's own content says about its week, read without any model.
+
+    ``heading_dates`` are dates the agenda announces as its week; ``day_dates`` are dates
+    stated on its day rows or slide headings; ``due_dates`` are the Canvas due dates of the
+    assignments it links.
+    """
+
+    heading_dates: tuple[date, ...]
+    day_dates: tuple[date, ...]
+    due_dates: tuple[date, ...]
+
+
 def _embedded_deck_ids(body: str) -> list[str]:
     """Return published Slides decks embedded in Canvas HTML, in document order."""
     found: list[str] = []
@@ -1004,6 +1058,12 @@ class CanvasAgendaSource:
         self._module_items: dict[str, dict[str, Any]] = {}
         self._assignments: dict[str, dict[str, Any]] = {}
         self._quiz_assignments: dict[str, dict[str, Any]] = {}
+        # What discovery read, kept so agenda verification can search the course without
+        # asking Canvas for it again.
+        self.documents: list[CanvasDocument] = []
+        self.discovery_warnings: list[str] = []
+        self.modules: list[dict[str, Any]] = []
+        self.discovered = False
 
     def _document(
         self, payload: dict[str, Any], kind: str, context: str = ""
@@ -1073,6 +1133,7 @@ class CanvasAgendaSource:
             )
             or []
         )
+        self.modules = []
         for module in modules:
             module_context = str(module.get("name") or "")
             items = module.get("items")
@@ -1087,6 +1148,13 @@ class CanvasAgendaSource:
                     )
                     or []
                 )
+            self.modules.append(
+                {
+                    "id": str(module.get("id") or ""),
+                    "name": module_context,
+                    "items": [item for item in items if isinstance(item, dict)],
+                }
+            )
             for item in items:
                 if item.get("id") is not None:
                     self._module_items[str(item["id"])] = item
@@ -1145,7 +1213,234 @@ class CanvasAgendaSource:
             if isinstance(payload, dict):
                 kind = "assignment" if "/assignments/" in normalized else "page"
                 add(payload, kind, context)
+        self.documents = documents
+        self.discovery_warnings = warnings
+        self.discovered = True
         return documents, warnings
+
+    def ensure_discovered(self) -> None:
+        if not self.discovered:
+            self._discover()
+
+    def find_document(
+        self, kind: str, identifier: str = "", *, fetch: bool = True
+    ) -> CanvasDocument | None:
+        """Return one of this course's documents, from discovery or read from Canvas.
+
+        ``kind`` is ``front_page``, ``syllabus``, ``page`` (by URL slug), or ``assignment``
+        (by ID). Every request stays on this course's API paths; with ``fetch`` false, only
+        what discovery already read is searched.
+        """
+        identifier = identifier.strip()
+        if kind == "page":
+            if not PAGE_SLUG_RE.fullmatch(identifier):
+                return None
+            matches = [
+                document
+                for document in self.documents
+                if document.kind in {"page", "front_page"} and document.key == identifier
+            ]
+            if matches or not fetch:
+                return matches[0] if matches else None
+            payload = self.client.get(
+                f"/api/v1/courses/{self.course_id}/pages/{quote(identifier, safe='')}"
+            )
+            return self._document(payload, "page") if isinstance(payload, dict) else None
+        if kind == "assignment":
+            if not identifier.isdigit():
+                return None
+            matches = [
+                document
+                for document in self.documents
+                if document.kind == "assignment" and document.key == identifier
+            ]
+            if matches or not fetch:
+                return matches[0] if matches else None
+            payload = self.client.get(
+                f"/api/v1/courses/{self.course_id}/assignments/{identifier}"
+            )
+            if not isinstance(payload, dict) or str(payload.get("id")) != identifier:
+                return None
+            self._assignments[identifier] = payload
+            return self._document(payload, "assignment")
+        if kind in {"front_page", "syllabus"}:
+            matches = [document for document in self.documents if document.kind == kind]
+            if matches or not fetch:
+                return matches[0] if matches else None
+            if kind == "front_page":
+                payload = self.client.get(f"/api/v1/courses/{self.course_id}/front_page")
+            else:
+                payload = self.client.get(
+                    f"/api/v1/courses/{self.course_id}",
+                    params=[("include[]", "syllabus_body")],
+                )
+            return self._document(payload, kind) if isinstance(payload, dict) else None
+        return None
+
+    def assignment(self, assignment_id: str) -> dict[str, Any] | None:
+        return self._assignments.get(assignment_id)
+
+    def assignment_for_quiz(self, quiz_id: str) -> dict[str, Any] | None:
+        return self._quiz_assignments.get(quiz_id)
+
+    def module_item(self, item_id: str) -> dict[str, Any] | None:
+        return self._module_items.get(item_id)
+
+    def table_heading_dates(self, parser: CanvasHtmlParser, table: HtmlNode) -> set[date]:
+        """The week a table's own heading names, read as a temporary override reads it."""
+        return self._override_heading_dates(parser, table)
+
+    @property
+    def assignments(self) -> list[dict[str, Any]]:
+        return list(self._assignments.values())
+
+    def local_date(self, value: Any) -> date | None:
+        """A Canvas timestamp as a date in the course's time zone."""
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(ZoneInfo(self.timezone_name)).date()
+
+    def inventory_fingerprint(self) -> str:
+        """A hash of what discovery read: every document, due date, and module.
+
+        It changes when any of them does, which is what a verdict about the course as a whole
+        (an agenda missing, or none verified) depends on.
+        """
+        entries = sorted(
+            (
+                document.kind,
+                document.key,
+                hashlib.sha256(document.body.encode("utf-8")).hexdigest(),
+            )
+            for document in self.documents
+        )
+        due_dates = sorted(
+            (str(assignment.get("id")), str(assignment.get("due_at") or ""))
+            for assignment in self._assignments.values()
+        )
+        modules = [
+            (
+                module["id"],
+                module["name"],
+                [(str(item.get("type")), str(item.get("title"))) for item in module["items"]],
+            )
+            for module in self.modules
+        ]
+        payload = json.dumps(
+            {
+                "course_id": self.course_id,
+                "week_start": self.target_week_start.isoformat(),
+                "documents": entries,
+                "due_dates": due_dates,
+                "modules": modules,
+            },
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def week_facts(self, capture: SourceCapture) -> AgendaWeekFacts:
+        """Read the dates a capture states about its own week, deterministically."""
+        reference = self.target_week_start
+        headings: list[date] = []
+        days: list[date] = []
+        dues: list[date] = []
+        matched = capture.source_metadata.get("matched_start")
+        if capture.source_metadata.get("matched_heading") and isinstance(matched, str):
+            with contextlib.suppress(ValueError):
+                headings.append(date.fromisoformat(matched))
+        # A table's own heading may sit just before it, outside the captured cells.
+        for value in capture.source_metadata.get("heading_dates") or []:
+            with contextlib.suppress(ValueError):
+                parsed = date.fromisoformat(str(value))
+                if parsed not in headings:
+                    headings.append(parsed)
+        for block in capture.blocks:
+            for value in _labeled_week_dates(block.text, reference):
+                if value not in headings:
+                    headings.append(value)
+            stated = block.metadata.get("row_dates")
+            if isinstance(stated, list):
+                for item in stated:
+                    try:
+                        value = date.fromisoformat(str(item))
+                    except ValueError:
+                        continue
+                    if value not in days:
+                        days.append(value)
+            elif block.role == BlockRole.DAY:
+                for value in _dates_in(block.text, reference):
+                    if value not in days:
+                        days.append(value)
+            for link in block.metadata.get("assignment_links") or []:
+                match = re.search(r"/assignments/(\d+)", str(link.get("url") or ""))
+                assignment = self._assignments.get(match.group(1)) if match else None
+                due = self.local_date((assignment or {}).get("due_at") or link.get("due_at"))
+                if due is not None and due not in dues:
+                    dues.append(due)
+        return AgendaWeekFacts(tuple(headings), tuple(days), tuple(dues))
+
+    def capture_document(
+        self, document: CanvasDocument, *, table_number: int | None = None
+    ) -> SourceCapture:
+        """Capture a chosen document, or one of its agenda tables, for the target week.
+
+        The agenda verifier uses this when the agenda that discovery selected was not the
+        right one. It is deterministic: the same document and table always produce the same
+        capture and page hash, which is what lets a preview be revalidated.
+        """
+        parser = _parse_html(document.body)
+        week = self.target_week_start
+        if table_number is not None:
+            tables = _agenda_tables(parser)
+            if not 1 <= table_number <= len(tables):
+                raise CanvasAgendaNotFound(
+                    f'"{document.title}" has {len(tables)} agenda table(s), not a table '
+                    f"{table_number}."
+                )
+            node = tables[table_number - 1]
+            headings = sorted(self._override_heading_dates(parser, node))
+            matches = find_week_matches(node.text(" "), week)
+            if matches:
+                matched = matches[0]
+            else:
+                start = min(headings, key=lambda value: abs((value - week).days), default=week)
+                matched = WeekTextMatch(
+                    start, 0, f"Agenda table {table_number} in {document.title}", 0, bool(headings)
+                )
+            blocks = _agenda_blocks(node, document)
+        else:
+            try:
+                node, matched = _agenda_node(parser, week)
+            except CanvasAgendaNotFound:
+                try:
+                    node, matched = _relative_agenda_node(parser, week)
+                except CanvasAgendaNotFound:
+                    node, matched = parser.root, WeekTextMatch(week, 0, document.title, 0)
+            if not _sufficient_agenda_content(node):
+                raise CanvasAgendaNotFound(f'"{document.title}" holds no agenda content.')
+            blocks = _agenda_blocks(node, document, week)
+            headings = sorted(self._node_heading_dates(parser, node))
+        if not blocks:
+            raise CanvasAgendaNotFound(f'"{document.title}" holds no agenda content for the week.')
+        return self._page_capture(
+            document,
+            blocks,
+            matched=matched,
+            score=matched.score,
+            documents_checked=len(self.documents),
+            warnings=list(self.discovery_warnings),
+            heading_dates=headings,
+        )
+
+    def _node_heading_dates(self, parser: CanvasHtmlParser, node: HtmlNode) -> set[date]:
+        """A captured table's own heading, which may sit just before the table itself."""
+        return self._override_heading_dates(parser, node) if node.tag == "table" else set()
 
     def _assignment_link(
         self,
@@ -1395,6 +1690,7 @@ class CanvasAgendaSource:
             source_metadata={
                 "title": deck.title,
                 "canvas_kind": "published_slides",
+                "canvas_document": {"kind": "published_slides", "key": deck.published_id},
                 "agenda_format": "daily_slides",
                 "embedded_in": agenda.document.title,
                 "match_score": agenda.score,
@@ -1452,11 +1748,7 @@ class CanvasAgendaSource:
                 "The temporary agenda override page is missing or empty."
             )
         parser = _parse_html(document.body)
-        tables = [
-            table
-            for table in parser.root.descendants({"table"})
-            if not any(table.descendants({"table"})) and _sufficient_agenda_content(table)
-        ]
+        tables = _agenda_tables(parser)
         if override.table_number > len(tables):
             raise CanvasAgendaOverrideError(
                 f"The temporary override selects agenda table {override.table_number}, "
@@ -1519,6 +1811,7 @@ class CanvasAgendaSource:
         documents_checked: int,
         warnings: list[str],
         override_metadata: dict[str, Any] | None = None,
+        heading_dates: list[date] | None = None,
     ) -> SourceCapture:
         canonical = {
             "course_id": self.course_id,
@@ -1536,8 +1829,11 @@ class CanvasAgendaSource:
         metadata = {
             "title": document.title,
             "canvas_kind": document.kind,
+            "canvas_document": {"kind": document.kind, "key": document.key},
             "match_score": score,
             "matched_start": matched.start.isoformat(),
+            "matched_heading": matched.heading,
+            "heading_dates": [value.isoformat() for value in heading_dates or []],
             "canvas_updated_on": (document.updated_on.isoformat() if document.updated_on else None),
             "documents_checked": documents_checked,
             "warnings": warnings,
@@ -1573,7 +1869,9 @@ class CanvasAgendaSource:
         ):
             return self._override_capture(override)
         documents, warnings = self._discover()
-        ranked: list[tuple[int, CanvasDocument, HtmlNode, WeekTextMatch]] = []
+        ranked: list[
+            tuple[int, CanvasDocument, HtmlNode, WeekTextMatch, CanvasHtmlParser]
+        ] = []
         for document in documents:
             parser = _parse_html(document.body)
             combined = " ".join((document.title, document.context, parser.root.text(" ")))
@@ -1619,7 +1917,7 @@ class CanvasAgendaSource:
             sufficiency = sum(term in lowered for term in AGENDA_TERMS) + sum(
                 day in lowered for day in ("monday", "tuesday", "wednesday", "thursday", "friday")
             )
-            ranked.append((score + min(40, sufficiency * 5), document, node, matched))
+            ranked.append((score + min(40, sufficiency * 5), document, node, matched, parser))
         best_page = max(ranked, key=lambda item: item[0]) if ranked else None
         deck_agenda, deck_notes = self._deck_agenda(documents, warnings)
         if deck_agenda is not None and (best_page is None or deck_agenda.score >= best_page[0]):
@@ -1635,7 +1933,7 @@ class CanvasAgendaSource:
                     ]
                 )
             )
-        score, document, node, matched = best_page
+        score, document, node, matched, parser = best_page
         blocks = _agenda_blocks(node, document, self.target_week_start)
         if not blocks:
             raise CanvasAgendaNotFound(
@@ -1649,4 +1947,5 @@ class CanvasAgendaSource:
             score=score,
             documents_checked=len(documents),
             warnings=warnings,
+            heading_dates=sorted(self._node_heading_dates(parser, node)),
         )

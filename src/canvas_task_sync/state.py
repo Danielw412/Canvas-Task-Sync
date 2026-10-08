@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS extraction_cache (
         course_id, source_key, page_hash, extractor_version, model_name, configured_mode
     )
 );
+CREATE TABLE IF NOT EXISTS agenda_verification_cache (
+    course_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    verifier_version TEXT NOT NULL,
+    agent_key TEXT NOT NULL,
+    verification_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (course_id, source_key, fingerprint, verifier_version, agent_key)
+);
 """
 
 TASK_MAPPING_COLUMNS: dict[str, str] = {
@@ -331,5 +341,55 @@ class StateStore:
                 configured_mode.value,
                 outcome.model_dump_json(),
             ),
+        )
+        self.connection.commit()
+
+    def cached_agenda_verification(
+        self,
+        *,
+        course_id: str,
+        source_key: str,
+        fingerprint: str,
+        verifier_version: str,
+        agent_key: str,
+    ) -> str | None:
+        """The stored verification JSON for exactly this discovery result and agent."""
+        try:
+            row = self.connection.execute(
+                """
+                SELECT verification_json FROM agenda_verification_cache
+                 WHERE course_id = ? AND source_key = ? AND fingerprint = ?
+                   AND verifier_version = ? AND agent_key = ?
+                """,
+                (course_id, source_key, fingerprint, verifier_version, agent_key),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return None if row is None else str(row["verification_json"])
+
+    def cache_agenda_verification(
+        self,
+        *,
+        course_id: str,
+        source_key: str,
+        fingerprint: str,
+        verifier_version: str,
+        agent_key: str,
+        verification_json: str,
+    ) -> None:
+        if not self.writable:
+            return
+        self.connection.execute(
+            """
+            INSERT INTO agenda_verification_cache (
+                course_id, source_key, fingerprint, verifier_version, agent_key,
+                verification_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(course_id, source_key, fingerprint, verifier_version, agent_key)
+            DO UPDATE SET
+                verification_json = excluded.verification_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (course_id, source_key, fingerprint, verifier_version, agent_key, verification_json),
         )
         self.connection.commit()

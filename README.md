@@ -177,16 +177,61 @@ starts a turn.
 
 Every agent gets the same prompt, the same screenshots, and the same candidate schema as Gemini,
 so evidence reconciliation, deadlines, identity, and planning are unchanged whichever one ran.
-A turn is locked down to the extraction: no tools, no MCP servers, plugins, skills, or user
-settings, a throwaway working directory, no saved session, and an environment without Canvas,
-Google, or Gemini secrets. Agenda text cannot pull in local files (`@path` mentions are not
-expanded).
+An extraction turn is locked down to the extraction: no tools, no MCP servers, plugins, skills,
+or user settings, a throwaway working directory, no saved session, and an environment without
+Canvas, Google, or Gemini secrets. Agenda text cannot pull in local files (`@path` mentions are
+not expanded). The agenda check below is the one turn that gets tools, and only its own
+read-only Canvas tools.
 
 Runs for different courses extract in parallel. Each turn is its own Claude Code or Codex process
 of a few hundred megabytes, so one worker runs at most three at once
 (`CANVAS_TASK_SYNC_AGENT_CONCURRENCY` changes that); a further run waits for a free slot and says
 so in its progress. A new agent, model, or effort is a new extraction-cache key, so each agenda is
 extracted once more after a switch; switching back reuses the earlier cached results.
+
+### Canvas agenda verification (Claude and Codex)
+
+With Claude or Codex selected, a Canvas course's agenda is checked before anything is extracted
+from it. Deterministic discovery still picks the agenda first; the agent then confirms that it
+belongs to the requested week, using its dates, its content, the due dates of the assignments it
+links, its module, its last edit, and the agendas for the neighboring weeks. When the agenda is
+wrong, outdated, or missing, the agent looks for the right one. Gemini keeps discovery's choice
+and never runs this check.
+
+The agent works through a few read-only tools: a course overview, search, and reads of this
+course's pages, assignments, and modules. It can follow only links it was shown in this course's
+content (its pages, assignments, quizzes, and modules, and the published Slides decks the course
+links), never another course or another website. The Canvas token stays in the backend; the agent
+sees text, and a published deck is fetched without credentials.
+
+The agent's verdict is checked before it is used. Every quote must appear in the Canvas source it
+cites, every date must be one that source states (an assignment's due date must match Canvas),
+and the agenda it names is captured again deterministically and its own dates are read: its
+heading (including one just above its table), its dated days, and the due dates of the
+assignments it links. Only evidence about that agenda itself can support it. A verdict can only
+become more cautious this way, never more confident:
+
+- **verified** — the run extracts from that agenda: discovery's own, or the one the agent found.
+- **suspected mislabeled** — the agenda's heading or dated days disagree with its content, as
+  when a teacher copies last week's table and forgets the heading. No date is reinterpreted. The
+  run stops, and when a temporary agenda override would fit, the message gives its exact page,
+  table, heading date, and confirmation phrase, so you can confirm it on the Courses page.
+- **unresolved** — not enough evidence either way; the run stops.
+
+A course with a configured fallback source uses it instead of stopping, exactly as when Canvas
+has no agenda. Such a course also keeps going straight to its fallback when discovery finds no
+Canvas agenda at all, without an agent turn. A temporary agenda override is your own explicit
+choice and is never second-guessed. If the agent cannot run (sign-in, usage limit, timeout), the
+run fails rather than guessing.
+
+The verification is recorded on the preview: applying it replays the same decision without a new
+agent turn, and a preview whose agenda changed in the meantime is reported stale. Once applied,
+it is cached against what discovery saw, so an unchanged agenda is not verified again; any
+change to it, or a different agent, model, or effort, verifies afresh. A rejection is reused only
+while nothing in the course has changed, and never when Canvas failed to answer during the
+check. A run that stops is not cached, so it checks again next time. Each check appears in the
+run's log with its status, the agenda it chose, and every piece of evidence, accepted or set
+aside.
 
 ## Usage
 
@@ -266,7 +311,8 @@ Select the intended week (starting Monday), the date currently in the heading, t
 wrapper tables are excluded. Supply a distinctive phrase that appears in that table only.
 The run stops if the page, table, confirmation text, or heading cannot be verified, or if a day
 row explicitly states a date outside the intended week. A failed override does not silently
-switch to another source. Remove the override when the teacher corrects the heading.
+switch to another source. Remove the override when the teacher corrects the heading. With Claude
+or Codex selected, a stopped run's agenda check suggests these values when it finds such a table.
 
 The override applies only to runs targeting the selected week and expires after that week's
 Sunday in the course timezone. Expired settings remain visible for review; normal discovery

@@ -15,6 +15,12 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from canvas_task_sync.agenda_verification import (
+    VERIFIER_VERSION,
+    VERIFYING_PROVIDERS,
+    AgendaVerification,
+    AgendaVerifier,
+)
 from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.configuration import (
     CourseSettings,
@@ -120,6 +126,9 @@ class PreparedPlan(BaseModel):
     extraction_was_cached: bool
     extraction_outcome: ExtractionOutcome
     plan: SyncPlan
+    # The agent's checked verdict on the Canvas agenda. Revalidation replays it without an
+    # agent, and apply caches it so the unchanged agenda is not verified again.
+    agenda_verification: AgendaVerification | None = None
 
 
 class AppliedPlanResult(BaseModel):
@@ -326,11 +335,20 @@ class SyncService:
                 api_key=os.getenv("GEMINI_API_KEY"),
                 thinking_level=agent.effort,
             )
+        return self._agent_backend(agent, sink, token, RunStage.EXTRACT_ASSIGNMENTS)
+
+    def _agent_backend(
+        self,
+        agent: ResolvedExtractionAgent,
+        sink: ProgressSink,
+        token: CancellationToken,
+        stage: RunStage,
+    ) -> Any:
         backend = self.agent_backend_factory(agent)
 
         def wait_for_agent_slot() -> None:
             sink.emit(
-                RunStage.EXTRACT_ASSIGNMENTS,
+                stage,
                 "agent_slot_wait",
                 f"Other runs are using every {agent.provider_label} slot; this run starts "
                 "when one frees up.",
@@ -340,6 +358,62 @@ class SyncService:
         backend.cancelled = token.checker
         backend.on_slot_wait = wait_for_agent_slot
         return backend
+
+    def _agenda_verifier(
+        self,
+        *,
+        course_id: str,
+        course: CourseSettings,
+        agent: ResolvedExtractionAgent,
+        acquisition_strategy: AcquisitionStrategy,
+        sink: ProgressSink,
+        token: CancellationToken,
+    ) -> AgendaVerifier | None:
+        """The Canvas agenda check, for Claude and Codex only; Gemini keeps discovery's choice."""
+        if (
+            agent.provider not in VERIFYING_PROVIDERS
+            or not course.canvas_course_id
+            or acquisition_strategy == AcquisitionStrategy.CONFIGURED_SOURCE
+        ):
+            return None
+        state_path = self.settings.resolved_state_path
+
+        def lookup(source_key: str, fingerprint: str) -> AgendaVerification | None:
+            with StateStore(state_path, writable=False) as state:
+                payload = state.cached_agenda_verification(
+                    course_id=course_id,
+                    source_key=source_key,
+                    fingerprint=fingerprint,
+                    verifier_version=VERIFIER_VERSION,
+                    agent_key=agent.cache_key,
+                )
+            if payload is None:
+                return None
+            try:
+                return AgendaVerification.model_validate_json(payload)
+            except ValueError:
+                return None
+
+        def emit(
+            event_type: str, message: str, level: EventLevel, metadata: dict[str, Any]
+        ) -> None:
+            sink.emit(RunStage.CAPTURE_SOURCE, event_type, message, level=level, metadata=metadata)
+
+        return AgendaVerifier(
+            course_id=course_id,
+            course=course,
+            provider=agent.provider,
+            provider_label=agent.provider_label,
+            model=agent.model,
+            agent_key=agent.cache_key,
+            backend_factory=lambda: self._agent_backend(
+                agent, sink, token, RunStage.CAPTURE_SOURCE
+            ),
+            lookup=lookup,
+            today=_today(course.timezone),
+            emit=emit,
+            cancelled=token.checker,
+        )
 
     def prepare(
         self,
@@ -388,11 +462,20 @@ class SyncService:
 
         stage_started = perf_counter()
         credentials = self.credentials_loader(settings.root_dir, interactive=False)
+        verifier = self._agenda_verifier(
+            course_id=course_id,
+            course=course,
+            agent=agent,
+            acquisition_strategy=acquisition_strategy,
+            sink=sink,
+            token=token,
+        )
         source = self.source_factory(
             course,
             credentials,
             target_week_start=target_week_start,
             acquisition_strategy=acquisition_strategy,
+            **({"agenda_resolver": verifier} if verifier is not None else {}),
         )
         tasks_client = self.tasks_client_factory(credentials)
         tasklists, remote_tasks = _read_task_lists(tasks_client, course)
@@ -425,16 +508,30 @@ class SyncService:
         token.raise_if_cancelled()
 
         stage_started = perf_counter()
-        capture = source.capture(include_image=False)
+        try:
+            capture = source.capture(include_image=False)
+        except Exception:
+            # An agent stops its verification turn when the run is cancelled; report the
+            # cancellation rather than the interrupted turn.
+            token.raise_if_cancelled()
+            raise
+        agenda_verification = verifier.record if verifier is not None else None
         agenda_override = capture.source_metadata.get("agenda_override")
+        verified_agenda = capture.source_metadata.get("agenda_verification") or {}
+        if agenda_override:
+            capture_message = "Captured the Canvas agenda using the temporary course override."
+        elif verified_agenda and not verified_agenda.get("uses_candidate"):
+            capture_message = (
+                f"Captured the Canvas agenda {agent.provider_label} located for this week."
+            )
+        else:
+            capture_message = (
+                f"Captured the configured {capture.source_type.replace('_', ' ')} source."
+            )
         sink.emit(
             RunStage.CAPTURE_SOURCE,
             "stage_completed",
-            (
-                "Captured the Canvas agenda using the temporary course override."
-                if agenda_override
-                else f"Captured the configured {capture.source_type.replace('_', ' ')} source."
-            ),
+            capture_message,
             level=EventLevel.WARNING if agenda_override else EventLevel.INFO,
             metadata={
                 "source_type": capture.source_type,
@@ -446,6 +543,7 @@ class SyncService:
                 "capture_warnings": capture.source_metadata.get("warnings", []),
                 "acquisition_fallback": capture.source_metadata.get("acquisition_fallback"),
                 "agenda_override": agenda_override,
+                "agenda_verification": verified_agenda or None,
             },
             duration_ms=int((perf_counter() - stage_started) * 1000),
         )
@@ -682,6 +780,7 @@ class SyncService:
             extraction_was_cached=extraction_was_cached,
             extraction_outcome=outcome,
             plan=plan,
+            agenda_verification=agenda_verification,
         )
 
     def validate_prepared_plan(
@@ -703,11 +802,23 @@ class SyncService:
         if current_config_hash != prepared.config_hash:
             raise ValueError("Course configuration changed after this preview.")
         credentials = self.credentials_loader(self.settings.root_dir, interactive=False)
+        # The preview's agenda verification is replayed, never re-asked: the same Canvas
+        # discovery result must lead to the same agenda, or the preview is stale.
+        replay = (
+            {
+                "agenda_resolver": AgendaVerifier.replay(
+                    prepared.agenda_verification, course=current_course
+                )
+            }
+            if prepared.agenda_verification is not None
+            else {}
+        )
         source = self.source_factory(
             current_course,
             credentials,
             target_week_start=prepared.target_week_start,
             acquisition_strategy=prepared.acquisition_strategy,
+            **replay,
         )
         current_capture = source.capture(include_image=False)
         tasks_client = self.tasks_client_factory(credentials)
@@ -845,10 +956,22 @@ class SyncService:
                         configured_mode=prepared.configured_mode,
                         outcome=prepared.extraction_outcome,
                     )
+                verification = prepared.agenda_verification
+                if verification is not None and not verification.cached and (
+                    verification.cacheable
+                ):
+                    state.cache_agenda_verification(
+                        course_id=prepared.course_id,
+                        source_key=verification.source_key,
+                        fingerprint=verification.fingerprint,
+                        verifier_version=verification.version,
+                        agent_key=verification.agent_key,
+                        verification_json=verification.model_dump_json(exclude={"cached"}),
+                    )
             sink.emit(
                 RunStage.PERSIST_STATE,
                 "stage_completed",
-                "Persisted sync identity and extraction cache state.",
+                "Persisted sync identity, extraction cache, and agenda verification state.",
                 metadata={"state_path": str(state_path), "applied_counts": dict(applied_counts)},
             )
             return AppliedPlanResult(

@@ -12,6 +12,10 @@ no MCP servers, no plugins, skills, or user settings, a throwaway working direct
 persisted session, and an environment stripped of every secret. Agenda content is
 untrusted and is never given a way to reach this machine's files or the network.
 
+The same backends also run the agenda verifier's turn (``run_structured``). That turn gets
+exactly the read-only tools its ``AgentTurnSpec`` carries, served in-process (an SDK MCP
+server for Claude, dynamic tools for Codex), and nothing else of either agent's.
+
 Turns from concurrent runs execute in parallel, up to ``agent_concurrency()`` at once per
 process: each turn is its own CLI process of a few hundred megabytes.
 """
@@ -28,17 +32,21 @@ import threading
 import tomllib
 from collections import deque
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, TypeVar
 
 from canvas_task_sync.agent_status import (
     SIGN_IN_HINTS,
     agent_concurrency,
     agent_environment_overrides,
 )
+from canvas_task_sync.agent_tools import AgentToolset
 from canvas_task_sync.configuration import ResolvedExtractionAgent, agent_model_option
 from canvas_task_sync.models import GeminiTaskCandidate, SourceImage
+
+T = TypeVar("T")
 
 AGENT_TURN_TIMEOUT_SECONDS = 600.0
 # The Messages API rejects a larger inline image.
@@ -55,6 +63,10 @@ SYSTEM_PROMPT = (
 )
 
 
+# The in-process tool server's name, so Claude sees each tool as mcp__canvas__<name>.
+CLAUDE_TOOL_SERVER = "canvas"
+
+
 class AgentExtractionError(RuntimeError):
     def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
@@ -64,13 +76,32 @@ class AgentExtractionError(RuntimeError):
 _AGENT_SLOTS = threading.BoundedSemaphore(agent_concurrency())
 
 
-def agent_output_schema() -> dict[str, Any]:
-    """The candidate schema in the strict form both agents enforce.
+@dataclass(frozen=True)
+class AgentTurnSpec:
+    """What one turn asks of an agent: its instructions, its reply's schema, and its tools.
 
-    Structured output needs an object at the root, every property required, and no extra
-    properties, so the candidate list is wrapped and defaults become required fields.
+    Extraction has no tools. The agenda verifier's turn carries its read-only Canvas
+    toolset; ``max_turns`` bounds Claude's tool loop, and the toolset's own call budget
+    bounds both agents.
     """
-    raw = GeminiTaskCandidate.model_json_schema()
+
+    system_prompt: str
+    output_schema: dict[str, Any]
+    toolset: AgentToolset | None = None
+    max_turns: int | None = None
+
+
+def extraction_turn() -> AgentTurnSpec:
+    return AgentTurnSpec(system_prompt=SYSTEM_PROMPT, output_schema=agent_output_schema())
+
+
+def strict_json_schema(raw: dict[str, Any]) -> dict[str, Any]:
+    """A Pydantic JSON schema in the strict form both agents' structured output enforces.
+
+    Every object gets all of its properties required and no extra properties, ``$ref``s are
+    inlined, and the ``default`` and ``title`` keywords are dropped.
+    """
+    raw = dict(raw)
     definitions = raw.pop("$defs", {})
 
     def strict(node: Any) -> Any:
@@ -95,11 +126,25 @@ def agent_output_schema() -> dict[str, Any]:
             result["required"] = list(result["properties"])
         return result
 
+    return strict(raw)
+
+
+def agent_output_schema() -> dict[str, Any]:
+    """The candidate schema in the strict form both agents enforce.
+
+    Structured output needs an object at the root, every property required, and no extra
+    properties, so the candidate list is wrapped and defaults become required fields.
+    """
     return {
         "type": "object",
         "additionalProperties": False,
         "required": ["tasks"],
-        "properties": {"tasks": {"type": "array", "items": strict(raw)}},
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "items": strict_json_schema(GeminiTaskCandidate.model_json_schema()),
+            }
+        },
     }
 
 
@@ -175,22 +220,45 @@ class AgentBackend:
         images: list[SourceImage] | None = None,
     ) -> list[GeminiTaskCandidate]:
         attachments = _ordered_images(image_bytes, image_mime_type, images)
+        return self._attempt_twice(
+            lambda: parse_agent_candidates(self._run_turn(prompt, attachments))
+        )
+
+    def run_structured(
+        self,
+        prompt: str,
+        turn: AgentTurnSpec,
+        parse: Callable[[Any], T],
+    ) -> T:
+        """Run one text-only turn under ``turn`` and parse its structured reply.
+
+        Shares extraction's slot, single retry, and cancellation. A retried turn starts
+        with a fresh tool budget; whatever its tools already fetched stays fetched.
+        """
+
+        def attempt() -> T:
+            if turn.toolset is not None:
+                turn.toolset.reset()
+            return parse(self._run_turn(prompt, [], turn))
+
+        return self._attempt_twice(attempt)
+
+    def _attempt_twice(self, attempt: Callable[[], T]) -> T:
         self.failure_reasons = []
         with self._slot():
-            for attempt in (1, 2):
+            for number in (1, 2):
                 try:
-                    payload = self._run_turn(prompt, attachments)
-                    candidates = parse_agent_candidates(payload)
+                    result = attempt()
                 except AgentExtractionError as error:
                     self.failure_reasons.append(f"{self.model}: {error}")
-                    if attempt == 2 or not error.retryable or self.cancelled():
+                    if number == 2 or not error.retryable or self.cancelled():
                         raise
                     self.fallback_reasons.append(
                         f"{self.provider_label} {self.model} failed ({error}); retried once."
                     )
                     continue
                 self.used_model = self.model
-                return candidates
+                return result
         raise AssertionError("unreachable")
 
     @contextlib.contextmanager
@@ -207,7 +275,13 @@ class AgentBackend:
         finally:
             self._slots.release()
 
-    def _run_turn(self, prompt: str, images: list[tuple[bytes, str]]) -> Any:
+    def _run_turn(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        turn: AgentTurnSpec | None = None,
+    ) -> Any:
+        """Run one turn; ``turn`` is extraction's when omitted."""
         raise NotImplementedError
 
     def _interrupted(self) -> AgentExtractionError | None:
@@ -227,7 +301,12 @@ class ClaudeAgentBackend(AgentBackend):
     provider = "claude"
     provider_label = "Claude"
 
-    def _run_turn(self, prompt: str, images: list[tuple[bytes, str]]) -> Any:
+    def _run_turn(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        turn: AgentTurnSpec | None = None,
+    ) -> Any:
         for data, _mime in images:
             if len(data) > CLAUDE_IMAGE_LIMIT_BYTES:
                 raise AgentExtractionError(
@@ -235,10 +314,12 @@ class ClaudeAgentBackend(AgentBackend):
                     "images up to 5 MB. Use text extraction or another agent for this course."
                 )
         # Each run thread gets its own event loop; nothing else runs on it.
-        return asyncio.run(self._turn(prompt, images))
+        return asyncio.run(self._turn(prompt, images, turn or extraction_turn()))
 
-    async def _turn(self, prompt: str, images: list[tuple[bytes, str]]) -> Any:
-        consumer = asyncio.create_task(self._consume(prompt, images))
+    async def _turn(
+        self, prompt: str, images: list[tuple[bytes, str]], turn: AgentTurnSpec
+    ) -> Any:
+        consumer = asyncio.create_task(self._consume(prompt, images, turn))
         deadline = asyncio.get_running_loop().time() + self.timeout_seconds
         try:
             while not consumer.done():
@@ -256,23 +337,38 @@ class ClaudeAgentBackend(AgentBackend):
                 with contextlib.suppress(BaseException):
                     await consumer
 
-    def options(self, cwd: str, stderr: Callable[[str], None]) -> Any:
+    def options(
+        self,
+        cwd: str,
+        stderr: Callable[[str], None],
+        turn: AgentTurnSpec | None = None,
+    ) -> Any:
         from claude_agent_sdk import ClaudeAgentOptions
 
+        turn = turn or extraction_turn()
+        servers: dict[str, Any] = {}
+        allowed: list[str] = []
+        if turn.toolset is not None:
+            # Only the turn's own in-process tools, each approved by name in advance; with
+            # "dontAsk", anything else is denied without a prompt.
+            servers = {CLAUDE_TOOL_SERVER: _claude_tool_server(turn.toolset)}
+            allowed = [f"mcp__{CLAUDE_TOOL_SERVER}__{name}" for name in turn.toolset.names]
         return ClaudeAgentOptions(
             model=self.model,
             effort=self.effort,  # type: ignore[arg-type]
-            system_prompt=SYSTEM_PROMPT,
-            # No built-in tools, no MCP servers, and nothing that could be approved.
+            system_prompt=turn.system_prompt,
+            # No built-in tools, no MCP servers but the turn's own, and nothing that could
+            # be approved.
             tools=[],
-            allowed_tools=[],
+            allowed_tools=allowed,
             permission_mode="dontAsk",
-            mcp_servers={},
+            mcp_servers=servers,
             strict_mcp_config=True,
             # None of this machine's Claude Code settings, CLAUDE.md, hooks, or skills.
             setting_sources=[],
             skills=[],
-            output_format={"type": "json_schema", "schema": agent_output_schema()},
+            output_format={"type": "json_schema", "schema": turn.output_schema},
+            max_turns=turn.max_turns,
             cwd=cwd,
             env={
                 **agent_environment_overrides(),
@@ -284,7 +380,9 @@ class ClaudeAgentBackend(AgentBackend):
             stderr=stderr,
         )
 
-    async def _consume(self, prompt: str, images: list[tuple[bytes, str]]) -> Any:
+    async def _consume(
+        self, prompt: str, images: list[tuple[bytes, str]], turn: AgentTurnSpec
+    ) -> Any:
         from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, query
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -313,7 +411,9 @@ class ClaudeAgentBackend(AgentBackend):
         error_code: str | None = None
         result: Any = None
         with tempfile.TemporaryDirectory(prefix="canvas-task-sync-claude-") as cwd:
-            session = query(prompt=messages(), options=self.options(cwd, stderr_tail.append))
+            session = query(
+                prompt=messages(), options=self.options(cwd, stderr_tail.append, turn)
+            )
             try:
                 async with contextlib.aclosing(session):
                     # Read to the end: Claude Code exits on its own after the result, and
@@ -353,6 +453,25 @@ class ClaudeAgentBackend(AgentBackend):
         )
 
 
+def _claude_tool_server(toolset: AgentToolset) -> Any:
+    """Serve ``toolset`` in-process; a call never leaves this Python process."""
+    from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    def adapt(name: str, description: str, schema: dict[str, Any]) -> Any:
+        @tool(name, description, schema)
+        async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            # Canvas requests block, so they run off the event loop that watches the turn.
+            text, is_error = await asyncio.to_thread(toolset.call, name, arguments)
+            return {"content": [{"type": "text", "text": text}], "is_error": is_error}
+
+        return handler
+
+    return create_sdk_mcp_server(
+        CLAUDE_TOOL_SERVER,
+        tools=[adapt(item.name, item.description, item.input_schema) for item in toolset.tools],
+    )
+
+
 _CLAUDE_ERRORS = {
     "authentication_failed": f"Claude Code is not signed in. {SIGN_IN_HINTS['claude']}",
     "billing_error": "Claude reported a billing problem with the signed-in account.",
@@ -375,7 +494,9 @@ def _claude_result(message: Any, error_code: str | None) -> Any:
         return message.result or ""
     status = message.api_error_status
     if message.subtype == "error_max_structured_output_retries":
-        detail = "Claude could not produce output matching the task schema."
+        detail = "Claude could not produce output matching the required schema."
+    elif message.subtype == "error_max_turns":
+        detail = "Claude reached its turn limit before replying."
     elif error_code:
         detail = _claude_error_text(error_code)
     elif message.errors:
@@ -435,23 +556,95 @@ def codex_config_overrides(config_path: Path | None = None) -> tuple[str, ...]:
     )
 
 
+# What this client answers when Codex asks for something. Every approval is declined and
+# nothing is granted: with approvals set to "never" none should arrive, and a turn that asks
+# anyway gets no further. Anything unlisted gets the SDK's own empty answer.
+_CODEX_REFUSALS: dict[str, dict[str, Any]] = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "item/fileChange/requestApproval": {"decision": "decline"},
+    "execCommandApproval": {"decision": "denied"},
+    "applyPatchApproval": {"decision": "denied"},
+    "item/permissions/requestApproval": {"permissions": {}},
+    "mcpServer/elicitation/request": {"action": "decline"},
+    "item/tool/requestUserInput": {"answers": {}},
+}
+
+
+def codex_request_handler(
+    toolset: AgentToolset | None,
+) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
+    """Answer the app-server's requests: the turn's own dynamic tools, and refusals."""
+
+    def handle(method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        if method == "item/tool/call":
+            params = params or {}
+            if toolset is None or params.get("namespace"):
+                text, is_error = "No such tool is available.", True
+            else:
+                name = str(params.get("tool") or "")
+                text, is_error = toolset.call(name, params.get("arguments"))
+            return {
+                "contentItems": [{"type": "inputText", "text": text}],
+                "success": not is_error,
+            }
+        return dict(_CODEX_REFUSALS.get(method, {}))
+
+    return handle
+
+
+def codex_dynamic_tools(toolset: AgentToolset | None) -> list[dict[str, Any]]:
+    if toolset is None:
+        return []
+    return [
+        {
+            "type": "function",
+            "name": item.name,
+            "description": item.description,
+            "inputSchema": item.input_schema,
+        }
+        for item in toolset.tools
+    ]
+
+
 class CodexAgentBackend(AgentBackend):
-    """One ephemeral Codex thread per extraction, with this machine's ChatGPT sign-in."""
+    """One ephemeral Codex thread per turn, with this machine's ChatGPT sign-in."""
 
     provider = "codex"
     provider_label = "Codex"
 
-    def _run_turn(self, prompt: str, images: list[tuple[bytes, str]]) -> Any:
-        from openai_codex import (
-            ApprovalMode,
-            Codex,
-            CodexConfig,
-            ImageInput,
-            Sandbox,
-            TextInput,
+    def _thread_params(self, cwd: str, turn: AgentTurnSpec) -> dict[str, Any]:
+        from openai_codex.generated.v2_all import (
+            AskForApproval,
+            AskForApprovalValue,
+            SandboxMode,
+            ThreadStartParams,
         )
-        from openai_codex.generated.v2_all import ReasoningEffort
 
+        params = ThreadStartParams(
+            model=self.model,
+            sandbox=SandboxMode.read_only,
+            approval_policy=AskForApproval(root=AskForApprovalValue.never),
+            cwd=cwd,
+            ephemeral=True,
+            base_instructions=turn.system_prompt,
+        ).model_dump(mode="json", by_alias=True, exclude_none=True)
+        tools = codex_dynamic_tools(turn.toolset)
+        if tools:
+            # Dynamic tools run in this process through codex_request_handler.
+            params["dynamicTools"] = tools
+        return params
+
+    def _run_turn(
+        self,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        turn: AgentTurnSpec | None = None,
+    ) -> Any:
+        from openai_codex import ImageInput, TextInput, Thread
+        from openai_codex.client import CodexClient, CodexConfig
+        from openai_codex.generated.v2_all import GetAccountParams, ReasoningEffort
+
+        turn = turn or extraction_turn()
         with tempfile.TemporaryDirectory(prefix="canvas-task-sync-codex-") as cwd:
             config = CodexConfig(
                 config_overrides=codex_config_overrides(),
@@ -461,9 +654,14 @@ class CodexAgentBackend(AgentBackend):
                 client_title="Canvas Task Sync",
             )
             interruption: list[AgentExtractionError] = []
+            client = CodexClient(
+                config=config, approval_handler=codex_request_handler(turn.toolset)
+            )
             try:
-                codex = Codex(config)
+                client.start()
+                client.initialize()
             except Exception as error:
+                client.close()
                 raise AgentExtractionError(
                     f"Codex could not start: {_codex_detail(error)}", retryable=True
                 ) from error
@@ -478,21 +676,15 @@ class CodexAgentBackend(AgentBackend):
                     if problem is not None:
                         interruption.append(problem)
                         # Stopping the app-server ends the turn's event stream.
-                        codex.close()
+                        client.close()
                         return
 
             watcher = threading.Thread(target=watch, name="codex-turn-watch", daemon=True)
             watcher.start()
             try:
-                _require_chatgpt_sign_in(codex)
-                thread = codex.thread_start(
-                    model=self.model,
-                    sandbox=Sandbox.read_only,
-                    approval_mode=ApprovalMode.deny_all,
-                    cwd=cwd,
-                    ephemeral=True,
-                    base_instructions=SYSTEM_PROMPT,
-                )
+                _require_chatgpt_sign_in(client.account_read(GetAccountParams()))
+                started = client.thread_start(self._thread_params(cwd, turn))
+                thread = Thread(client, started.thread.id)
                 inputs: list[Any] = [TextInput(prompt)]
                 inputs.extend(
                     ImageInput(f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}")
@@ -501,7 +693,7 @@ class CodexAgentBackend(AgentBackend):
                 result = thread.run(
                     inputs,
                     effort=ReasoningEffort(self.effort) if self.effort else None,
-                    output_schema=agent_output_schema(),
+                    output_schema=turn.output_schema,
                 )
             except AgentExtractionError:
                 raise
@@ -511,7 +703,7 @@ class CodexAgentBackend(AgentBackend):
                 raise _codex_error(error) from error
             finally:
                 stop.set()
-                codex.close()
+                client.close()
                 watcher.join(timeout=2)
             if interruption:
                 raise interruption[0]
@@ -520,8 +712,8 @@ class CodexAgentBackend(AgentBackend):
             return result.final_response
 
 
-def _require_chatgpt_sign_in(codex: Any) -> None:
-    account = (codex.account().model_dump(mode="json").get("account") or {})
+def _require_chatgpt_sign_in(account_response: Any) -> None:
+    account = account_response.model_dump(mode="json").get("account") or {}
     kind = account.get("type") if isinstance(account, dict) else None
     if kind == "chatgpt":
         return

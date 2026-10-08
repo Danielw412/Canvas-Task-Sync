@@ -4,7 +4,7 @@
 
 Canvas Task Sync is a local-first pipeline that turns Canvas/course-agenda evidence into deterministic Google Tasks. Keep these responsibilities separate:
 
-`source capture -> semantic extraction (Gemini, Claude, or Codex) -> deterministic scheduling -> stable identity -> reconciliation plan -> revalidation -> Google Tasks apply -> local state`
+`source capture (-> agenda verification, Claude/Codex only) -> semantic extraction (Gemini, Claude, or Codex) -> deterministic scheduling -> stable identity -> reconciliation plan -> revalidation -> Google Tasks apply -> local state`
 
 The web app and Chrome extension are control/acquisition layers around that same pipeline; they are not alternate sync implementations. The default CLI path is dry-run. Writes require explicit apply/auto-apply paths and must pass preview revalidation.
 
@@ -19,6 +19,19 @@ The web app and Chrome extension are control/acquisition layers around that same
   plugins, settings, or saved session; secret-free env; `verbatim_prompts`), the strict output
   schema, one retry for transient failures, cancellation, and the per-process slot limit
   (`CANVAS_TASK_SYNC_AGENT_CONCURRENCY`, default 3) that bounds parallel turns' memory.
+  `run_structured` runs any other turn (`AgentTurnSpec`: prompt, schema, optional toolset) under
+  the same rules; a toolset is served in-process only (an SDK MCP server for Claude, pre-approved
+  by name under `dontAsk`; dynamic tools for Codex, whose request handler declines every approval).
+- `agent_tools.py` — standard-library tool contract (`AgentTool`, `AgentToolset`): per-turn call
+  budget, bounded results, serialized calls, and errors returned to the agent as text.
+- `agenda_verification.py` — the Claude/Codex agenda check between Canvas discovery and
+  extraction. Builds the verifier prompt and verdict schema, and `check_verdict` holds every
+  quote, date, and source against Canvas, re-captures the named agenda, and reads its own dates
+  (`week_conflict`, `week_support`); a status can only move toward caution
+  (verified → suspected_mislabeled → unresolved). `AgendaVerifier` is the `CourseAgendaSource`
+  resolver: cache reuse, agent turn, replay of a preview's record, and stale detection. Non-verified
+  results raise `AgendaVerificationError` (a `CanvasSourceError`, so the fallback applies); agent
+  failures raise `AgendaVerificationUnavailable` and fail the run.
 - `agent_status.py` — standard-library only, so the web process may import it: locates each SDK's
   bundled CLI, the quick file-based sign-in status, `claude auth status` / `codex login status`
   checks that start no turn, the secret-free agent environment, and the concurrency setting.
@@ -26,7 +39,8 @@ The web app and Chrome extension are control/acquisition layers around that same
 - `identity.py` — durable logical IDs and conservative matching across source edits/reordering. Never base primary identity on Gemini wording. Evidence is compared with dates stripped, and differing item numbers ("Unit 2" vs "Unit 3") never match.
 - `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior, and carry-over: each Canvas week is its own source, so an open task from an earlier week's agenda is adopted (not duplicated) when the item reappears.
 - `google_tasks.py` — Google Tasks transport only. Updates deliberately preserve completion/user-controlled fields.
-- `state.py` — durable sync identity mappings + extraction cache in `.canvas-task-sync/state.sqlite3`.
+- `state.py` — durable sync identity mappings + extraction cache + agenda verification cache in
+  `.canvas-task-sync/state.sqlite3`.
 - `memory.py` — `release_memory()`: collect, then hand glibc's freed pages back. Called when the
   run queue drains and on the idle loop, because the backend is long-lived and a run's peak would
   otherwise become its permanent size.
@@ -35,8 +49,9 @@ The web app and Chrome extension are control/acquisition layers around that same
 
 ### Source acquisition: `src/canvas_task_sync/sources/`
 
-- `__init__.py` — source registration and `CourseAgendaSource`, which owns Canvas-first vs configured-fallback selection.
-- `canvas.py` — Canvas API agenda discovery, same-origin link following, week selection, assignment/source context, canonical capture hashing. It also ranks the published Slides decks a course embeds, reads the most agenda-like one, and lets a daily deck compete with Canvas pages for the week; slide links to module items resolve through the module listing to the Canvas assignment (with its `due_at`).
+- `__init__.py` — source registration and `CourseAgendaSource`, which owns Canvas-first vs configured-fallback selection. An optional `agenda_resolver` checks the Canvas capture (never a temporary override's) before it is used; on a missing agenda it is consulted only when no fallback is configured.
+- `canvas.py` — Canvas API agenda discovery, same-origin link following, week selection, assignment/source context, canonical capture hashing. It also ranks the published Slides decks a course embeds, reads the most agenda-like one, and lets a daily deck compete with Canvas pages for the week; slide links to module items resolve through the module listing to the Canvas assignment (with its `due_at`). For verification it keeps discovery's inventory, finds course documents (`find_document`), captures a chosen document or agenda table deterministically (`capture_document`), and reads a capture's own dates (`week_facts`).
+- `canvas_tools.py` — the verifier agent's read-only, course-scoped tools (`CanvasCourseReader`, `canvas_toolset`): overview, search, document/assignment/module reads, and `follow_link` for links the reader itself showed (this course's content and published decks only). Bounded reads; text only, never tokens or raw payloads.
 - `published_slides.py` — reads a "Publish to web" Slides deck (`/presentation/d/e/2PACX-.../pub`) from its public viewer page: per-slide SVG, text boxes, links, and class-day headings. Acquisition only, and fetched with a separate credential-free session — the Canvas bearer token must never reach `docs.google.com`.
 - `google_slides.py` — target-page Slides API capture and optional thumbnail retrieval.
 - `browser_connector.py` — adapts the in-memory Chrome capture envelope to `SourceCapture`.
@@ -145,7 +160,15 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Claude and Codex draw from this machine's subscription sign-ins, never an API key: keep the
   pay-per-token keys out of their environment, keep the API-key refusals in both backends, and
   never copy `~/.claude` or `~/.codex` between machines. Agents get no tools, MCP servers, plugins,
-  user settings, or saved sessions, and never Canvas, Google, or Gemini secrets.
+  user settings, or saved sessions, and never Canvas, Google, or Gemini secrets. The one
+  exception is the agenda verifier's turn, which gets only `canvas_tools`: in-process, read-only,
+  scoped to the configured course, and following only links it was shown.
+- Agenda verification is Claude/Codex only; Gemini neither verifies nor discovers agendas. The
+  agent's verdict is a claim: deterministic checks decide, may only lower its confidence, and
+  never reinterpret a conflicting date, and only evidence about the named agenda itself can
+  support it. A preview carries its verification and revalidation replays it without an agent
+  turn; it is cached only on apply, keyed on discovery's result. A non-verified record is reused
+  only while the course inventory is unchanged, and never cached after Canvas read failures.
 - Keep `google.genai`, `googleapiclient`, `google_auth_oauthlib`, `google.auth`,
   `claude_agent_sdk`, and `openai_codex` out of module scope, and keep the pipeline out of the
   web process entirely. Both are enforced by
@@ -193,6 +216,7 @@ Run the narrowest relevant tests first. Useful groups:
 ```powershell
 python -m pytest tests/test_scheduling.py tests/test_identity.py tests/test_planner.py
 python -m pytest tests/test_sync_service.py
+python -m pytest tests/test_agenda_verification.py tests/test_canvas_tools.py tests/test_agent_backends.py
 python -m pytest tests/test_web_runtime.py tests/test_tasks_api.py
 python -m pytest tests/test_server.py tests/test_windows_startup.py tests/test_google_oauth.py
 ```

@@ -14,6 +14,7 @@ from canvas_task_sync.models import AcquisitionStrategy
 from canvas_task_sync.sources.base import IncrementalImageSourceAdapter, SourceAdapter
 from canvas_task_sync.sources.browser_connector import BrowserConnectorSource
 from canvas_task_sync.sources.canvas import (
+    CanvasAgendaNotFound,
     CanvasAgendaOverrideError,
     CanvasAgendaSource,
     CanvasSourceError,
@@ -22,18 +23,27 @@ from canvas_task_sync.sources.google_slides import GoogleSlidesSource
 
 
 class CourseAgendaSource:
-    """Try Canvas first and instantiate the configured fallback only if it is needed."""
+    """Try Canvas first and instantiate the configured fallback only if it is needed.
+
+    An ``agenda_resolver`` (the agent agenda verifier, given only for Claude and Codex) checks
+    what Canvas discovery chose before it is used. It returns the verified capture, or raises a
+    ``CanvasSourceError`` that falls back exactly as a missing agenda does. When discovery finds
+    nothing, it is asked to look only if ``discovers`` says so: with a configured fallback the
+    fallback is used as before, without an agent turn.
+    """
 
     def __init__(
         self,
         primary_factory: Any | None,
         fallback_factory: Any | None,
         strategy: AcquisitionStrategy,
+        agenda_resolver: Any | None = None,
     ) -> None:
         self.primary_factory = primary_factory
         self.primary: SourceAdapter | None = None
         self.fallback_factory = fallback_factory
         self.strategy = strategy
+        self.agenda_resolver = agenda_resolver
         self.selected: SourceAdapter | None = None
 
     def _primary(self) -> SourceAdapter:
@@ -48,17 +58,34 @@ class CourseAgendaSource:
             raise CanvasSourceError("No configured fallback source is available for this course.")
         return self.fallback_factory()
 
+    def _canvas_capture(self, *, include_image: bool, fallback_available: bool):
+        self.selected = self._primary()
+        resolver = self.agenda_resolver
+        try:
+            capture = self.selected.capture(include_image=include_image)
+        except CanvasAgendaOverrideError:
+            raise
+        except CanvasAgendaNotFound as missing:
+            if resolver is None or not resolver.discovers(fallback_available=fallback_available):
+                raise
+            return resolver.resolve(self.selected, None, missing)
+        # A temporary override is the course owner's own explicit, guarded choice.
+        if resolver is None or capture.source_metadata.get("agenda_override"):
+            return capture
+        return resolver.resolve(self.selected, capture, None)
+
     def capture(self, *, include_image: bool):
         if self.strategy == AcquisitionStrategy.CANVAS_API:
-            self.selected = self._primary()
-            return self.selected.capture(include_image=include_image)
+            return self._canvas_capture(include_image=include_image, fallback_available=False)
         if self.strategy == AcquisitionStrategy.CONFIGURED_SOURCE:
             self.selected = self._fallback()
             return self.selected.capture(include_image=include_image)
         if self.primary_factory is not None:
             try:
-                self.selected = self._primary()
-                return self.selected.capture(include_image=include_image)
+                return self._canvas_capture(
+                    include_image=include_image,
+                    fallback_available=self.fallback_factory is not None,
+                )
             except CanvasAgendaOverrideError:
                 raise
             except CanvasSourceError as error:
@@ -73,6 +100,11 @@ class CourseAgendaSource:
                     "to": capture.source_type,
                     "reason": str(error),
                 }
+                verification = getattr(error, "verification", None)
+                if verification is not None:
+                    metadata["acquisition_fallback"]["agenda_verification"] = (
+                        verification.status.value
+                    )
                 return capture.model_copy(update={"source_metadata": metadata})
         self.selected = self._fallback()
         return self.selected.capture(include_image=include_image)
@@ -110,6 +142,7 @@ def create_course_source_adapter(
     *,
     target_week_start: Any,
     acquisition_strategy: AcquisitionStrategy = AcquisitionStrategy.AUTO,
+    agenda_resolver: Any | None = None,
     **kwargs: Any,
 ) -> SourceAdapter:
     canvas_factory: Any | None = None
@@ -133,7 +166,9 @@ def create_course_source_adapter(
 
         fallback_factory = configured_fallback
 
-    return CourseAgendaSource(canvas_factory, fallback_factory, acquisition_strategy)
+    return CourseAgendaSource(
+        canvas_factory, fallback_factory, acquisition_strategy, agenda_resolver
+    )
 
 
 __all__ = [

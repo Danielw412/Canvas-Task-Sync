@@ -352,3 +352,181 @@ def test_codex_overrides_survive_a_missing_or_broken_config(tmp_path):
     broken = tmp_path / "broken.toml"
     broken.write_text("[mcp_servers", encoding="utf-8")
     assert not any("mcp_servers" in item for item in codex_config_overrides(Path(broken)))
+
+
+# --- Tool turns (the agenda verifier) ---------------------------------------------------
+
+
+def _toolset(calls=None, **kwargs):
+    from canvas_task_sync.agent_tools import AgentTool, AgentToolset
+
+    calls = [] if calls is None else calls
+
+    def lookup(arguments):
+        calls.append(arguments)
+        return f"read {arguments.get('id')}"
+
+    schema = {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+        "additionalProperties": False,
+    }
+    return AgentToolset(
+        tools=[
+            AgentTool("read_page", "Read a page.", schema, lookup),
+            AgentTool("search", "Search.", schema, lookup),
+        ],
+        **kwargs,
+    )
+
+
+def _turn(toolset=None):
+    from canvas_task_sync.agent_backends import AgentTurnSpec
+
+    return AgentTurnSpec(
+        system_prompt="Verify.",
+        output_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        toolset=toolset,
+        max_turns=12,
+    )
+
+
+def test_claude_tool_turns_get_only_their_own_in_process_tools(monkeypatch):
+    monkeypatch.setenv("CANVAS_TOKEN", "secret")
+    toolset = _toolset()
+    options = ClaudeAgentBackend("claude-sonnet-5-5", "high").options(
+        "/tmp/run", print, _turn(toolset)
+    )
+    assert options.tools == []
+    assert options.allowed_tools == ["mcp__canvas__read_page", "mcp__canvas__search"]
+    assert list(options.mcp_servers) == ["canvas"]
+    assert options.mcp_servers["canvas"]["type"] == "sdk"
+    assert options.strict_mcp_config and options.permission_mode == "dontAsk"
+    assert options.setting_sources == [] and options.skills == []
+    assert options.system_prompt == "Verify." and options.max_turns == 12
+    assert options.output_format["schema"] == _turn().output_schema
+    assert options.verbatim_prompts and "no-session-persistence" in options.extra_args
+    assert options.env["CANVAS_TOKEN"] == ""
+
+
+def test_claude_tool_calls_run_through_the_toolset(monkeypatch):
+    import asyncio
+
+    import claude_agent_sdk
+
+    from canvas_task_sync.agent_backends import _claude_tool_server
+
+    captured: dict[str, object] = {}
+
+    def fake_tool(name, description, schema):
+        def wrap(handler):
+            captured[name] = (description, schema, handler)
+            return name
+
+        return wrap
+
+    def fake_server(name, tools):
+        return {"name": name, "tools": tools}
+
+    monkeypatch.setattr(claude_agent_sdk, "tool", fake_tool)
+    monkeypatch.setattr(claude_agent_sdk, "create_sdk_mcp_server", fake_server)
+    calls: list[dict] = []
+    server = _claude_tool_server(_toolset(calls, max_calls=1))
+    assert server == {"name": "canvas", "tools": ["read_page", "search"]}
+    handler = captured["read_page"][2]
+    assert asyncio.run(handler({"id": "home"})) == {
+        "content": [{"type": "text", "text": "read home"}],
+        "is_error": False,
+    }
+    exhausted = asyncio.run(captured["search"][2]({"id": "x"}))
+    assert exhausted["is_error"] and "budget" in exhausted["content"][0]["text"]
+    assert calls == [{"id": "home"}]
+
+
+def test_codex_answers_tool_calls_and_refuses_everything_else():
+    from canvas_task_sync.agent_backends import codex_request_handler
+
+    calls: list[dict] = []
+    handle = codex_request_handler(_toolset(calls))
+    assert handle(
+        "item/tool/call",
+        {"threadId": "t", "turnId": "u", "callId": "c", "tool": "read_page",
+         "arguments": {"id": "home"}},
+    ) == {"contentItems": [{"type": "inputText", "text": "read home"}], "success": True}
+    namespaced = handle("item/tool/call", {"tool": "read_page", "namespace": "x", "arguments": {}})
+    assert namespaced["success"] is False
+    assert handle("item/tool/call", {"tool": "shell", "arguments": {}})["success"] is False
+    assert calls == [{"id": "home"}]
+    assert handle("item/commandExecution/requestApproval", {}) == {"decision": "decline"}
+    assert handle("item/fileChange/requestApproval", {}) == {"decision": "decline"}
+    assert handle("execCommandApproval", {}) == {"decision": "denied"}
+    assert handle("applyPatchApproval", {}) == {"decision": "denied"}
+    assert handle("item/permissions/requestApproval", {}) == {"permissions": {}}
+    assert handle("mcpServer/elicitation/request", {}) == {"action": "decline"}
+    assert handle("item/tool/requestUserInput", {}) == {"answers": {}}
+    assert handle("account/chatgptAuthTokens/refresh", {}) == {}
+    # Extraction has no tools, and a tool call during it gets nothing.
+    assert codex_request_handler(None)("item/tool/call", {"tool": "read_page"})["success"] is False
+
+
+def test_codex_threads_are_read_only_ephemeral_and_carry_only_the_turns_tools():
+    from canvas_task_sync.agent_backends import CodexAgentBackend, extraction_turn
+
+    backend = CodexAgentBackend("gpt-6-luna", "low")
+    extraction = backend._thread_params("/tmp/run", extraction_turn())
+    assert extraction == {
+        "approvalPolicy": "never",
+        "baseInstructions": extraction_turn().system_prompt,
+        "cwd": "/tmp/run",
+        "ephemeral": True,
+        "model": "gpt-6-luna",
+        "sandbox": "read-only",
+    }
+    verification = backend._thread_params("/tmp/run", _turn(_toolset()))
+    assert verification["baseInstructions"] == "Verify."
+    assert [tool["name"] for tool in verification["dynamicTools"]] == ["read_page", "search"]
+    assert all(tool["type"] == "function" for tool in verification["dynamicTools"])
+    assert verification["sandbox"] == "read-only" and verification["approvalPolicy"] == "never"
+
+
+class ToolTurnBackend(AgentBackend):
+    provider = "codex"
+    provider_label = "Codex"
+
+    def __init__(self, replies, toolset) -> None:
+        super().__init__("gpt-6-luna", "low")
+        self.replies = list(replies)
+        self.toolset = toolset
+        self.turns: list[object] = []
+
+    def _run_turn(self, prompt, images, turn=None):
+        self.turns.append((prompt, images, turn))
+        self.toolset.call("read_page", {"id": "home"})
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def test_structured_turns_retry_once_with_a_fresh_tool_budget():
+    toolset = _toolset(max_calls=1)
+    turn = _turn(toolset)
+
+    def parse(payload):
+        if payload == "bad":
+            raise AgentExtractionError("did not match", retryable=True)
+        return payload
+
+    backend = ToolTurnBackend(["bad", {"ok": True}], toolset)
+    assert backend.run_structured("check", turn, parse) == {"ok": True}
+    assert [entry[2] for entry in backend.turns] == [turn, turn]
+    assert backend.turns[0][1] == []
+    # Each attempt could spend the whole budget: the retry started from zero.
+    assert toolset.calls == ["read_page"]
+    assert backend.used_model == "gpt-6-luna" and "retried once" in backend.fallback_reasons[0]
+
+    failing = ToolTurnBackend([AgentExtractionError("usage limit")], _toolset())
+    with pytest.raises(AgentExtractionError, match="usage limit"):
+        failing.run_structured("check", _turn(failing.toolset), parse)
+    assert len(failing.turns) == 1
