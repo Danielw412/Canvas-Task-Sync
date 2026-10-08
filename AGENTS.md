@@ -128,7 +128,7 @@ New formats should do acquisition only, register through `create_source_adapter`
 - `tests/fixtures/` — sanitized extraction fixtures; prefer these over live services.
 - `web/src/**/*.test.ts(x)` — React/API UI tests.
 - `design/reference/` and `design/implementation/` — screenshots for visual comparison only; not runtime code.
-- `canvas_front_page.html`, `canvas_agenda.txt`, `canvas_extraction_probe.py` — historical/manual Canvas extraction probe artifacts. They are not imported by the package; do not start there for production behavior.
+- `canvas_front_page.html`, `canvas_extraction_probe.py` — historical/manual Canvas extraction probe artifacts. They are not imported by the package; do not start there for production behavior.
 
 ## Invariants and security
 
