@@ -125,8 +125,52 @@ export interface ConnectionStatus {
   google_client_configured: boolean
   google_authorized: boolean
   gemini_configured: boolean
+  // The extraction agent every course uses (Settings → Extraction agent).
+  extraction_provider: AgentProvider
+  extraction_label: string
+  extraction_ready: boolean
   local_server: string
   checks: ConnectionItem[]
+}
+
+export interface HealthCheck {
+  key: string
+  label: string
+  state: HealthState
+  summary: string
+  duration_ms?: number | null
+  details?: Record<string, unknown>
+}
+
+export type AgentProvider = 'gemini' | 'claude' | 'codex'
+export type AgentEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+export interface ExtractionAgentSettings {
+  provider: AgentProvider
+  // Gemini only: null keeps each course's own model chain from the Courses page.
+  model: string | null
+  effort: AgentEffort
+}
+
+export interface AgentModelOption {
+  id: string
+  label: string
+  // Empty when the model has no effort setting.
+  efforts: AgentEffort[]
+}
+
+export interface ExtractionAgentProvider {
+  id: AgentProvider
+  label: string
+  models: AgentModelOption[]
+  status: { ready: boolean | null; detail: string }
+}
+
+export interface ExtractionAgentView {
+  settings: ExtractionAgentSettings
+  label: string
+  parallel_turns: number
+  providers: ExtractionAgentProvider[]
 }
 
 export interface GoogleAuthorizationStart {

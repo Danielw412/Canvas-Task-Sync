@@ -9,11 +9,14 @@ description = "Extract school assignments from visual agendas and sync them to G
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  # Claude and Codex extraction agents; each bundles its own CLI binary.
+  "claude-agent-sdk>=0.2.164,<1",
   "fastapi>=0.135.0,<1",
   "google-api-python-client>=2.198.0,<3",
   "google-auth>=2.56.0,<3",
   "google-auth-oauthlib>=1.4.0,<2",
   "google-genai>=1.0.0,<2",
+  "openai-codex>=0.161.0,<1",
   "pydantic>=2.11.0,<3",
   "python-multipart>=0.0.20,<1",
   "python-dotenv>=1.1.0,<2",

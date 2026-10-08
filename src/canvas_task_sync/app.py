@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from canvas_task_sync.agent_status import check_agent_sign_in
 from canvas_task_sync.auth import load_google_credentials
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.google_tasks import GoogleTasksClient
@@ -46,13 +47,21 @@ def run_sync(
 
 def run_doctor(settings: ProjectSettings, course_id: str | None = None) -> list[str]:
     load_dotenv(settings.root_dir / ".env")
-    if not os.getenv("GEMINI_API_KEY"):
-        raise RuntimeError("GEMINI_API_KEY is missing from .env.")
+    agent = settings.extraction_agent
+    if agent.provider == "gemini":
+        if not os.getenv("GEMINI_API_KEY"):
+            raise RuntimeError("GEMINI_API_KEY is missing from .env.")
+        agent_check = "Gemini API key is configured."
+    else:
+        sign_in = check_agent_sign_in(agent.provider)
+        if not sign_in.ready:
+            raise RuntimeError(f"{agent.provider_label} cannot extract here: {sign_in.detail}")
+        agent_check = f"{agent.describe()} · {sign_in.detail}."
 
     credentials = load_google_credentials(settings.root_dir, interactive=False)
     tasks_client = GoogleTasksClient(credentials)
     course_ids = [course_id] if course_id else sorted(settings.courses)
-    checks = ["Gemini API key is configured.", "Google OAuth scopes are valid."]
+    checks = [agent_check, "Google OAuth scopes are valid."]
     for selected_id in course_ids:
         course = settings.course(selected_id)
         capture = create_course_source_adapter(

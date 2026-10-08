@@ -10,8 +10,9 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
+from canvas_task_sync.agent_status import check_agent_sign_in, quick_agent_status
 from canvas_task_sync.auth import SCOPES, load_google_credentials
-from canvas_task_sync.configuration import ProjectSettings
+from canvas_task_sync.configuration import CourseSettings, ProjectSettings
 from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
@@ -56,6 +57,27 @@ def connection_status(
         except (json.JSONDecodeError, UnicodeDecodeError):
             scope_summary = "token.json is not valid JSON"
     gemini = bool(os.getenv("GEMINI_API_KEY"))
+    agent = settings.extraction_agent
+    if agent.provider == "gemini":
+        extraction_ready = gemini
+        agent_summary = agent.describe() if gemini else "Add a Gemini API key"
+    else:
+        status = quick_agent_status(agent.provider)
+        extraction_ready = bool(status.ready)
+        agent_summary = f"{agent.describe()} · {status.detail}"
+    if agent.provider == "gemini" or not gemini:
+        gemini_state = HealthState.HEALTHY if gemini else HealthState.MISSING
+        gemini_summary = (
+            f"Configured · {' → '.join(settings.gemini_model_chain)} · per-course reasoning"
+            if gemini
+            else "Add a Gemini API key"
+        )
+        if agent.provider != "gemini":
+            gemini_state = HealthState.WARNING
+            gemini_summary = f"Not configured · not needed while {agent.provider_label} extracts"
+    else:
+        gemini_state = HealthState.HEALTHY
+        gemini_summary = f"Configured · not in use while {agent.provider_label} extracts"
     checks = [
         ConnectionItem(
             key="oauth_client",
@@ -70,14 +92,16 @@ def connection_status(
             summary=scope_summary,
         ),
         ConnectionItem(
+            key="extraction_agent",
+            label="Extraction agent",
+            state=HealthState.HEALTHY if extraction_ready else HealthState.MISSING,
+            summary=agent_summary,
+        ),
+        ConnectionItem(
             key="gemini_api",
             label="Gemini API",
-            state=HealthState.HEALTHY if gemini else HealthState.MISSING,
-            summary=(
-                f"Configured · {' → '.join(settings.gemini_model_chain)} · per-course reasoning"
-                if gemini
-                else "Add a Gemini API key"
-            ),
+            state=gemini_state,
+            summary=gemini_summary,
         ),
         ConnectionItem(
             key="local_database",
@@ -90,6 +114,9 @@ def connection_status(
         google_client_configured=client_configured,
         google_authorized=authorized,
         gemini_configured=gemini,
+        extraction_provider=agent.provider,
+        extraction_label=agent.describe(),
+        extraction_ready=extraction_ready,
         local_server=f"{DEFAULT_WEB_HOST}:{port}",
         checks=checks,
     )
@@ -108,6 +135,99 @@ def _pipeline():
     return GoogleTasksClient, create_course_source_adapter
 
 
+def _gemini_chain(
+    settings: ProjectSettings, course: CourseSettings | None
+) -> tuple[list[str], str]:
+    if course is not None:
+        resolved = settings.extraction_agent_for(course)
+        if resolved.provider == "gemini":
+            return resolved.models, resolved.effort or "medium"
+        return settings.gemini_model_chain_for(course), course.gemini_reasoning
+    agent = settings.extraction_agent
+    if agent.provider == "gemini" and agent.model is not None:
+        fallbacks = [model for model in settings.gemini_model_chain if model != agent.model]
+        return [agent.model, *fallbacks], agent.effort
+    return settings.gemini_model_chain, "medium"
+
+
+def gemini_health_check(
+    settings: ProjectSettings, course: CourseSettings | None = None
+) -> HealthCheck:
+    load_dotenv(settings.root_dir / ".env")
+    model_chain, reasoning_level = _gemini_chain(settings, course)
+    api_key = os.getenv("GEMINI_API_KEY")
+    started = perf_counter()
+    if not api_key:
+        return HealthCheck(
+            key="gemini_api",
+            label="Gemini API",
+            state=HealthState.MISSING,
+            summary="GEMINI_API_KEY is missing.",
+            duration_ms=int((perf_counter() - started) * 1000),
+        )
+    try:
+        from google import genai
+
+        with genai.Client(api_key=api_key) as client:
+            model = None
+            selected_model = None
+            model_errors: list[Exception] = []
+            for candidate in model_chain:
+                try:
+                    model = client.models.get(model=candidate)
+                    selected_model = candidate
+                    break
+                except Exception as error:
+                    model_errors.append(error)
+            if model is None or selected_model is None:
+                raise model_errors[-1]
+    except Exception as error:
+        return HealthCheck(
+            key="gemini_api",
+            label="Gemini API",
+            state=HealthState.ERROR,
+            summary=safe_exception_summary(error, known_secrets=[api_key]),
+            duration_ms=int((perf_counter() - started) * 1000),
+        )
+    return HealthCheck(
+        key="gemini_api",
+        label="Gemini API",
+        state=HealthState.HEALTHY,
+        summary=(
+            f"Model {selected_model} is available with {reasoning_level} reasoning."
+            if selected_model == model_chain[0]
+            else f"Fallback model {selected_model} is available; primary is unavailable."
+        ),
+        duration_ms=int((perf_counter() - started) * 1000),
+        details={
+            "model": getattr(model, "name", selected_model),
+            "configured_chain": model_chain,
+            "thinking_level": reasoning_level,
+        },
+    )
+
+
+def agent_health_check(provider: str) -> HealthCheck:
+    """Whether Claude Code or Codex is signed in here. Starts no turn and uses no usage."""
+    started = perf_counter()
+    status = check_agent_sign_in(provider)
+    label = provider.title()
+    return HealthCheck(
+        key="extraction_agent",
+        label=f"{label} sign-in",
+        state=(
+            HealthState.HEALTHY
+            if status.ready
+            else HealthState.WARNING
+            if status.ready is None
+            else HealthState.MISSING
+        ),
+        summary=status.detail,
+        duration_ms=int((perf_counter() - started) * 1000),
+        details={"provider": provider},
+    )
+
+
 def run_health_checks(
     settings: ProjectSettings,
     course_id: str | None = None,
@@ -117,71 +237,10 @@ def run_health_checks(
     load_dotenv(settings.root_dir / ".env")
     checks: list[HealthCheck] = []
     selected_course = settings.course(course_id) if course_id else None
-    reasoning_level = selected_course.gemini_reasoning if selected_course else "medium"
-    model_chain = (
-        settings.gemini_model_chain_for(selected_course)
-        if selected_course is not None
-        else settings.gemini_model_chain
-    )
-    api_key = os.getenv("GEMINI_API_KEY")
-    started = perf_counter()
-    if not api_key:
-        checks.append(
-            HealthCheck(
-                key="gemini_api",
-                label="Gemini API",
-                state=HealthState.MISSING,
-                summary="GEMINI_API_KEY is missing.",
-                duration_ms=int((perf_counter() - started) * 1000),
-            )
-        )
+    if settings.extraction_agent.provider == "gemini":
+        checks.append(gemini_health_check(settings, selected_course))
     else:
-        try:
-            from google import genai
-
-            with genai.Client(api_key=api_key) as client:
-                model = None
-                selected_model = None
-                model_errors: list[Exception] = []
-                for candidate in model_chain:
-                    try:
-                        model = client.models.get(model=candidate)
-                        selected_model = candidate
-                        break
-                    except Exception as error:
-                        model_errors.append(error)
-                if model is None or selected_model is None:
-                    raise model_errors[-1]
-            checks.append(
-                HealthCheck(
-                    key="gemini_api",
-                    label="Gemini API",
-                    state=HealthState.HEALTHY,
-                    summary=(
-                        f"Model {selected_model} is available with {reasoning_level} reasoning."
-                        if selected_model == model_chain[0]
-                        else (
-                            f"Fallback model {selected_model} is available; primary is unavailable."
-                        )
-                    ),
-                    duration_ms=int((perf_counter() - started) * 1000),
-                    details={
-                        "model": getattr(model, "name", selected_model),
-                        "configured_chain": model_chain,
-                        "thinking_level": reasoning_level,
-                    },
-                )
-            )
-        except Exception as error:
-            checks.append(
-                HealthCheck(
-                    key="gemini_api",
-                    label="Gemini API",
-                    state=HealthState.ERROR,
-                    summary=safe_exception_summary(error, known_secrets=[api_key]),
-                    duration_ms=int((perf_counter() - started) * 1000),
-                )
-            )
+        checks.append(agent_health_check(settings.extraction_agent.provider))
 
     started = perf_counter()
     try:

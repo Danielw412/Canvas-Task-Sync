@@ -4,7 +4,7 @@
 
 Canvas Task Sync is a local-first pipeline that turns Canvas/course-agenda evidence into deterministic Google Tasks. Keep these responsibilities separate:
 
-`source capture -> Gemini semantic extraction -> deterministic scheduling -> stable identity -> reconciliation plan -> revalidation -> Google Tasks apply -> local state`
+`source capture -> semantic extraction (Gemini, Claude, or Codex) -> deterministic scheduling -> stable identity -> reconciliation plan -> revalidation -> Google Tasks apply -> local state`
 
 The web app and Chrome extension are control/acquisition layers around that same pipeline; they are not alternate sync implementations. The default CLI path is dry-run. Writes require explicit apply/auto-apply paths and must pass preview revalidation.
 
@@ -13,7 +13,15 @@ The web app and Chrome extension are control/acquisition layers around that same
 ### Core Python: `src/canvas_task_sync/`
 
 - `sync_service.py` — main orchestration. Builds immutable `PreparedPlan`s, hashes config/source/remote state, revalidates before writes, then delegates apply. Start here for end-to-end sync flow; keep domain policy in the modules below instead of growing this file.
-- `gemini.py` — Gemini prompt/schema, model fallback, extraction modes, evidence reconciliation, and extraction quality checks. Gemini determines semantic meaning only; it does **not** own dates, IDs, or final sync decisions.
+- `gemini.py` — the shared prompt/schema, Gemini's backend and model fallback, extraction modes, evidence reconciliation, and extraction quality checks. `GeminiExtractor` runs every agent's candidates through the same reconciliation. The model determines semantic meaning only; it does **not** own dates, IDs, or final sync decisions.
+- `agent_backends.py` — Claude (Agent SDK) and Codex (SDK) backends with the same `generate` call
+  as Gemini's, so `GeminiExtractor` drives all three. Owns the locked-down turn (no tools, MCP,
+  plugins, settings, or saved session; secret-free env; `verbatim_prompts`), the strict output
+  schema, one retry for transient failures, cancellation, and the per-process slot limit
+  (`CANVAS_TASK_SYNC_AGENT_CONCURRENCY`, default 3) that bounds parallel turns' memory.
+- `agent_status.py` — standard-library only, so the web process may import it: locates each SDK's
+  bundled CLI, the quick file-based sign-in status, `claude auth status` / `codex login status`
+  checks that start no turn, the secret-free agent environment, and the concurrency setting.
 - `scheduling.py` — authoritative deadline/date policy and conversion from extracted candidates to deterministic draft tasks. Date bugs belong here. A row may state its own dates (`metadata.row_dates`, as a daily slide's heading does) instead of being walked from the start of the week, and the due date of the one Canvas assignment linked from a task's evidence fills in timing the source leaves unstated — never for an assessment, and never over a stated date or weekday.
 - `identity.py` — durable logical IDs and conservative matching across source edits/reordering. Never base primary identity on Gemini wording. Evidence is compared with dates stripped, and differing item numbers ("Unit 2" vs "Unit 3") never match.
 - `planner.py` — desired-vs-Google reconciliation and action selection. Owns create/update/unchanged/uncertain/source-missing/remote-missing behavior, and carry-over: each Canvas week is its own source, so an open task from an earlier week's agenda is adopted (not duplicated) when the item reappears.
@@ -38,7 +46,9 @@ New formats should do acquisition only, register through `create_source_adapter`
 
 ### Configuration, CLI, and runtime
 
-- `configuration.py` — validated YAML schema and course/source settings.
+- `configuration.py` — validated YAML schema and course/source settings. `extraction_agent` is the
+  one global agent/model/effort; `extraction_agent_for(course)` resolves it (Gemini with
+  `model: null` keeps each course's chain, and its cache key is unchanged from before agents).
 - `configuration_service.py` — safe web-driven config/credential writes; preserves YAML comments and creates `.bak` files.
 - `config/courses.yaml` — live user configuration. Do not hard-code behavior around its current courses and do not edit it unless the task actually changes user configuration.
 - `config/courses.yaml.bak` — automatic backup; ignore/edit only for explicit recovery work.
@@ -65,7 +75,8 @@ New formats should do acquisition only, register through `create_source_adapter`
 - `run_executor.py` — what a run actually does. Hosted by the worker process, and in-process only for
   a course whose source is a Chrome capture. One implementation, two hosts.
 - `worker.py` — the worker entry point. Reads `{"run_id": N}` lines on stdin, replies on stdout, and
-  exits on EOF; the web process decides when that happens. Never print to stdout here.
+  exits on EOF; the web process decides when that happens. Never print to stdout here. Re-reads
+  the config between runs when the file changed, so a Settings change applies to the next run.
 - `control_store.py` — operational SQLite (`control.sqlite3`): run history/events, schedules, occurrences, and control settings. It is not sync identity state.
 - `web_models.py` — Pydantic request/response models for the local API.
 - `tracked_tasks.py` — read-only canonical task feed that merges sync state with live Google completion. `completed=false` is intentionally strict: only live `needsAction` counts as unfinished. School Dashboard consumes this contract.
@@ -131,8 +142,13 @@ New formats should do acquisition only, register through `create_source_adapter`
 - Browser captures remain bounded and memory-only; do not persist screenshots/page content or accept credential-like metadata.
 - Keep the web server loopback-only. Do not weaken host/origin/CSRF/extension-token checks.
 - Persisted run/support data must pass the redaction layer.
-- Keep `google.genai`, `googleapiclient`, `google_auth_oauthlib`, and `google.auth` out of module
-  scope, and keep the pipeline out of the web process entirely. Both are enforced by
+- Claude and Codex draw from this machine's subscription sign-ins, never an API key: keep the
+  pay-per-token keys out of their environment, keep the API-key refusals in both backends, and
+  never copy `~/.claude` or `~/.codex` between machines. Agents get no tools, MCP servers, plugins,
+  user settings, or saved sessions, and never Canvas, Google, or Gemini secrets.
+- Keep `google.genai`, `googleapiclient`, `google_auth_oauthlib`, `google.auth`,
+  `claude_agent_sdk`, and `openai_codex` out of module scope, and keep the pipeline out of the
+  web process entirely. Both are enforced by
   `tests/test_memory_footprint.py`, which fails if an import leaks back to module load.
 - Run state, progress events, and cancellation cross the process boundary through `control.sqlite3`,
   never through the worker pipe. Keep it that way: the pipe carries only "this run finished", so a

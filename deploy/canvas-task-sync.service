@@ -34,8 +34,15 @@ Environment=MALLOC_ARENA_MAX=1
 Environment=MALLOC_TRIM_THRESHOLD_=131072
 Environment=MALLOC_MMAP_THRESHOLD_=131072
 
-# A runaway guard, not a working limit: normal operation sits far below this.
-MemoryMax=1G
+# Claude and Codex extraction turns are child processes in this cgroup, a few hundred
+# megabytes each while they run. The worker runs at most
+# CANVAS_TASK_SYNC_AGENT_CONCURRENCY of them at once (3 by default); further runs wait for a
+# slot. Raise both together if more should run in parallel.
+#Environment=CANVAS_TASK_SYNC_AGENT_CONCURRENCY=3
+
+# A runaway guard, not a working limit: an idle backend sits far below this, and three
+# parallel agent turns peak near 1G.
+MemoryMax=2G
 
 Restart=on-failure
 RestartSec=5

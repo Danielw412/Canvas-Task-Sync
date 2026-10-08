@@ -1,4 +1,5 @@
 import {
+  Bot,
   Check,
   Copy,
   Database,
@@ -20,7 +21,16 @@ import useSWR, { mutate as globalMutate } from 'swr'
 import { useApp } from '../components/AppContext'
 import { Button, EmptyState, Modal, StatusIcon } from '../components/ui'
 import { fetchJson, mutateJson } from '../lib/api'
-import type { ConnectionStatus, GoogleAuthorizationStart, GoogleAuthorizationStatus } from '../types'
+import type {
+  AgentEffort,
+  AgentProvider,
+  ConnectionStatus,
+  ExtractionAgentSettings,
+  ExtractionAgentView,
+  GoogleAuthorizationStart,
+  GoogleAuthorizationStatus,
+  HealthCheck,
+} from '../types'
 
 interface SettingsResponse {
   connections: ConnectionStatus
@@ -137,18 +147,105 @@ export default function SettingsPage() {
     <div className="settings-layout">
       <section className="settings-main">
         {tab === 'connections' ? <>
+          <ExtractionAgentSection onSaved={() => Promise.all([mutate(), globalMutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))])} />
           <section className="settings-section panel"><header><h2>Google connection</h2><span className={connections?.google_authorized ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.google_authorized ? 'healthy' : 'missing'} size={17} />{connections?.google_authorized ? 'Authorized' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>OAuth client file</strong><small>credentials.json</small></div><div className="setup-result"><StatusIcon state={connections?.google_client_configured ? 'healthy' : 'missing'} size={17} /><span>{connections?.google_client_configured ? 'Valid desktop client' : 'Not configured'}</span></div><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => void uploadClient(event.target.files?.[0])} /><Button variant="secondary" icon={Upload} disabled={busy} onClick={() => fileInput.current?.click()}>{connections?.google_client_configured ? 'Replace file' : 'Upload file'}</Button></div><div className="setup-row"><span className="step-number">2</span><div><strong>Google authorization</strong><small>Tasks and Slides access</small></div><div className="scope-list"><span><Check size={14} />Google Tasks · Read and write</span><span><Check size={14} />Google Slides · Read selected presentation pages</span></div><Button variant="secondary" disabled={busy || authorizing || !connections?.google_client_configured} onClick={() => void authorizeGoogle()}>{authorizing ? 'Waiting for consent…' : connections?.google_authorized ? 'Reauthorize' : 'Authorize'}</Button></div>{consentUrl ? <p className="setup-hint">Consent did not open? <a href={consentUrl} target="_blank" rel="noreferrer">Open the Google authorization page<ExternalLink size={13} /></a></p> : null}{connections?.google_authorized ? <button className="settings-danger-row" disabled={busy} onClick={() => { if (window.confirm('Disconnect Google access? Your OAuth client file remains, but token.json is removed from active use.')) void action(() => mutateJson('/api/v1/settings/google/disconnect'), 'Google access disconnected.') }}><span>Disconnect</span><small>Disconnect Google access for Tasks and Slides.</small></button> : null}</section>
-          <section className="settings-section panel"><header><h2>Gemini API</h2><span className={connections?.gemini_configured ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.gemini_configured ? 'healthy' : 'missing'} size={17} />{connections?.gemini_configured ? 'Configured' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>API key</strong><small>Stored locally in .env and never returned by the API</small></div><div className="masked-key">••••••••••••••••••••••••</div><div className="button-cluster"><Button variant="secondary" icon={KeyRound} onClick={() => setKeyModal(true)}>{connections?.gemini_configured ? 'Replace key' : 'Add key'}</Button><Button variant="secondary" disabled={busy || !connections?.gemini_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini connection passed.')}>Test connection</Button></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Models and reasoning</strong><small>Configured separately for each class on the Courses page</small></div></div></section>
+          <section className="settings-section panel"><header><h2>Gemini API</h2><span className={connections?.gemini_configured ? 'tone-success' : 'tone-warning'}><StatusIcon state={connections?.gemini_configured ? 'healthy' : 'missing'} size={17} />{connections?.gemini_configured ? 'Configured' : 'Setup needed'}</span></header><div className="setup-row"><span className="step-number">1</span><div><strong>API key</strong><small>Stored locally in .env and never returned by the API</small></div><div className="masked-key">••••••••••••••••••••••••</div><div className="button-cluster"><Button variant="secondary" icon={KeyRound} onClick={() => setKeyModal(true)}>{connections?.gemini_configured ? 'Replace key' : 'Add key'}</Button><Button variant="secondary" disabled={busy || !connections?.gemini_configured} onClick={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini connection passed.')}>Test connection</Button></div></div><div className="setup-row"><span className="step-number">2</span><div><strong>Models and reasoning</strong><small>Per course on the Courses page, or one Gemini model for every course under Extraction agent</small></div></div></section>
           <ChromeConnectorSection data={extension} error={extensionError} busy={busy} copyToken={copyPairingToken} rotate={() => action(() => mutateJson('/api/v1/settings/extension/rotate'), 'Extension pairing token rotated. Paste the new token into the extension.')} clear={() => action(() => mutateJson('/api/v1/settings/extension/captures', { method: 'DELETE' }), 'In-memory browser captures cleared.')} />
           <LocalServerSection address={connections?.local_server ?? '127.0.0.1:8890'} />
         </> : null}
         {tab === 'general' ? <><LocalServerSection address={connections?.local_server ?? '127.0.0.1:8890'} /><section className="settings-section panel"><header><h2>App behavior</h2></header><div className="setting-row"><div><strong>Default course</strong><small>Use the course selected in the top bar.</small></div><span>Follow current selection</span></div><div className="setting-row"><div><strong>Browser launch</strong><small>The CLI opens this control center by default.</small></div><span>Use <code>--no-open</code> to disable</span></div></section></> : null}
         {tab === 'privacy' ? <DataPrivacy data={data} busy={busy} updateRetention={updateRetention} clear={() => { if (window.confirm('Clear all run history and sanitized debug events? Sync mappings and extraction cache are kept.')) void action(() => mutateJson('/api/v1/history', { method: 'DELETE' }), 'Run history cleared.') }} /> : null}
       </section>
-      <aside className="settings-rail inspector-rail"><section className="rail-section"><h2>Connection checks</h2><div className="connection-check-list">{connections?.checks.map((check) => <div key={check.key}><span className="connection-icon">{check.key.includes('oauth') ? <FileJson size={19} /> : check.key.includes('gemini') ? <Sparkles size={19} /> : <Database size={19} />}</span><div><strong>{check.label}</strong><small>{check.summary}</small></div><StatusIcon state={check.state} /><span>{check.state === 'healthy' ? 'OK' : 'Check'}</span></div>)}</div><a href="/diagnostics" className="inline-link">View diagnostics <ExternalLink size={15} /></a></section><section className="security-list"><h2>Security</h2><div><LockKeyhole size={19} /><span>Secrets are never shown after saving</span></div><div><ShieldCheck size={19} /><span>Logs and debug metadata are sanitized</span></div><div><HardDrive size={19} /><span>Source images are not retained</span></div><div><Laptop size={19} /><span>Credentials stay on this computer</span></div></section></aside>
+      <aside className="settings-rail inspector-rail"><section className="rail-section"><h2>Connection checks</h2><div className="connection-check-list">{connections?.checks.map((check) => <div key={check.key}><span className="connection-icon">{check.key.includes('oauth') ? <FileJson size={19} /> : check.key.includes('extraction') ? <Bot size={19} /> : check.key.includes('gemini') ? <Sparkles size={19} /> : <Database size={19} />}</span><div><strong>{check.label}</strong><small>{check.summary}</small></div><StatusIcon state={check.state} /><span>{check.state === 'healthy' ? 'OK' : 'Check'}</span></div>)}</div><a href="/diagnostics" className="inline-link">View diagnostics <ExternalLink size={15} /></a></section><section className="security-list"><h2>Security</h2><div><LockKeyhole size={19} /><span>Secrets are never shown after saving</span></div><div><ShieldCheck size={19} /><span>Logs and debug metadata are sanitized</span></div><div><HardDrive size={19} /><span>Source images are not retained</span></div><div><Laptop size={19} /><span>Credentials stay on this computer</span></div></section></aside>
     </div>
     {keyModal ? <Modal title={connections?.gemini_configured ? 'Replace Gemini API key' : 'Add Gemini API key'} onClose={() => setKeyModal(false)} footer={<><Button variant="secondary" onClick={() => setKeyModal(false)}>Cancel</Button><Button icon={KeyRound} disabled={busy || apiKey.length < 8} onClick={() => void saveKey()}>Save key</Button></>}><label className="form-field"><span>API key</span><input aria-label="API key" type="password" autoFocus autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} /><small>The key is written to your local .env file. It will not be returned or logged.</small></label></Modal> : null}
   </div>
+}
+
+const EFFORT_LABELS: Record<AgentEffort, string> = {
+  low: 'Low · fastest',
+  medium: 'Medium · recommended',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max · most thorough',
+}
+
+const USAGE_NOTES: Record<AgentProvider, string> = {
+  gemini: 'Gemini API key in .env (see Gemini API below)',
+  claude: "This server's Claude Code sign-in · draws from plan usage",
+  codex: "This server's Codex (ChatGPT) sign-in · draws from plan usage",
+}
+
+function allowedEffort(effort: AgentEffort, efforts: AgentEffort[]): AgentEffort {
+  return efforts.length === 0 || efforts.includes(effort) ? effort : 'medium'
+}
+
+// One agent and model for every course's extraction. Each change saves immediately, so
+// switching agents is a single click; the next run uses it.
+function ExtractionAgentSection({ onSaved }: { onSaved: () => Promise<unknown> }) {
+  const { toast } = useApp()
+  const { data, error, mutate } = useSWR<ExtractionAgentView>('/api/v1/settings/extraction-agent', fetchJson)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [check, setCheck] = useState<(HealthCheck & { provider: AgentProvider }) | null>(null)
+
+  async function save(next: ExtractionAgentSettings) {
+    setSaving(true)
+    try {
+      const saved = await mutateJson<ExtractionAgentView>('/api/v1/settings/extraction-agent', { method: 'PUT', body: next })
+      await mutate(saved, { revalidate: false })
+      await onSaved()
+      toast(`Extraction agent: ${saved.label}.`, 'success')
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'The extraction agent could not be saved.', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function testSignIn(provider: AgentProvider) {
+    setTesting(true)
+    try {
+      const result = await mutateJson<{ check: HealthCheck | null }>('/api/v1/settings/extraction-agent/test', { body: { provider } })
+      setCheck(result.check ? { ...result.check, provider } : null)
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'The sign-in check failed.', 'error')
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (error) return <section className="settings-section panel"><header><h2>Extraction agent</h2></header><p className="local-note tone-danger">{error.message}</p></section>
+  const settings = data?.settings
+  const provider = data?.providers?.find((item) => item.id === settings?.provider)
+  const model = provider?.models.find((item) => item.id === settings?.model) ?? null
+  const perCourse = settings?.provider === 'gemini' && !settings.model
+  const efforts = model?.efforts ?? []
+  const busy = saving || !data || !settings
+  const result = check && check.provider === settings?.provider ? check : null
+  const ready = result ? result.state === 'healthy' : provider?.status.ready
+
+  function chooseProvider(id: AgentProvider) {
+    if (!data || !settings || id === settings.provider) return
+    const target = data.providers?.find((item) => item.id === id)
+    const first = id === 'gemini' ? null : target?.models[0] ?? null
+    void save({ provider: id, model: first?.id ?? null, effort: allowedEffort(settings.effort, first?.efforts ?? []) })
+  }
+
+  function chooseModel(id: string) {
+    if (!settings || !provider) return
+    const option = provider.models.find((item) => item.id === id)
+    void save({ ...settings, model: option?.id ?? null, effort: allowedEffort(settings.effort, option?.efforts ?? []) })
+  }
+
+  return <section className="settings-section panel extraction-agent">
+    <header><h2>Extraction agent</h2><span className={ready ? 'tone-success' : 'tone-warning'}><StatusIcon state={ready ? 'healthy' : 'missing'} size={17} />{!data ? 'Loading…' : ready ? 'Ready' : 'Setup needed'}</span></header>
+    <div className="setup-row"><span className="step-number">1</span><div><strong>Agent</strong><small>Reads every course's agenda; applies to the next run</small></div><div className="filter-tabs agent-switch" role="radiogroup" aria-label="Extraction agent">{(data?.providers ?? []).map((item) => <button type="button" role="radio" aria-checked={item.id === settings?.provider} className={item.id === settings?.provider ? 'is-active' : ''} key={item.id} disabled={busy} onClick={() => chooseProvider(item.id)}>{item.label}</button>)}</div></div>
+    <div className="setup-row"><span className="step-number">2</span><div><strong>Model</strong><small>{perCourse ? 'Each course keeps its own Gemini models' : 'Used for every course'}</small></div><label className="select-control"><span className="sr-only">Model</span><select aria-label="Model" value={settings?.model ?? ''} disabled={busy} onChange={(event) => chooseModel(event.target.value)}>{settings?.provider === 'gemini' ? <option value="">Per course (Courses page)</option> : null}{(provider?.models ?? []).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></div>
+    <div className="setup-row"><span className="step-number">3</span><div><strong>{settings?.provider === 'gemini' ? 'Reasoning' : 'Effort'}</strong><small>Higher effort reads hard layouts better but takes longer{settings?.provider === 'gemini' ? '' : ' and uses more plan usage'}</small></div>{perCourse || efforts.length === 0 ? <span className="setup-result">{perCourse ? 'Set per course' : `${model?.label ?? 'This model'} has no effort setting`}</span> : <label className="select-control"><span className="sr-only">Effort</span><select aria-label="Effort" value={settings?.effort} disabled={busy} onChange={(event) => settings && void save({ ...settings, effort: event.target.value as AgentEffort })}>{efforts.map((effort) => <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>)}</select></label>}</div>
+    <div className="setup-row"><span className="step-number">4</span><div><strong>Sign-in and usage</strong><small>{settings ? USAGE_NOTES[settings.provider] : ''}</small></div><div className="setup-result"><StatusIcon state={result?.state ?? (provider?.status.ready ? 'healthy' : 'missing')} size={17} /><span>{result?.summary ?? provider?.status.detail ?? ''}</span></div><Button variant="secondary" disabled={busy || testing} onClick={() => settings && void testSignIn(settings.provider)}>{testing ? 'Checking…' : settings?.provider === 'gemini' ? 'Test connection' : 'Test sign-in'}</Button></div>
+    <p className="local-note"><Bot size={15} />Claude and Codex run on this server, up to {data?.parallel_turns ?? 3} at once; further runs wait for a free slot. A new agent or model extracts each agenda again once.</p>
+  </section>
 }
 
 function ChromeConnectorSection({ data, error, busy, copyToken, rotate, clear }: { data?: ExtensionSetup; error?: Error; busy: boolean; copyToken: () => Promise<void>; rotate: () => Promise<void>; clear: () => Promise<void> }) {

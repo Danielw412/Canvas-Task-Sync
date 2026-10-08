@@ -112,7 +112,7 @@ courses:
 `12604`, `11126`, `11517`, and `12506`. The run UI can force Canvas-only or the configured fallback
 when troubleshooting.
 
-`ai_instructions` is optional free-form guidance applied only to that course's Gemini extraction.
+`ai_instructions` is optional free-form guidance applied only to that course's extraction.
 For example, one course can say `Do not create homework tasks for reading assignments` without
 changing how any other course is interpreted. Editing the guidance invalidates that course's
 extraction cache.
@@ -145,6 +145,48 @@ Extraction modes:
 
 An unreconciled image/text disagreement is reported as uncertain and is never synced. The diagnostic
 `--extraction-mode` flag can temporarily override one course without changing its YAML.
+
+### Extraction agent: Gemini, Claude, or Codex
+
+One global setting picks which agent reads every course's agenda. Change it under
+**Settings → Extraction agent** in the control center, or in `config/courses.yaml`:
+
+```yaml
+extraction_agent:
+  provider: claude          # gemini | claude | codex
+  model: claude-opus-5-5    # see the table below
+  effort: medium            # low | medium | high | xhigh | max
+```
+
+| Agent  | Models                                                                         | Runs through                                   |
+| ------ | ------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Gemini | `null` (each course's own chain, the default), or one of the Gemini models     | `GEMINI_API_KEY` in `.env`                     |
+| Claude | `claude-sonnet-5-5`, `claude-haiku-4-5-20251001`, `claude-opus-5-5`            | Claude Agent SDK, this machine's Claude Code sign-in |
+| Codex  | `gpt-6-luna`, `gpt-6.1-sol`                                                    | Codex SDK, this machine's Codex (ChatGPT) sign-in |
+
+Haiku 4.5 is the newest Haiku Claude Code offers, and it takes no effort setting. With
+`provider: gemini` and `model: null`, each course keeps the Gemini models and reasoning set on
+the Courses page; a Gemini model here replaces them for every course.
+
+Claude and Codex run on the machine that hosts the backend, inside the sync worker, and draw
+from the signed-in subscription's usage rather than an API key: the agents never see
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `CODEX_API_KEY`, and a run refuses to start if the
+sign-in itself is an API key. Sign in once on that machine (`claude`, then `/login`; and
+`codex login`), then use **Test sign-in** in Settings or `canvas-task-sync doctor`. Neither check
+starts a turn.
+
+Every agent gets the same prompt, the same screenshots, and the same candidate schema as Gemini,
+so evidence reconciliation, deadlines, identity, and planning are unchanged whichever one ran.
+A turn is locked down to the extraction: no tools, no MCP servers, plugins, skills, or user
+settings, a throwaway working directory, no saved session, and an environment without Canvas,
+Google, or Gemini secrets. Agenda text cannot pull in local files (`@path` mentions are not
+expanded).
+
+Runs for different courses extract in parallel. Each turn is its own Claude Code or Codex process
+of a few hundred megabytes, so one worker runs at most three at once
+(`CANVAS_TASK_SYNC_AGENT_CONCURRENCY` changes that); a further run waits for a free slot and says
+so in its progress. A new agent, model, or effort is a new extraction-cache key, so each agenda is
+extracted once more after a switch; switching back reuses the earlier cached results.
 
 ## Usage
 
@@ -415,8 +457,9 @@ Alongside that:
   from accumulating fragmentation that outlives the run that caused it.
 
 Measured on the server: **~50 MB idle** (`MemoryCurrent`), ~117 MB while a sync is
-running, back to ~50 MB about a minute later. `MemoryMax=1G` in the unit is a runaway
-guard, not a working limit.
+running, back to ~50 MB about a minute later. Claude and Codex extraction adds one child
+process per turn, about 240–280 MB each at peak, at most three at once. `MemoryMax=2G` in the
+unit is a runaway guard, not a working limit.
 
 One exception: a course whose agenda comes from a **Chrome capture** runs in the web
 process instead. Those captures are memory-only by design and are deliberately never

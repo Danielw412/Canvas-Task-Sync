@@ -10,7 +10,11 @@ from typing import Any
 from dotenv import dotenv_values
 from ruamel.yaml import YAML
 
-from canvas_task_sync.configuration import ProjectSettings, load_settings
+from canvas_task_sync.configuration import (
+    ExtractionAgentSettings,
+    ProjectSettings,
+    load_settings,
+)
 from canvas_task_sync.web_models import CourseSave
 
 MAX_CREDENTIAL_FILE_BYTES = 128 * 1024
@@ -75,6 +79,20 @@ class ConfigurationService:
         if course_id not in courses:
             raise ValueError(f"Course '{course_id}' does not exist.")
         del courses[course_id]
+        self._write_and_validate(document)
+        return self.load()
+
+    def save_extraction_agent(self, agent: ExtractionAgentSettings) -> ProjectSettings:
+        document = self._document()
+        payload = agent.model_dump(mode="json")
+        existing = document.get("extraction_agent")
+        if hasattr(existing, "items"):
+            _merge_mapping(existing, payload)
+        elif hasattr(document, "insert") and "courses" in document:
+            # Beside the other global model settings, ahead of the long course list.
+            document.insert(list(document).index("courses"), "extraction_agent", payload)
+        else:
+            document["extraction_agent"] = payload
         self._write_and_validate(document)
         return self.load()
 

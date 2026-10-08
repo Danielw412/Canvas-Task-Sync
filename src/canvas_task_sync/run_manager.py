@@ -386,6 +386,8 @@ class RunManager:
                 SyncService(self.settings, source_factory=self._source_factory),
                 notifier=self._event_condition,
             )
+        # The dashboard reloads settings after every config edit; runs use the latest.
+        self._local.service.settings = self.settings
         return self._local
 
     async def _dispatch(self, run_id: int) -> None:

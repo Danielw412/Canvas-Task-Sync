@@ -521,8 +521,12 @@ UNFINISHED OR RECENTLY COMPLETED TASKS FOR THIS COURSE:
 
 
 class GeminiExtractor:
+    """Turns any backend's candidates into grounded tasks: Gemini, Claude, or Codex."""
+
     def __init__(self, backend: GeminiBackend) -> None:
         self.backend = backend
+        label = getattr(backend, "provider_label", None)
+        self.label = label if isinstance(label, str) and label else "Gemini"
 
     def _run_mode(
         self,
@@ -566,7 +570,7 @@ class GeminiExtractor:
         for candidate in raw_candidates:
             block, evidence_score = _resolve_anchor(candidate, capture.blocks)
             if block is None:
-                reason = "Could not map Gemini evidence to one unique source block."
+                reason = f"Could not map {self.label} evidence to one unique source block."
                 uncertain.append(
                     UncertainItem(
                         title=candidate.title or "Unresolved agenda item",
@@ -598,8 +602,8 @@ class GeminiExtractor:
                         title=candidate.title or "Conflicting agenda item",
                         evidence=candidate.source_text,
                         reason=(
-                            "Gemini evidence could not be reconciled with the exact target-page "
-                            "text."
+                            f"{self.label} evidence could not be reconciled with the exact "
+                            "target-page text."
                         ),
                         source_anchor=block.anchor,
                     )
@@ -617,7 +621,10 @@ class GeminiExtractor:
                     UncertainItem(
                         title=candidate.title or "Unreadable agenda item",
                         evidence=exact_evidence,
-                        reason="Gemini did not provide a high-enough-confidence actionable title.",
+                        reason=(
+                            f"{self.label} did not provide a high-enough-confidence actionable "
+                            "title."
+                        ),
                         source_anchor=block.anchor,
                     )
                 )

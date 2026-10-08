@@ -29,6 +29,10 @@ DEFERRED_MODULES = [
     "canvas_task_sync.gemini",
     "canvas_task_sync.sources",
     "canvas_task_sync.run_executor",
+    # Claude and Codex load only for an agent extraction, inside the worker.
+    "canvas_task_sync.agent_backends",
+    "claude_agent_sdk",
+    "openai_codex",
 ]
 
 
