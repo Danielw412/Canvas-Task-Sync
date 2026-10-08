@@ -53,6 +53,44 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _SettingsReloader:
+    """Gives each run the configuration as it is now, not as it was at startup.
+
+    The worker lives as long as runs keep arriving, and the dashboard edits the config
+    meanwhile -- switching the extraction agent in Settings, say. A run that starts after
+    the edit should see it, so the file is re-read whenever it has changed. A run already
+    under way keeps the settings it started with.
+    """
+
+    def __init__(self, config_path: Path, service: SyncService) -> None:
+        self.config_path = config_path
+        self.service = service
+        self._lock = threading.Lock()
+        self._stamp = self._current_stamp()
+
+    def _current_stamp(self) -> tuple[int, int] | None:
+        try:
+            stat = self.config_path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def refresh(self) -> None:
+        with self._lock:
+            stamp = self._current_stamp()
+            if stamp is None or stamp == self._stamp:
+                return
+            try:
+                self.service.settings = load_settings(self.config_path)
+            except Exception as error:  # Keep the last good settings over a broken file.
+                print(
+                    f"canvas-task-sync worker: kept the previous configuration: "
+                    f"{safe_exception_summary(error)}",
+                    file=sys.stderr,
+                )
+            self._stamp = stamp
+
+
 class _Writer:
     """Serializes replies so concurrent runs cannot interleave a line."""
 
@@ -78,11 +116,14 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = load_settings(args.config)
     store = ControlStore(settings.root_dir / ".canvas-task-sync" / "control.sqlite3")
-    executor = RunExecutor(store, SyncService(settings))
+    service = SyncService(settings)
+    executor = RunExecutor(store, service)
+    reloader = _SettingsReloader(args.config, service)
     writer.send({"ready": True})
 
     def handle(run_id: int) -> None:
         try:
+            reloader.refresh()
             executor.execute(run_id)
         except Exception as error:  # The run's own failure handling already ran.
             writer.send({"run_id": run_id, "ok": False, "error": safe_exception_summary(error)})

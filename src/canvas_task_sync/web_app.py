@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import html
 import json
+import os
 import re
 import secrets
 import uuid
@@ -21,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
+from canvas_task_sync.agent_status import agent_concurrency, quick_agent_status
 from canvas_task_sync.browser_capture import (
     MAX_CAPTURE_BYTES,
     MAX_CAPTURE_TEXT_BYTES,
@@ -31,7 +33,13 @@ from canvas_task_sync.browser_capture import (
     resource_id_from_url,
     source_type_from_url,
 )
-from canvas_task_sync.configuration import CourseSettings, ProjectSettings
+from canvas_task_sync.configuration import (
+    AGENT_MODEL_OPTIONS,
+    AGENT_PROVIDER_LABELS,
+    CourseSettings,
+    ExtractionAgentSettings,
+    ProjectSettings,
+)
 from canvas_task_sync.configuration_service import (
     MAX_CREDENTIAL_FILE_BYTES,
     ConfigurationService,
@@ -43,7 +51,12 @@ from canvas_task_sync.google_oauth import (
     build_redirect_uri,
 )
 from canvas_task_sync.google_tasks import GoogleTasksError
-from canvas_task_sync.health import connection_status, run_health_checks
+from canvas_task_sync.health import (
+    agent_health_check,
+    connection_status,
+    gemini_health_check,
+    run_health_checks,
+)
 from canvas_task_sync.manual_tasks import ManualTaskError, ManualTaskService
 from canvas_task_sync.memory import release_memory
 from canvas_task_sync.models import AcquisitionStrategy
@@ -70,6 +83,7 @@ from canvas_task_sync.web_models import (
     CourseSave,
     CourseView,
     DiagnosticsResponse,
+    ExtractionAgentTest,
     GeminiKeyUpdate,
     GeneralSettings,
     HealthState,
@@ -1028,13 +1042,32 @@ def create_web_app(
     @api.post("/settings/gemini/test")
     async def test_gemini(request: Request) -> dict[str, Any]:
         runtime = _runtime(request)
-        checks = await asyncio.to_thread(
-            run_health_checks,
-            runtime.settings,
-            None,
-            capture_broker=runtime.capture_broker,
-        )
-        check = next((item for item in checks if item.key == "gemini_api"), None)
+        check = await asyncio.to_thread(gemini_health_check, runtime.settings)
+        return {"check": check}
+
+    @api.get("/settings/extraction-agent")
+    def get_extraction_agent(request: Request) -> dict[str, Any]:
+        return _extraction_agent_view(_runtime(request))
+
+    @api.put("/settings/extraction-agent")
+    def update_extraction_agent(
+        request: Request, payload: ExtractionAgentSettings
+    ) -> dict[str, Any]:
+        runtime = _runtime(request)
+        runtime.configuration.save_extraction_agent(payload)
+        runtime.reload_settings()
+        return _extraction_agent_view(runtime)
+
+    @api.post("/settings/extraction-agent/test")
+    async def test_extraction_agent(
+        request: Request, payload: ExtractionAgentTest
+    ) -> dict[str, Any]:
+        """Check one agent's sign-in (or Gemini's key) without starting a turn."""
+        runtime = _runtime(request)
+        if payload.provider == "gemini":
+            check = await asyncio.to_thread(gemini_health_check, runtime.settings)
+        else:
+            check = await asyncio.to_thread(agent_health_check, payload.provider)
         return {"check": check}
 
     @api.post("/settings/oauth-client", status_code=204)
@@ -1186,6 +1219,37 @@ def _runtime(request: Request) -> WebRuntime:
     return runtime
 
 
+def _extraction_agent_view(runtime: WebRuntime) -> dict[str, Any]:
+    """The global agent, every selectable model, and each agent's quick status."""
+    agent = runtime.settings.extraction_agent
+    gemini_ready = bool(os.getenv("GEMINI_API_KEY"))
+    status: dict[str, dict[str, Any]] = {
+        "gemini": {
+            "ready": gemini_ready,
+            "detail": "API key configured" if gemini_ready else "Add a Gemini API key",
+        }
+    }
+    for provider in ("claude", "codex"):
+        quick = quick_agent_status(provider)
+        status[provider] = {"ready": quick.ready, "detail": quick.detail}
+    return {
+        "settings": agent.model_dump(mode="json"),
+        "label": agent.describe(),
+        "parallel_turns": agent_concurrency(),
+        "providers": [
+            {
+                "id": provider,
+                "label": label,
+                "models": [
+                    option.model_dump(mode="json") for option in AGENT_MODEL_OPTIONS[provider]
+                ],
+                "status": status[provider],
+            }
+            for provider, label in AGENT_PROVIDER_LABELS.items()
+        ],
+    }
+
+
 def _default_course(settings: ProjectSettings) -> str | None:
     enabled = sorted(key for key, course in settings.courses.items() if course.enabled)
     return enabled[0] if enabled else next(iter(sorted(settings.courses)), None)
@@ -1235,7 +1299,7 @@ def _course_views(runtime: WebRuntime) -> list[CourseView]:
                 source_ready = False
         ready = (
             connections.google_authorized
-            and connections.gemini_configured
+            and connections.extraction_ready
             and source_ready
         )
         if not course.enabled:

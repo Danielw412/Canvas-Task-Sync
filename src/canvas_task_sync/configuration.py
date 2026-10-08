@@ -48,6 +48,119 @@ GeminiModelName = Literal[
 ]
 GeminiReasoningLevel = Literal["low", "medium", "high"]
 
+# Which agent turns agenda evidence into task candidates. Gemini runs through the API key in
+# .env; Claude and Codex run through their SDKs with this machine's own sign-ins, so they draw
+# from the signed-in subscription's usage rather than from an API key.
+AgentProvider = Literal["gemini", "claude", "codex"]
+AgentEffort = Literal["low", "medium", "high", "xhigh", "max"]
+AGENT_PROVIDER_LABELS: dict[str, str] = {"gemini": "Gemini", "claude": "Claude", "codex": "Codex"}
+_AGENT_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
+class AgentModelOption(BaseModel):
+    id: str
+    label: str
+    # Empty when the model takes no effort setting.
+    efforts: tuple[str, ...]
+
+
+AGENT_MODEL_OPTIONS: dict[str, tuple[AgentModelOption, ...]] = {
+    "gemini": tuple(
+        AgentModelOption(
+            id=model,
+            label=model.removeprefix("gemini-").replace("-", " "),
+            efforts=("low", "medium", "high"),
+        )
+        for model in GEMINI_MODEL_OPTIONS
+    ),
+    "claude": (
+        AgentModelOption(id="claude-sonnet-5-5", label="Sonnet 5.5", efforts=_AGENT_EFFORTS),
+        # Haiku 4.5 is the newest Haiku Claude Code offers, and it has no effort setting.
+        AgentModelOption(id="claude-haiku-4-5-20251001", label="Haiku 4.5", efforts=()),
+        AgentModelOption(id="claude-opus-5-5", label="Opus 5.5", efforts=_AGENT_EFFORTS),
+    ),
+    "codex": (
+        AgentModelOption(id="gpt-6-luna", label="GPT-6 Luna", efforts=_AGENT_EFFORTS),
+        AgentModelOption(id="gpt-6.1-sol", label="GPT-6.1 Sol", efforts=_AGENT_EFFORTS),
+    ),
+}
+
+
+def agent_model_option(provider: str, model: str) -> AgentModelOption | None:
+    return next(
+        (option for option in AGENT_MODEL_OPTIONS.get(provider, ()) if option.id == model),
+        None,
+    )
+
+
+class ExtractionAgentSettings(BaseModel):
+    """The one agent and model every course's extraction uses.
+
+    For Gemini, ``model: null`` keeps each course's own model chain and reasoning from the
+    Courses page; a Gemini model here replaces them for every course.
+    """
+
+    provider: AgentProvider = "gemini"
+    model: str | None = None
+    effort: AgentEffort = "medium"
+
+    @model_validator(mode="after")
+    def validate_model(self) -> ExtractionAgentSettings:
+        options = AGENT_MODEL_OPTIONS[self.provider]
+        if self.model is None and self.provider != "gemini":
+            self.model = options[0].id
+        if self.model is None:  # Per-course Gemini settings, including their reasoning.
+            return self
+        option = agent_model_option(self.provider, self.model)
+        if option is None:
+            choices = ", ".join(item.id for item in options)
+            label = AGENT_PROVIDER_LABELS[self.provider]
+            raise ValueError(f"{label} model must be one of: {choices}")
+        if option.efforts and self.effort not in option.efforts:
+            raise ValueError(
+                f"{option.label} effort must be one of: {', '.join(option.efforts)}"
+            )
+        return self
+
+    @property
+    def provider_label(self) -> str:
+        return AGENT_PROVIDER_LABELS[self.provider]
+
+    def describe(self) -> str:
+        """A short status line, such as "Claude · Sonnet 5.5 · medium effort"."""
+        if self.model is None:
+            return f"{self.provider_label} · per-course models"
+        option = agent_model_option(self.provider, self.model)
+        parts = [self.provider_label, option.label if option else self.model]
+        if option is not None and option.efforts:
+            parts.append(f"{self.effort} {'reasoning' if self.provider == 'gemini' else 'effort'}")
+        return " · ".join(parts)
+
+
+class ResolvedExtractionAgent(BaseModel):
+    """What one course's extraction actually runs, after global and course settings merge."""
+
+    provider: AgentProvider
+    # The primary model first; only Gemini has fallbacks.
+    models: list[str]
+    # None for a model without an effort setting.
+    effort: str | None
+
+    @property
+    def model(self) -> str:
+        return self.models[0]
+
+    @property
+    def provider_label(self) -> str:
+        return AGENT_PROVIDER_LABELS[self.provider]
+
+    @property
+    def cache_key(self) -> str:
+        if self.provider == "gemini":
+            # Unchanged from before agents existed, so existing Gemini cache entries still hit.
+            return f"{' -> '.join(self.models)}|reasoning:{self.effort}"
+        return f"{self.provider}:{self.model}|effort:{self.effort or 'none'}"
+
 
 def _google_workspace_source_type(value: str) -> str | None:
     parsed = urlparse(value)
@@ -322,6 +435,7 @@ class ProjectSettings(BaseModel):
             "gemini-3.5-flash-lite",
         ]
     )
+    extraction_agent: ExtractionAgentSettings = Field(default_factory=ExtractionAgentSettings)
     courses: dict[str, CourseSettings]
     root_dir: Path = Path(".")
 
@@ -352,6 +466,27 @@ class ProjectSettings(BaseModel):
 
     def gemini_cache_key_for(self, course: CourseSettings) -> str:
         return " -> ".join(self.gemini_model_chain_for(course))
+
+    def extraction_agent_for(self, course: CourseSettings) -> ResolvedExtractionAgent:
+        agent = self.extraction_agent
+        if agent.provider == "gemini":
+            if agent.model is None:
+                return ResolvedExtractionAgent(
+                    provider="gemini",
+                    models=self.gemini_model_chain_for(course),
+                    effort=course.gemini_reasoning,
+                )
+            fallbacks = [model for model in self.gemini_model_chain if model != agent.model]
+            return ResolvedExtractionAgent(
+                provider="gemini", models=[agent.model, *fallbacks], effort=agent.effort
+            )
+        assert agent.model is not None  # The validator fills in the provider's default.
+        option = agent_model_option(agent.provider, agent.model)
+        return ResolvedExtractionAgent(
+            provider=agent.provider,
+            models=[agent.model],
+            effort=agent.effort if option is not None and option.efforts else None,
+        )
 
     def course(self, course_id: str) -> CourseSettings:
         try:

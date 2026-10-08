@@ -33,7 +33,7 @@ export function AppShell() {
   const { data } = useOverview(selectedCourseId)
   const navigate = useNavigate()
   const location = useLocation()
-  const healthy = Boolean(data?.connections.google_authorized && data.connections.gemini_configured)
+  const healthy = Boolean(data?.connections.google_authorized && data.connections.extraction_ready)
 
   async function runHealth() {
     try {

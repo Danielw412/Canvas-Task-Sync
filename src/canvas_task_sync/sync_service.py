@@ -16,7 +16,11 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
 from canvas_task_sync.auth import load_google_credentials
-from canvas_task_sync.configuration import CourseSettings, ProjectSettings
+from canvas_task_sync.configuration import (
+    CourseSettings,
+    ProjectSettings,
+    ResolvedExtractionAgent,
+)
 from canvas_task_sync.gemini import EXTRACTOR_VERSION, GeminiExtractor, GoogleGenAIBackend
 from canvas_task_sync.google_tasks import GoogleTasksClient
 from canvas_task_sync.managed_notes import parse_notes
@@ -38,6 +42,13 @@ from canvas_task_sync.web_models import EventLevel, RunStage
 
 class SyncCancelled(RuntimeError):
     pass
+
+
+def _create_agent_backend(agent: ResolvedExtractionAgent) -> Any:
+    # Imported on first use: a Gemini-only run never loads either agent SDK wrapper.
+    from canvas_task_sync.agent_backends import create_agent_backend
+
+    return create_agent_backend(agent)
 
 
 def _today(timezone_name: str) -> date:
@@ -291,13 +302,44 @@ class SyncService:
         source_factory: Callable[..., Any] = create_course_source_adapter,
         tasks_client_factory: Callable[[Any], GoogleTasksClient] = GoogleTasksClient,
         backend_factory: Callable[..., Any] = GoogleGenAIBackend,
+        agent_backend_factory: Callable[[ResolvedExtractionAgent], Any] | None = None,
     ) -> None:
         self.settings = settings
         self.credentials_loader = credentials_loader
         self.source_factory = source_factory
         self.tasks_client_factory = tasks_client_factory
+        # Gemini keeps its own factory; Claude and Codex come from the agent factory.
         self.backend_factory = backend_factory
+        self.agent_backend_factory = agent_backend_factory or _create_agent_backend
         self._apply_lock = threading.Lock()
+
+    def _extraction_backend(
+        self,
+        agent: ResolvedExtractionAgent,
+        sink: ProgressSink,
+        token: CancellationToken,
+    ) -> Any:
+        if agent.provider == "gemini":
+            return self.backend_factory(
+                model=agent.models[0],
+                fallback_models=agent.models[1:],
+                api_key=os.getenv("GEMINI_API_KEY"),
+                thinking_level=agent.effort,
+            )
+        backend = self.agent_backend_factory(agent)
+
+        def wait_for_agent_slot() -> None:
+            sink.emit(
+                RunStage.EXTRACT_ASSIGNMENTS,
+                "agent_slot_wait",
+                f"Other runs are using every {agent.provider_label} slot; this run starts "
+                "when one frees up.",
+                metadata={"provider": agent.provider, "model": agent.model},
+            )
+
+        backend.cancelled = token.checker
+        backend.on_slot_wait = wait_for_agent_slot
+        return backend
 
     def prepare(
         self,
@@ -316,7 +358,10 @@ class SyncService:
         token.raise_if_cancelled()
 
         started = perf_counter()
-        course = self.settings.course(course_id).model_copy(deep=True)
+        settings = self.settings
+        course = settings.course(course_id).model_copy(deep=True)
+        # Resolved once, so a settings change mid-run cannot mix two agents in one run.
+        agent = settings.extraction_agent_for(course)
         if not course.enabled:
             raise ValueError(f"Course '{course_id}' is disabled.")
         if rebase_week is not None and rebase_week.weekday() != 0:
@@ -326,7 +371,7 @@ class SyncService:
         target_week_start = target_week_start or (
             _today(course.timezone) - timedelta(days=_today(course.timezone).weekday())
         )
-        load_dotenv(self.settings.root_dir / ".env")
+        load_dotenv(settings.root_dir / ".env")
         config_hash = _stable_hash(course.model_dump(mode="json"))
         sink.emit(
             RunStage.VALIDATE_CONFIGURATION,
@@ -342,7 +387,7 @@ class SyncService:
         token.raise_if_cancelled()
 
         stage_started = perf_counter()
-        credentials = self.credentials_loader(self.settings.root_dir, interactive=False)
+        credentials = self.credentials_loader(settings.root_dir, interactive=False)
         source = self.source_factory(
             course,
             credentials,
@@ -358,14 +403,12 @@ class SyncService:
             today=_today(course.timezone),
         )
         existing_assignments = _assignment_context(recent_course_tasks)
-        gemini_model_chain = self.settings.gemini_model_chain_for(course)
         # The Google Tasks context is deliberately not part of the key. It changes after
-        # every write (including this sync's own), which re-sent unchanged pages to Gemini
-        # and let due dates flip between runs. An unchanged page reuses its extraction.
+        # every write (including this sync's own), which re-sent unchanged pages to the
+        # model and let due dates flip between runs. An unchanged page reuses its extraction.
+        # Switching agent or model is a different key, so it extracts afresh.
         extraction_cache_key = (
-            f"{self.settings.gemini_cache_key_for(course)}"
-            f"|reasoning:{course.gemini_reasoning}"
-            f"|instructions:{_stable_hash(course.ai_instructions)[:16]}"
+            f"{agent.cache_key}|instructions:{_stable_hash(course.ai_instructions)[:16]}"
         )
         sink.emit(
             RunStage.AUTHENTICATE_SERVICES,
@@ -409,7 +452,7 @@ class SyncService:
         token.raise_if_cancelled()
 
         stage_started = perf_counter()
-        with StateStore(self.settings.resolved_state_path, writable=False) as state:
+        with StateStore(settings.resolved_state_path, writable=False) as state:
             outcome = state.cached_extraction(
                 course_id=course_id,
                 source_key=capture.source_key,
@@ -449,12 +492,7 @@ class SyncService:
                         f"Source adapter '{course.source.type}' cannot provide image extraction."
                     )
                 capture = add_image(capture)
-            backend = self.backend_factory(
-                model=gemini_model_chain[0],
-                fallback_models=gemini_model_chain[1:],
-                api_key=os.getenv("GEMINI_API_KEY"),
-                thinking_level=course.gemini_reasoning,
-            )
+            backend = self._extraction_backend(agent, sink, token)
             if isinstance(backend, GoogleGenAIBackend):
                 def wait_for_gemini_retry(seconds: float, attempts: list[str]) -> None:
                     sink.emit(
@@ -482,25 +520,30 @@ class SyncService:
                 backend.retry_waiter = wait_for_gemini_retry
             extraction_course = course.model_copy(deep=True)
             extraction_course.source.extraction.mode = effective_mode
-            outcome = GeminiExtractor(backend).extract(
-                capture,
-                extraction_course,
-                existing_assignments=existing_assignments,
-            )
+            try:
+                outcome = GeminiExtractor(backend).extract(
+                    capture,
+                    extraction_course,
+                    existing_assignments=existing_assignments,
+                )
+            except Exception:
+                # An agent stops its turn when the run is cancelled; report the cancellation
+                # rather than the interrupted turn.
+                token.raise_if_cancelled()
+                raise
             if effective_mode != course.source.extraction.mode:
                 outcome.fallback_reasons.insert(
                     0,
                     "Canvas supplied sufficient agenda text; image acquisition was not required.",
                 )
-        fallback_model_used = bool(
-            outcome.model_name and outcome.model_name != gemini_model_chain[0]
-        )
+        fallback_model_used = bool(outcome.model_name and outcome.model_name != agent.model)
         extraction_status = (
-            f"Gemini extraction completed using fallback model {outcome.model_name}."
+            f"{agent.provider_label} extraction completed using fallback model "
+            f"{outcome.model_name}."
             if fallback_model_used
             else "Reused cached extraction."
             if extraction_was_cached
-            else "Gemini extraction completed."
+            else f"{agent.provider_label} extraction completed."
         )
         sink.emit(
             RunStage.EXTRACT_ASSIGNMENTS,
@@ -512,9 +555,10 @@ class SyncService:
                 "uncertain_count": len(outcome.uncertain),
                 "used_mode": outcome.used_mode.value,
                 "fallback_reasons": outcome.fallback_reasons,
-                "model": outcome.model_name or gemini_model_chain[0],
-                "configured_model_chain": gemini_model_chain,
-                "reasoning_level": course.gemini_reasoning,
+                "provider": agent.provider,
+                "model": outcome.model_name or agent.model,
+                "configured_model_chain": agent.models,
+                "reasoning_level": agent.effort,
                 "model_fallback_reasons": outcome.model_fallback_reasons,
                 "fallback_used": fallback_model_used,
                 "existing_assignment_context_count": len(existing_assignments),

@@ -49,6 +49,9 @@ const overview: OverviewResponse = {
     google_client_configured: true,
     google_authorized: true,
     gemini_configured: true,
+    extraction_provider: 'gemini',
+    extraction_label: 'Gemini · per-course models',
+    extraction_ready: true,
     local_server: '127.0.0.1:8890',
     checks: [],
   },
@@ -246,7 +249,9 @@ describe('operational pages', () => {
     fireEvent.change(screen.getByLabelText(/Target week starting Monday/), { target: { value: '2026-08-25' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Save changes' })[0])
     expect(toast).toHaveBeenCalledWith('The override target week must begin on a Monday.', 'warning')
-    expect(fetch.mock.calls).toHaveLength(1)
+    // Only the initial course load; the model panel's agent lookup is not a save.
+    const courseCalls = fetch.mock.calls.filter((call) => !String((call as unknown[])[0]).includes('/settings/extraction-agent'))
+    expect(courseCalls).toHaveLength(1)
   })
 
   it('shows expired overrides without enabling them for a new week', async () => {
@@ -433,6 +438,53 @@ describe('operational pages', () => {
       'href',
       'https://canvas.example/courses/7/assignments/10',
     )
+  })
+
+  it('switches the extraction agent for every course from Settings', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const providers = [
+      { id: 'gemini', label: 'Gemini', status: { ready: true, detail: 'API key configured' }, models: [{ id: 'gemini-3.7-flash', label: '3.7 flash', efforts: ['low', 'medium', 'high'] }] },
+      { id: 'claude', label: 'Claude', status: { ready: true, detail: 'Claude sign-in found on this machine' }, models: [
+        { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', efforts: [] },
+        { id: 'claude-opus-5-5', label: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      ] },
+      { id: 'codex', label: 'Codex', status: { ready: false, detail: 'Sign in to Codex on this machine: run `codex login`.' }, models: [
+        { id: 'gpt-6-luna', label: 'GPT-6 Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      ] },
+    ]
+    let agent = { settings: { provider: 'gemini', model: null as string | null, effort: 'high' }, label: 'Gemini · per-course models', parallel_turns: 3, providers }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (url.includes('/settings/extraction-agent')) {
+        if (init?.method === 'PUT') {
+          const settings = JSON.parse(String(init.body))
+          agent = { ...agent, settings, label: `Claude · Sonnet 5.5 · ${settings.effort} effort` }
+        }
+        return jsonResponse(agent)
+      }
+      if (url.includes('/settings/extension')) return jsonResponse({ server_url: '', pairing_token: '', capture_ttl_seconds: 900, supported_sources: [], load_unpacked_path: '', captures: [] })
+      return jsonResponse({ connections: { ...overview.connections, checks: [] }, general: { history_retention_days: 90 }, paths: { control_database: '', state_database: '', config: '' } })
+    }))
+    renderPage(<SettingsPage />)
+
+    const group = await screen.findByRole('radiogroup', { name: 'Extraction agent' })
+    await waitFor(() => expect(within(group).getByRole('radio', { name: 'Gemini' })).toHaveAttribute('aria-checked', 'true'))
+    expect(screen.getByLabelText('Model')).toHaveValue('')
+    expect(screen.getByText('Set per course')).toBeVisible()
+
+    fireEvent.click(within(group).getByRole('radio', { name: 'Claude' }))
+    await waitFor(() => expect(within(group).getByRole('radio', { name: 'Claude' })).toHaveAttribute('aria-checked', 'true'))
+    const saved = requests.find((request) => request.init?.method === 'PUT')!
+    expect(saved.url).toContain('/api/v1/settings/extraction-agent')
+    expect(JSON.parse(String(saved.init?.body))).toEqual({ provider: 'claude', model: 'claude-sonnet-5-5', effort: 'high' })
+    expect(screen.getByLabelText('Model')).toHaveValue('claude-sonnet-5-5')
+    expect(screen.getByRole('option', { name: 'Haiku 4.5' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Effort')).toHaveValue('high')
+    expect(toast).toHaveBeenCalledWith('Extraction agent: Claude · Sonnet 5.5 · high effort.', 'success')
   })
 
   it('keeps API keys write-only and restores focus after the settings modal', async () => {

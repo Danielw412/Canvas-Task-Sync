@@ -653,3 +653,108 @@ def test_prepare_feeds_unfinished_and_recent_completed_class_tasks_to_gemini(
     assert "Old worksheet" not in prompt
     assert "[MATH]" not in prompt
     assert "[SPANISHISH]" not in prompt
+
+
+def test_a_global_claude_agent_replaces_gemini_for_extraction(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    from canvas_task_sync.configuration import ExtractionAgentSettings
+
+    service, _source, _tasks, gemini = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    service.settings.extraction_agent = ExtractionAgentSettings(
+        provider="claude", model="claude-opus-5-5", effort="high"
+    )
+    agent_backend = FakeBackend(spanish_candidates)
+    agent_backend.provider_label = "Claude"
+    agent_backend.used_model = "claude-opus-5-5"
+    resolved: list[object] = []
+
+    def agent_factory(agent):
+        resolved.append(agent)
+        return agent_backend
+
+    service.agent_backend_factory = agent_factory
+    sink = RecordingSink()
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+        progress=sink,
+    )
+
+    assert gemini.calls == 0 and agent_backend.calls == 1
+    assert resolved[0].models == ["claude-opus-5-5"] and resolved[0].effort == "high"
+    assert callable(agent_backend.cancelled) and callable(agent_backend.on_slot_wait)
+    assert prepared.extraction_cache_key.startswith("claude:claude-opus-5-5|effort:high|")
+    extracted = next(event for event in sink.events if event[0] == RunStage.EXTRACT_ASSIGNMENTS)
+    assert extracted[2] == "Claude extraction completed."
+    assert extracted[3]["provider"] == "claude"
+    assert extracted[3]["model"] == "claude-opus-5-5"
+    assert extracted[3]["reasoning_level"] == "high"
+
+
+def test_switching_agents_does_not_reuse_another_agents_cached_extraction(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    from canvas_task_sync.configuration import ExtractionAgentSettings
+
+    service, _source, _tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    gemini_key = service.prepare(
+        course_id="spanish", include_past=True, rebase_week=None
+    ).extraction_cache_key
+    service.settings.extraction_agent = ExtractionAgentSettings(provider="codex")
+    service.agent_backend_factory = lambda _agent: FakeBackend(spanish_candidates)
+    codex_key = service.prepare(
+        course_id="spanish", include_past=True, rebase_week=None
+    ).extraction_cache_key
+    assert gemini_key.startswith("test-model -> gemini-3.6-flash")
+    assert codex_key.startswith("codex:gpt-6-luna|effort:medium|")
+
+
+def test_an_agent_turn_stopped_by_cancellation_reports_the_cancellation(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    from canvas_task_sync.configuration import ExtractionAgentSettings
+
+    service, _source, _tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    service.settings.extraction_agent = ExtractionAgentSettings(provider="claude")
+    cancelled = {"value": False}
+
+    class InterruptedBackend:
+        def generate(self, **_kwargs):
+            cancelled["value"] = True
+            raise RuntimeError("The run was cancelled.")
+
+    service.agent_backend_factory = lambda _agent: InterruptedBackend()
+    with pytest.raises(SyncCancelled):
+        service.prepare(
+            course_id="spanish",
+            include_past=True,
+            rebase_week=None,
+            cancellation=CancellationToken(lambda: cancelled["value"]),
+        )

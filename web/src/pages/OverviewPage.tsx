@@ -104,7 +104,8 @@ export default function OverviewPage() {
   }
 
   if (error) return <EmptyState title="Overview could not load" body={error.message} />
-  const connected = Boolean(data?.connections.google_authorized && data.connections.gemini_configured)
+  const connected = Boolean(data?.connections.google_authorized && data.connections.extraction_ready)
+  const agentName = { gemini: 'Gemini', claude: 'Claude', codex: 'Codex' }[data?.connections.extraction_provider ?? 'gemini']
   const latest = data?.latest_run
   const values: Record<string, number> = {
     create: latest?.counts.create ?? 0,
@@ -133,7 +134,7 @@ export default function OverviewPage() {
         </div>
         <div className="mobile-health-summary">
           <div><span className="source-icon source-icon--slides"><Presentation size={19} /></span><strong>Source</strong><small className={connected ? 'tone-success' : 'tone-warning'}>{connected ? 'Ready' : 'Check setup'}</small></div>
-          <div><span className="source-icon source-icon--gemini"><Sparkles size={19} /></span><strong>Gemini</strong><small className={data?.connections.gemini_configured ? 'tone-success' : 'tone-warning'}>{data?.connections.gemini_configured ? 'Connected' : 'Missing'}</small></div>
+          <div><span className="source-icon source-icon--gemini"><Sparkles size={19} /></span><strong title={data?.connections.extraction_label}>{agentName}</strong><small className={data?.connections.extraction_ready ? 'tone-success' : 'tone-warning'}>{data?.connections.extraction_ready ? 'Connected' : 'Missing'}</small></div>
           <div><span className="source-icon source-icon--tasks"><Target size={19} /></span><strong>Google Tasks</strong><small className={data?.connections.google_authorized ? 'tone-success' : 'tone-warning'}>{data?.connections.google_authorized ? 'Accessible' : 'Check setup'}</small></div>
           <p>{connected ? 'All systems healthy' : 'Setup needs attention'}</p>
         </div>

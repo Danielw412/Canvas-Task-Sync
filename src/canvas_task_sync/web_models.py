@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator
@@ -257,6 +257,10 @@ class ConnectionStatus(BaseModel):
     google_client_configured: bool
     google_authorized: bool
     gemini_configured: bool
+    # The extraction agent every course uses, and whether it can run here.
+    extraction_provider: str = "gemini"
+    extraction_label: str = "Gemini"
+    extraction_ready: bool = False
     local_server: str = f"{DEFAULT_WEB_HOST}:{DEFAULT_WEB_PORT}"
     checks: list[ConnectionItem] = Field(default_factory=list)
 
@@ -360,6 +364,10 @@ class DiagnosticsResponse(BaseModel):
 
 class GeminiKeyUpdate(BaseModel):
     api_key: str = Field(min_length=8, max_length=4096)
+
+
+class ExtractionAgentTest(BaseModel):
+    provider: Literal["gemini", "claude", "codex"]
 
 
 class GeneralSettings(BaseModel):

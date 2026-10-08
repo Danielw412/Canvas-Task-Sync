@@ -276,3 +276,34 @@ def test_a_worker_that_cannot_start_fails_fast(tmp_path):
         asyncio.run(scenario())
     finally:
         asyncio.run(client.stop())
+
+
+def test_the_worker_rereads_a_changed_config_between_runs(tmp_path):
+    import os
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.sync_service import SyncService
+    from canvas_task_sync.worker import _SettingsReloader
+
+    config = _write_project(tmp_path)
+    service = SyncService(load_settings(config))
+    reloader = _SettingsReloader(config, service)
+    reloader.refresh()
+    assert service.settings.extraction_agent.provider == "gemini"
+
+    config.write_text(
+        PROJECT.replace(
+            "courses:\n",
+            "extraction_agent:\n  provider: claude\n  model: claude-opus-5-5\ncourses:\n",
+        ),
+        encoding="utf-8",
+    )
+    os.utime(config, ns=(config.stat().st_atime_ns, config.stat().st_mtime_ns + 1_000_000))
+    reloader.refresh()
+    assert service.settings.extraction_agent.model == "claude-opus-5-5"
+
+    # A broken file keeps the last good settings rather than failing every run.
+    config.write_text("courses: [not, a, mapping]\n", encoding="utf-8")
+    os.utime(config, ns=(config.stat().st_atime_ns, config.stat().st_mtime_ns + 2_000_000))
+    reloader.refresh()
+    assert service.settings.extraction_agent.model == "claude-opus-5-5"

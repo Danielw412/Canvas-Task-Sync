@@ -779,3 +779,77 @@ def test_schedule_crud_disable_course_and_support_bundle_are_safe(tmp_path):
         assert "abcdefghijklmnopqrstuvwxyz" not in bundle.text
 
         assert client.delete(f"/api/v1/schedules/{schedule_id}", headers=headers).status_code == 204
+
+
+def test_extraction_agent_settings_round_trip_through_the_api(tmp_path):
+    config = _write_project(tmp_path)
+    app = create_web_app(config)
+    with TestClient(app) as client:
+        initial = client.get("/api/v1/settings/extraction-agent").json()
+        assert initial["settings"] == {"provider": "gemini", "model": None, "effort": "medium"}
+        providers = {item["id"]: item for item in initial["providers"]}
+        assert [model["id"] for model in providers["claude"]["models"]] == [
+            "claude-sonnet-5-5",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-5-5",
+        ]
+        assert [model["id"] for model in providers["codex"]["models"]] == [
+            "gpt-6-luna",
+            "gpt-6.1-sol",
+        ]
+
+        headers = _csrf(client)
+        assert client.put(
+            "/api/v1/settings/extraction-agent",
+            json={"provider": "claude", "model": "claude-opus-5-5", "effort": "high"},
+        ).status_code == 403
+        saved = client.put(
+            "/api/v1/settings/extraction-agent",
+            headers=headers,
+            json={"provider": "claude", "model": "claude-opus-5-5", "effort": "high"},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["label"] == "Claude · Opus 5.5 · high effort"
+
+        rejected = client.put(
+            "/api/v1/settings/extraction-agent",
+            headers=headers,
+            json={"provider": "codex", "model": "claude-opus-5-5", "effort": "high"},
+        )
+        assert rejected.status_code == 422
+
+        connections = client.get("/api/v1/settings/connections").json()["connections"]
+        assert connections["extraction_provider"] == "claude"
+        assert connections["extraction_label"] == "Claude · Opus 5.5 · high effort"
+        assert any(check["key"] == "extraction_agent" for check in connections["checks"])
+
+    text = config.read_text(encoding="utf-8")
+    assert "# keep this header comment" in text
+    assert text.index("extraction_agent:") < text.index("courses:")
+    agent = ConfigurationService(config).load().extraction_agent
+    assert (agent.provider, agent.model, agent.effort) == ("claude", "claude-opus-5-5", "high")
+    assert config.with_suffix(".yaml.bak").exists()
+
+
+def test_agent_sign_in_test_asks_the_agent_without_starting_a_turn(tmp_path, monkeypatch):
+    from canvas_task_sync import health
+    from canvas_task_sync.agent_status import AgentSignIn
+
+    asked: list[str] = []
+
+    def fake_sign_in(provider: str, **_kwargs) -> AgentSignIn:
+        asked.append(provider)
+        return AgentSignIn(True, "Signed in · Claude Max")
+
+    monkeypatch.setattr(health, "check_agent_sign_in", fake_sign_in)
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/settings/extraction-agent/test",
+            headers=_csrf(client),
+            json={"provider": "claude"},
+        )
+    assert response.status_code == 200
+    assert response.json()["check"]["state"] == "healthy"
+    assert response.json()["check"]["summary"] == "Signed in · Claude Max"
+    assert asked == ["claude"]
