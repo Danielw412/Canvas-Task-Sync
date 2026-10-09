@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import logoUrl from '../assets/logo.png'
 import type { CourseView, OperationLogEvent, OperationSummary, RunDetail, RunStatus, RunSummary } from '../types'
 
 interface RuntimeConfig {
@@ -274,7 +275,7 @@ export function SimpleApp({
 
   return <main className="simple-shell">
     <header>
-      <h1>Canvas Task Sync</h1>
+      <h1><img src={logoUrl} alt="" />Canvas Task Sync</h1>
       <span className={busy ? 'status status--busy' : 'status'}>{currentMessage}</span>
     </header>
 
