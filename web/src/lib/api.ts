@@ -1,5 +1,5 @@
-import useSWR from 'swr'
-import type { ApiErrorShape, OverviewResponse, WeekSelection } from '../types'
+import useSWR, { mutate } from 'swr'
+import type { ApiErrorShape, OverviewResponse, RunStage, RunStatus, RunSummary, WeekSelection } from '../types'
 
 const WEEK_OFFSETS: Record<WeekSelection, number> = {
   previous_week: -7,
@@ -158,6 +158,134 @@ export function agendaWeekOptions(
       label: `${WEEK_NAMES[selection]} · ${formatAgendaWeekRange(start, end)}`,
     }
   })
+}
+
+const WEEK_SHORT_NAMES: Record<WeekSelection, string> = {
+  previous_week: 'Last week',
+  this_week: 'This week',
+  next_week: 'Next week',
+}
+
+// The same weeks as agendaWeekOptions, split into a short name and its Monday-Friday range.
+export function agendaWeeks(timeZone?: string, now = new Date()) {
+  return agendaWeekOptions(timeZone, now).map((option) => ({
+    value: option.value,
+    name: WEEK_SHORT_NAMES[option.value],
+    range: option.label.split(' · ')[1] ?? '',
+  }))
+}
+
+export const stageLabels: Record<RunStage, string> = {
+  queued: 'Waiting to start',
+  validate_configuration: 'Checking settings',
+  authenticate_services: 'Connecting to services',
+  capture_source: 'Reading the agenda',
+  extract_assignments: 'Finding tasks',
+  calculate_deadlines: 'Setting due dates',
+  compare_google_tasks: 'Comparing with Google Tasks',
+  build_review_plan: 'Building the plan',
+  revalidate_preview: 'Rechecking the preview',
+  apply_changes: 'Writing to Google Tasks',
+  persist_state: 'Saving sync state',
+  health_check: 'Running checks',
+  complete: 'Complete',
+}
+
+const ACTIVE_STATUSES = new Set<RunStatus>(['queued', 'running', 'applying'])
+const ATTENTION_KINDS = ['uncertain', 'source_missing', 'remote_missing', 'historical_blocked']
+
+export function isActiveRun(status: RunStatus) {
+  return ACTIVE_STATUSES.has(status)
+}
+
+export function isAttentionKind(kind: string) {
+  return ATTENTION_KINDS.includes(kind)
+}
+
+export function attentionTotal(counts: Record<string, number>) {
+  return ATTENTION_KINDS.reduce((sum, key) => sum + (counts[key] ?? 0), 0)
+}
+
+export function runKindLabel(run: Pick<RunSummary, 'requested_mode'>) {
+  if (run.requested_mode === 'health') return 'Health check'
+  return run.requested_mode === 'auto_apply' ? 'Sync' : 'Preview'
+}
+
+// Applied counts describe what was written; a preview or failed run only has planned counts.
+export function changeSummary(run: Pick<RunSummary, 'counts' | 'applied_counts' | 'requested_mode' | 'status'>) {
+  if (run.requested_mode === 'health') return ''
+  const counts = Object.keys(run.applied_counts ?? {}).length ? run.applied_counts : run.counts
+  const created = counts.create ?? 0
+  const updated = (counts.update ?? 0) + (counts.notes_cleanup ?? 0)
+  const parts = [created ? `${created} created` : '', updated ? `${updated} updated` : ''].filter(Boolean)
+  if (parts.length) return parts.join(', ')
+  return Object.keys(run.counts ?? {}).length ? 'No changes' : ''
+}
+
+export function formatTime(value?: string | null) {
+  if (!value) return '-'
+  return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(value))
+}
+
+function startOfDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+}
+
+export function dayDifference(value: string | Date, now = new Date()) {
+  return Math.round((startOfDay(new Date(value)) - startOfDay(now)) / 86_400_000)
+}
+
+export function formatDayHeading(value: string, now = new Date()) {
+  const difference = dayDifference(value, now)
+  if (difference === 0) return 'Today'
+  if (difference === -1) return 'Yesterday'
+  return new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'short', day: 'numeric' }).format(new Date(value))
+}
+
+export function formatRelative(value?: string | null, now = new Date()) {
+  if (!value) return 'never'
+  const seconds = Math.round((now.getTime() - new Date(value).getTime()) / 1000)
+  if (seconds < 0) {
+    const ahead = -seconds
+    if (ahead < 3_600) return `in ${Math.max(1, Math.round(ahead / 60))} min`
+    if (dayDifference(value, now) === 0) return `today at ${formatTime(value)}`
+    if (dayDifference(value, now) === 1) return `tomorrow at ${formatTime(value)}`
+    return formatDateTime(value, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+  }
+  if (seconds < 45) return 'just now'
+  if (seconds < 3_600) return `${Math.round(seconds / 60)} min ago`
+  if (seconds < 6 * 3_600) return `${Math.round(seconds / 3_600)} hr ago`
+  if (dayDifference(value, now) === 0) return `today at ${formatTime(value)}`
+  if (dayDifference(value, now) === -1) return `yesterday at ${formatTime(value)}`
+  return formatDateTime(value, { month: 'short', day: 'numeric' })
+}
+
+// A task's due date is a calendar date, so it is compared and shown without a timezone shift.
+export function formatDueDate(value: string, now = new Date()) {
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(year, month - 1, day)
+  const difference = dayDifference(date, now)
+  if (difference === 0) return 'Today'
+  if (difference === 1) return 'Tomorrow'
+  if (difference === -1) return 'Yesterday'
+  const sameYear = date.getFullYear() === now.getFullYear()
+  return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) }).format(date)
+}
+
+export function dueDayDifference(value: string, now = new Date()) {
+  const [year, month, day] = value.split('-').map(Number)
+  return dayDifference(new Date(year, month - 1, day), now)
+}
+
+export function revalidateOverview() {
+  return mutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))
+}
+
+export function wakeExtensionCaptureQueue() {
+  window.postMessage(
+    { source: 'canvas-task-sync-web', type: 'capture-requested' },
+    window.location.origin,
+  )
 }
 
 function formatAgendaWeekRange(start: Date, end: Date) {

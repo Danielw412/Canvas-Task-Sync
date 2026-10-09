@@ -1,3 +1,4 @@
+import { CheckCircleIcon, InfoIcon, WarningIcon, XCircleIcon } from '@phosphor-icons/react'
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
 import { useOverview } from '../lib/api'
 
@@ -15,10 +16,13 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null)
 
+const toastIcons = { success: CheckCircleIcon, warning: WarningIcon, error: XCircleIcon, info: InfoIcon }
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [courseSelection, setCourseSelection] = useState<string | null>(null)
   const [toasts, setToasts] = useState<ToastMessage[]>([])
   const { data } = useOverview(courseSelection)
+  // The most recently used course: it seeds defaults such as a new task's or schedule's course.
   const selectedCourseId = courseSelection ?? data?.selected_course_id ?? null
   const toast = useCallback((message: string, tone: ToastMessage['tone'] = 'info') => {
     const id = Date.now() + Math.random()
@@ -33,7 +37,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     <AppContext.Provider value={value}>
       {children}
       <div className="toast-stack" role="status" aria-live="polite">
-        {toasts.map((item) => <div className={`toast toast--${item.tone}`} key={item.id}>{item.message}</div>)}
+        {toasts.map((item) => {
+          const Icon = toastIcons[item.tone]
+          return <div className={`toast toast--${item.tone}`} key={item.id}>
+            <Icon className="toast__icon" size={18} weight="fill" aria-hidden /><span>{item.message}</span>
+          </div>
+        })}
       </div>
     </AppContext.Provider>
   )

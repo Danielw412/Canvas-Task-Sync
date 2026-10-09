@@ -9,6 +9,7 @@ import CoursesPage from './CoursesPage'
 import OverviewPage from './OverviewPage'
 import RunDetailPage from './RunDetailPage'
 import RunsPage from './RunsPage'
+import SchedulesPage from './SchedulesPage'
 import SettingsPage from './SettingsPage'
 
 const { toast } = vi.hoisted(() => ({ toast: vi.fn() }))
@@ -127,11 +128,11 @@ describe('operational pages', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview.courses)))
     renderPage(<CoursesPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Source & extraction' }))
-    const fallback = await screen.findByLabelText(/Fallback acquisition/)
-    fireEvent.change(fallback, { target: { value: 'none' } })
+    expect(await screen.findByLabelText(/Presentation URL/)).toBeInTheDocument()
+    const none = within(screen.getByRole('radiogroup', { name: 'Fallback source' })).getByRole('radio', { name: /None/ })
+    fireEvent.click(none)
 
-    expect(fallback).toHaveValue('none')
+    expect(none).toBeChecked()
     expect(screen.getByText(/Canvas API content is the only agenda source/i)).toBeVisible()
     expect(screen.queryByLabelText(/Presentation URL/)).not.toBeInTheDocument()
   })
@@ -149,7 +150,7 @@ describe('operational pages', () => {
     }))
     renderPage(<CoursesPage />)
 
-    const instructions = await screen.findByLabelText(/Course notes \/ AI instructions/)
+    const instructions = await screen.findByLabelText(/^AI instructions/)
     fireEvent.change(instructions, {
       target: { value: 'Do not create homework tasks for reading assignments.' },
     })
@@ -271,8 +272,20 @@ describe('operational pages', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview)))
     renderPage(<AppShell />)
     expect(await screen.findByLabelText('Primary navigation')).toBeVisible()
-    expect(within(screen.getByLabelText('Primary navigation')).getAllByRole('link')).toHaveLength(7)
-    expect(within(screen.getByLabelText('Mobile navigation')).getAllByRole('link')).toHaveLength(6)
+    expect(within(screen.getByLabelText('Primary navigation')).getAllByRole('link').map((link) => link.textContent)).toEqual(['Overview', 'Tasks', 'Runs', 'Courses', 'Schedules'])
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+    expect(await screen.findByRole('link', { name: /All systems ready/ })).toHaveAttribute('href', '/diagnostics')
+
+    const mobile = screen.getByLabelText('Mobile navigation')
+    expect(within(mobile).getAllByRole('link')).toHaveLength(4)
+    fireEvent.click(within(mobile).getByRole('button', { name: 'More pages' }))
+    expect(within(mobile).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Schedules', 'Diagnostics', 'Settings'])
+  })
+
+  it('points the header at settings while setup is incomplete', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ ...overview, connections: { ...overview.connections, google_authorized: false } })))
+    renderPage(<AppShell />)
+    expect(await screen.findByRole('link', { name: /Finish setup/ })).toHaveAttribute('href', '/settings')
   })
 
   it('submits advanced preview policy and validates Monday rebasing', async () => {
@@ -287,23 +300,26 @@ describe('operational pages', () => {
     renderPage(<OverviewPage />)
     expect(await screen.findByRole('heading', { name: 'Everything is ready to sync' })).toBeVisible()
 
-    expect(screen.getByLabelText('Agenda week')).toHaveValue('this_week')
-    fireEvent.change(screen.getByLabelText('Agenda week'), { target: { value: 'next_week' } })
+    const week = screen.getByRole('radiogroup', { name: 'Agenda week' })
+    expect(within(week).getByRole('radio', { name: /^This week/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(week).getByRole('radio', { name: /^Next week/ }))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced preview' }))
-    const dialog = screen.getByRole('dialog', { name: 'Advanced preview' })
+    fireEvent.click(screen.getByRole('button', { name: 'More actions for Repository Course' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview changes…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Preview changes' })
     expect(dialog).toContainElement(document.activeElement as HTMLElement)
+    expect(within(dialog).getByRole('radio', { name: /^Next week/ })).toHaveAttribute('aria-checked', 'true')
     fireEvent.change(within(dialog).getByLabelText('Rebase fixture week (optional)'), {
       target: { value: '2026-08-11' },
     })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Start diagnostic preview' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start preview' }))
     expect(toast).toHaveBeenCalledWith('The test week must begin on a Monday.', 'warning')
 
     fireEvent.change(within(dialog).getByLabelText('Rebase fixture week (optional)'), {
       target: { value: '2026-08-10' },
     })
     fireEvent.click(within(dialog).getByLabelText('Include past-due changes'))
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Start diagnostic preview' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start preview' }))
     await waitFor(() => expect(requests.some((request) => request.url === '/api/v1/runs')).toBe(true))
     const mutation = requests.find((request) => request.url === '/api/v1/runs')!
     expect(JSON.parse(String(mutation.init?.body))).toMatchObject({
@@ -333,7 +349,7 @@ describe('operational pages', () => {
 
     const buttons = screen.getAllByRole('button')
     expect(buttons.findIndex((button) => button.textContent === 'Sync all courses')).toBeLessThan(
-      buttons.findIndex((button) => button.textContent === 'Sync selected course'),
+      buttons.findIndex((button) => button.getAttribute('aria-label') === 'Sync Repository Course'),
     )
     fireEvent.click(screen.getByRole('button', { name: 'Sync all courses' }))
 
@@ -343,7 +359,33 @@ describe('operational pages', () => {
       window.location.origin,
     )
     expect(JSON.parse(String(requests.find((request) => request.url === '/api/v1/runs/all')?.init?.body))).toMatchObject({ mode: 'auto_apply' })
-    expect(toast).toHaveBeenCalledWith('Started syncing 2 courses in parallel.', 'success')
+    expect(toast).toHaveBeenCalledWith('Started syncing 2 courses.', 'success')
+  })
+
+  it('syncs one course from its row and lists the runs that need attention', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const runs = [
+      { ...run, id: 9, status: 'failed', requested_mode: 'auto_apply', error_summary: 'Canvas returned 403 for the agenda page.' },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (url === '/api/v1/runs' && init?.method === 'POST') return jsonResponse({ run_id: 45, status: 'queued' }, 202)
+      if (url.startsWith('/api/v1/runs')) return jsonResponse(runs)
+      if (url.startsWith('/api/v1/schedules')) return jsonResponse({ items: [], occurrences: [] })
+      return jsonResponse(overview)
+    }))
+    renderPage(<OverviewPage />)
+
+    expect(await screen.findByRole('heading', { name: '1 course needs a look' })).toBeVisible()
+    expect(screen.getByRole('link', { name: /Repository Course sync failed/ })).toHaveAttribute('href', '/runs/9')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sync Repository Course' }))
+    await waitFor(() => expect(requests.some((request) => request.url === '/api/v1/runs' && request.init?.method === 'POST')).toBe(true))
+    const body = JSON.parse(String(requests.find((request) => request.url === '/api/v1/runs' && request.init?.method === 'POST')?.init?.body))
+    expect(body).toMatchObject({ course_id: 'spanish', mode: 'auto_apply', week_selection: 'this_week', acquisition_strategy: 'auto', include_past: false })
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Syncing Repository Course.', 'info'))
   })
 
   it('shows runs from every course by default and supports course filtering', async () => {
@@ -404,6 +446,20 @@ describe('operational pages', () => {
       'Course deleted. Existing Google Tasks and run history were kept.',
       'success',
     )
+  })
+
+  it('derives a new course ID from its name until the ID is edited', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(overview.courses)))
+    renderPage(<CoursesPage />)
+    expect(await screen.findByRole('heading', { name: 'Repository Course' })).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add course' }))
+    fireEvent.change(screen.getByLabelText('Course name'), { target: { value: 'AP World History' } })
+    expect(screen.getByLabelText(/^Course ID/)).toHaveValue('ap_world_history')
+    fireEvent.change(screen.getByLabelText(/^Course ID/), { target: { value: 'world' } })
+    fireEvent.change(screen.getByLabelText('Course name'), { target: { value: 'AP World History II' } })
+    expect(screen.getByLabelText(/^Course ID/)).toHaveValue('world')
+    expect(screen.getByRole('button', { name: 'Create course' })).toBeEnabled()
   })
 
   it('filters an immutable plan and requires explicit apply confirmation', async () => {
@@ -499,6 +555,12 @@ describe('operational pages', () => {
       requests.push({ url, init })
       if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
       if (url.includes('/gemini-key')) return jsonResponse(null, 204)
+      if (url.includes('/settings/extraction-agent')) return jsonResponse({
+        settings: { provider: 'gemini', model: null, effort: 'medium' },
+        label: 'Gemini · per-course models',
+        parallel_turns: 3,
+        providers: [{ id: 'gemini', label: 'Gemini', status: { ready: true, detail: 'API key configured' }, models: [] }],
+      })
       if (url.includes('/settings/extension')) return jsonResponse({
         server_url: 'http://127.0.0.1:8890',
         pairing_token: 'pairing-token-fixture',
@@ -511,8 +573,6 @@ describe('operational pages', () => {
     }))
     renderPage(<SettingsPage />)
     const open = await screen.findByRole('button', { name: 'Replace key' })
-    expect(screen.getByRole('heading', { name: 'Chrome source connector' })).toBeVisible()
-    expect(screen.getByLabelText('Extension pairing token')).toHaveValue('pairing-token-fixture')
     open.focus()
     fireEvent.click(open)
     const input = screen.getByLabelText('API key')
@@ -523,5 +583,47 @@ describe('operational pages', () => {
     expect(screen.queryByDisplayValue('super-private-test-key')).not.toBeInTheDocument()
     const mutation = requests.find((request) => request.url.includes('/gemini-key'))!
     expect(JSON.parse(String(mutation.init?.body))).toEqual({ api_key: 'super-private-test-key' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chrome extension' }))
+    expect(screen.getByRole('heading', { name: 'Chrome extension' })).toBeVisible()
+    expect(screen.getByLabelText('Extension pairing token')).toHaveValue('pairing-token-fixture')
+  })
+
+  it('shows the setup checklist only until every connection is ready', async () => {
+    const connections = { ...overview.connections, google_authorized: false, checks: [] }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/settings/extraction-agent')) return jsonResponse({ settings: { provider: 'gemini', model: null, effort: 'medium' }, label: 'Gemini', parallel_turns: 3, providers: [] })
+      if (url.includes('/settings/extension')) return jsonResponse({ server_url: '', pairing_token: '', capture_ttl_seconds: 900, supported_sources: [], load_unpacked_path: '', captures: [] })
+      return jsonResponse({ connections, general: { history_retention_days: 90 }, paths: { control_database: '', state_database: '', config: '' } })
+    }))
+    renderPage(<SettingsPage />, '/settings?section=data')
+
+    expect(await screen.findByRole('heading', { name: 'Finish setting up' })).toBeVisible()
+    expect(screen.getByText('2 of 3 done')).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Data & privacy' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Set up' }))
+    expect(await screen.findByRole('heading', { name: 'Google account' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Authorize' })).toBeEnabled()
+  })
+
+  it('turns a schedule on and off from the list without opening it', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const schedule = { id: 3, name: 'Weekday evening sync', course_id: 'spanish', weekdays: [0, 1, 2, 3, 4], local_time: '19:00:00', timezone: 'America/New_York', mode: 'auto_apply', enabled: true, next_run_at: null, last_run_at: null, last_result: null, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z' }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (url.endsWith('/disable')) return jsonResponse({ ...schedule, enabled: false })
+      if (url.startsWith('/api/v1/schedules')) return jsonResponse({ items: [schedule], occurrences: [] })
+      return jsonResponse(overview)
+    }))
+    renderPage(<SchedulesPage />)
+
+    expect(await screen.findByText('Weekdays at 7:00 PM')).toBeVisible()
+    fireEvent.click(screen.getByRole('switch', { name: 'Pause Weekday evening sync' }))
+    await waitFor(() => expect(requests).toContainEqual(expect.objectContaining({ url: '/api/v1/schedules/3/disable', init: expect.objectContaining({ method: 'POST' }) })))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('Weekday evening sync is paused.', 'info'))
   })
 })

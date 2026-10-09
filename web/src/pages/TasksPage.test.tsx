@@ -94,10 +94,17 @@ describe('TasksPage', () => {
     expect(screen.getByText('Unit 2 packet')).toBeInTheDocument()
   })
 
+  it('groups open tasks by due date and counts each status', async () => {
+    renderPage()
+    expect(await screen.findByRole('heading', { name: /Overdue/ })).toBeVisible()
+    expect(screen.getByRole('radio', { name: /Open/ })).toHaveTextContent('Open 2')
+    expect(screen.getByRole('radio', { name: /Completed/ })).toHaveTextContent('Completed 0')
+  })
+
   it('creates and edits Google-backed tasks', async () => {
     const { container } = renderPage()
     await screen.findByText('Existing task')
-    expect(container.querySelector('.tasks-page')).toHaveClass('standard-page')
+    expect(container.querySelector('.tasks-page')).toHaveClass('page--tasks')
 
     fireEvent.click(screen.getByRole('button', { name: 'New task' }))
     expect(screen.getByRole('dialog')).toContainElement(screen.getByText('Create task'))

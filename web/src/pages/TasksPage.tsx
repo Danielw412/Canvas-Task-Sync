@@ -1,14 +1,30 @@
-import { CalendarDays, CheckCircle2, Edit3, Filter, Plus, Search } from 'lucide-react'
+import { CaretRightIcon, CheckIcon, ListChecksIcon, MagnifyingGlassIcon, PlusIcon, XCircleIcon } from '@phosphor-icons/react'
 import { useMemo, useState } from 'react'
 import useSWR, { mutate } from 'swr'
 import { useApp } from '../components/AppContext'
-import { Button, EmptyState, Modal } from '../components/ui'
-import { fetchJson, mutateJson } from '../lib/api'
+import { Button, Disclosure, EmptyState, Field, PageHeader, Segmented, Sheet, SkeletonRows } from '../components/ui'
+import { dueDayDifference, fetchJson, formatDueDate, mutateJson } from '../lib/api'
 import type { CourseView, ManualTaskInput, TrackedTask } from '../types'
 
 type TaskFilter = 'open' | 'completed' | 'all'
+type Bucket = 'past' | 'today' | 'week' | 'later' | 'none'
 
 const ACTIONS = ['complete', 'practice', 'bring', 'present', 'submit', 'read', 'study', 'write', 'other']
+const BUCKET_ORDER: Bucket[] = ['past', 'today', 'week', 'later', 'none']
+
+function bucketFor(task: TrackedTask): Bucket {
+  if (!task.due_date) return 'none'
+  const days = dueDayDifference(task.due_date)
+  if (days < 0) return 'past'
+  if (days === 0) return 'today'
+  if (days <= 7) return 'week'
+  return 'later'
+}
+
+function bucketLabel(bucket: Bucket, filter: TaskFilter) {
+  if (bucket === 'past') return filter === 'open' ? 'Overdue' : 'Earlier'
+  return { today: 'Today', week: 'Next 7 days', later: 'Later', none: 'No due date' }[bucket]
+}
 
 export default function TasksPage() {
   const { selectedCourseId, toast } = useApp()
@@ -18,38 +34,92 @@ export default function TasksPage() {
   const [filter, setFilter] = useState<TaskFilter>('open')
   const [courseFilter, setCourseFilter] = useState('')
   const [editing, setEditing] = useState<TrackedTask | 'new' | null>(null)
-  const filtered = useMemo(() => (tasks ?? []).filter((task) => {
-    if (courseFilter && task.course.id !== courseFilter) return false
-    if (filter === 'open' && task.completed !== false) return false
-    if (filter === 'completed' && task.completed !== true) return false
-    const terms = `${task.display_title} ${task.details} ${task.course.name}`.toLocaleLowerCase()
-    return !query || terms.includes(query.toLocaleLowerCase())
-  }), [courseFilter, filter, query, tasks])
 
-  return <div className="standard-page tasks-page">
-    <header className="page-heading page-heading--actions">
-      <div><h1>Tasks</h1><p>Create and edit tracked work. Changes are written directly to Google Tasks.</p></div>
-      <Button icon={Plus} disabled={!courses?.length} onClick={() => setEditing('new')}>New task</Button>
-    </header>
-    <section className="task-toolbar panel">
-      <label className="task-search"><Search size={17} /><input aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks" /></label>
-      <label className="filter-control task-course-filter"><Filter size={17} /><select aria-label="Course filter" value={courseFilter} onChange={(event) => setCourseFilter(event.target.value)}><option value="">All courses</option>{courses?.map((course) => <option value={course.id} key={course.id}>{course.settings.name}</option>)}</select></label>
-      <div className="task-filter" aria-label="Task status filter">
-        {(['open', 'completed', 'all'] as TaskFilter[]).map((value) => <button key={value} className={filter === value ? 'is-active' : ''} onClick={() => setFilter(value)}>{value === 'open' ? 'Open' : value === 'completed' ? 'Completed' : 'All'}</button>)}
+  const counts = useMemo(() => {
+    const scoped = (tasks ?? []).filter((task) => !courseFilter || task.course.id === courseFilter)
+    return {
+      open: scoped.filter((task) => task.completed === false).length,
+      completed: scoped.filter((task) => task.completed === true).length,
+      all: scoped.length,
+    }
+  }, [tasks, courseFilter])
+
+  const groups = useMemo(() => {
+    const term = query.toLocaleLowerCase()
+    const filtered = (tasks ?? []).filter((task) => {
+      if (courseFilter && task.course.id !== courseFilter) return false
+      if (filter === 'open' && task.completed !== false) return false
+      if (filter === 'completed' && task.completed !== true) return false
+      return !term || `${task.display_title} ${task.details} ${task.course.name}`.toLocaleLowerCase().includes(term)
+    })
+    const sorted = [...filtered].sort((a, b) => (a.due_date ?? '9999').localeCompare(b.due_date ?? '9999'))
+    return BUCKET_ORDER
+      .map((bucket) => ({ bucket, items: sorted.filter((task) => bucketFor(task) === bucket) }))
+      .filter((group) => group.items.length)
+  }, [courseFilter, filter, query, tasks])
+
+  return <div className="page--tasks tasks-page">
+    <PageHeader
+      title="Tasks"
+      description="Everything synced to Google Tasks, plus tasks you add yourself."
+      actions={<Button icon={PlusIcon} disabled={!courses?.length} onClick={() => setEditing('new')}>New task</Button>}
+    />
+    <div className="toolbar">
+      <label className="search">
+        <MagnifyingGlassIcon size={16} aria-hidden />
+        <input className="control" aria-label="Search tasks" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search tasks" />
+      </label>
+      <select className="control" aria-label="Course filter" value={courseFilter} onChange={(event) => setCourseFilter(event.target.value)}>
+        <option value="">All courses</option>
+        {courses?.map((course) => <option value={course.id} key={course.id}>{course.settings.name}</option>)}
+      </select>
+      <div className="toolbar__end">
+        <Segmented
+          label="Task status filter"
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { value: 'open', label: 'Open', count: counts.open },
+            { value: 'completed', label: 'Completed', count: counts.completed },
+            { value: 'all', label: 'All', count: counts.all },
+          ]}
+        />
       </div>
-    </section>
-    {error ? <EmptyState title="Tasks could not load" body={error.message} /> : null}
-    {!error && !isLoading && filtered.length === 0 ? <EmptyState title="No matching tasks" body="Create a task or change the course, status, or search filter." action={<Button icon={Plus} onClick={() => setEditing('new')}>New task</Button>} /> : null}
-    {isLoading ? <div className="task-list panel"><div className="task-list__loading" /></div> : null}
-    {filtered.length ? <section className="task-list panel" aria-label="Tracked tasks">
-      {filtered.map((task) => <button className="task-list__row" key={task.logical_id} onClick={() => setEditing(task)}>
-        <span className={`task-status-dot ${task.completed ? 'is-complete' : ''}`}>{task.completed ? <CheckCircle2 size={17} /> : null}</span>
-        <span className="task-list__main"><small>{task.course.name}</small><strong>{task.display_title}</strong><span>{task.details || 'No description'}</span></span>
-        <span className="task-list__due"><CalendarDays size={14} />{task.due_date ? formatTaskDate(task.due_date) : 'No due date'}</span>
-        {task.manually_managed ? <span className="manual-badge">Manual</span> : null}
-        <Edit3 size={16} />
-      </button>)}
-    </section> : null}
+    </div>
+
+    {error ? <div className="surface"><EmptyState icon={XCircleIcon} title="Tasks could not load" body={error.message} /></div> : null}
+    {isLoading ? <SkeletonRows rows={5} label="Loading tasks" /> : null}
+    {!error && !isLoading && groups.length === 0 ? <div className="surface">
+      <EmptyState
+        icon={ListChecksIcon}
+        title={tasks?.length ? 'No matching tasks' : 'No tasks yet'}
+        body={tasks?.length ? 'Change the course, status, or search to see more.' : 'Sync a course to bring in its agenda, or add a task yourself.'}
+        action={<Button icon={PlusIcon} disabled={!courses?.length} onClick={() => setEditing('new')}>New task</Button>}
+      />
+    </div> : null}
+
+    {groups.map(({ bucket, items }) => <section className="group" key={bucket} aria-label={bucketLabel(bucket, filter)}>
+      <h2 className={`group-label${bucket === 'past' && filter === 'open' ? ' group-label--danger' : ''}`}>{bucketLabel(bucket, filter)}<span>{items.length}</span></h2>
+      <div className="surface">
+        {items.map((task) => {
+          const overdue = bucket === 'past' && task.completed === false
+          return <button type="button" className={`row row--interactive task-row${task.completed ? ' is-done' : ''}`} key={task.logical_id} onClick={() => setEditing(task)}>
+            <span className={`task-row__check${task.completed ? ' is-done' : ''}`} aria-hidden>{task.completed ? <CheckIcon size={12} weight="bold" /> : null}</span>
+            <span className="task-row__main">
+              <span className="row-title">{task.completed ? <span className="sr-only">Completed: </span> : null}{task.display_title}</span>
+              <span className="row-meta truncate">{task.course.name}{task.details ? ` · ${task.details}` : ''}</span>
+            </span>
+            <span className="task-row__meta">
+              {task.task_type && task.task_type !== 'assignment' ? <span className="badge badge--accent">{task.task_type === 'quiz' ? 'Quiz' : 'Test'}</span> : null}
+              {task.manually_managed ? <span className="badge badge--outline">Manual</span> : null}
+              <span className={`task-row__due${overdue ? ' is-overdue' : ''}`}>{task.due_date ? formatDueDate(task.due_date) : 'No date'}</span>
+            </span>
+            <CaretRightIcon className="row-chevron" size={15} aria-hidden />
+          </button>
+        })}
+      </div>
+    </section>)}
+
     {editing ? <TaskEditor
       task={editing === 'new' ? null : editing}
       courses={courses ?? []}
@@ -91,22 +161,56 @@ function TaskEditor({ task, courses, defaultCourseId, onClose, onSaved }: {
     }
   }
 
-  return <Modal title={task ? 'Edit task' : 'New task'} onClose={onClose} footer={<><Button variant="secondary" disabled={saving} onClick={onClose}>Cancel</Button><Button disabled={saving || !form.title.trim() || !form.course_id} onClick={() => void save()}>{saving ? 'Saving…' : task ? 'Save changes' : 'Create task'}</Button></>}>
-    <div className="task-editor-form">
-      <label className="form-field"><span>Task name</span><input value={form.title} onChange={(event) => update('title', event.target.value)} /></label>
-      <div className="form-grid form-grid--two">
-        <label className="form-field"><span>Course</span><select value={form.course_id} disabled={Boolean(task)} onChange={(event) => update('course_id', event.target.value)}>{courses.map((course) => <option key={course.id} value={course.id}>{course.settings.name}</option>)}</select>{task ? <small>Course and Google task list stay fixed after creation.</small> : null}</label>
-        <label className="form-field"><span>Due date</span><input type="date" value={form.due_date ?? ''} onChange={(event) => update('due_date', event.target.value || null)} /></label>
-        <label className="form-field"><span>Task type</span><select value={form.task_type} onChange={(event) => update('task_type', event.target.value as ManualTaskInput['task_type'])}><option value="assignment">Assignment</option><option value="quiz">Quiz</option><option value="test">Test</option></select></label>
-        <label className="form-field"><span>Classification</span><select value={form.classification} onChange={(event) => update('classification', event.target.value as ManualTaskInput['classification'])}><option value="homework">Homework</option><option value="classwork">Classwork</option></select></label>
-        <label className="form-field"><span>Action</span><select value={form.action_kind} onChange={(event) => update('action_kind', event.target.value)}>{ACTIONS.map((action) => <option key={action} value={action}>{action[0]?.toUpperCase()}{action.slice(1)}</option>)}</select></label>
-        <label className="form-field"><span>Status</span><select value={form.completed ? 'completed' : 'open'} onChange={(event) => update('completed', event.target.value === 'completed')}><option value="open">Open</option><option value="completed">Completed</option></select></label>
-      </div>
-      <label className="form-field"><span>Description / notes</span><textarea rows={5} value={form.details} onChange={(event) => update('details', event.target.value)} /></label>
-      <label className="form-field"><span>Source URL (optional)</span><input type="url" value={form.source_url ?? ''} onChange={(event) => update('source_url', event.target.value || null)} /></label>
-      <label className="form-field"><span>Canvas assignment URL (optional)</span><input type="url" value={form.assignment_url ?? ''} onChange={(event) => update('assignment_url', event.target.value || null)} /></label>
+  const hasLinks = Boolean(form.source_url || form.assignment_url)
+
+  return <Sheet
+    title={task ? 'Edit task' : 'New task'}
+    description={task ? `${task.course.name}, in ${task.google_task.tasklist_title ?? 'Google Tasks'}` : 'Saved straight to Google Tasks.'}
+    onClose={onClose}
+    footer={<>
+      <span className="sheet__footer-spacer" />
+      <Button variant="ghost" disabled={saving} onClick={onClose}>Cancel</Button>
+      <Button loading={saving} disabled={!form.title.trim() || !form.course_id} onClick={() => void save()}>{task ? 'Save changes' : 'Create task'}</Button>
+    </>}
+  >
+    <Field label="Task name"><input className="control" value={form.title} onChange={(event) => update('title', event.target.value)} /></Field>
+    <div className="form-grid">
+      <Field label="Course" help={task ? 'Fixed after creation, along with its task list.' : undefined}>
+        <select className="control" value={form.course_id} disabled={Boolean(task)} onChange={(event) => update('course_id', event.target.value)}>
+          {courses.map((course) => <option key={course.id} value={course.id}>{course.settings.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Due date"><input className="control" type="date" value={form.due_date ?? ''} onChange={(event) => update('due_date', event.target.value || null)} /></Field>
     </div>
-  </Modal>
+    <div className="field">
+      <span className="field__label">Status</span>
+      <Segmented label="Task status" value={form.completed ? 'completed' : 'open'} onChange={(value) => update('completed', value === 'completed')} options={[{ value: 'open', label: 'Open' }, { value: 'completed', label: 'Completed' }]} />
+    </div>
+    <Field label="Description / notes"><textarea className="control" rows={5} value={form.details} onChange={(event) => update('details', event.target.value)} /></Field>
+    <div className="form-grid form-grid--3">
+      <Field label="Type">
+        <select className="control" value={form.task_type} onChange={(event) => update('task_type', event.target.value as ManualTaskInput['task_type'])}>
+          <option value="assignment">Assignment</option><option value="quiz">Quiz</option><option value="test">Test</option>
+        </select>
+      </Field>
+      <Field label="Classification">
+        <select className="control" value={form.classification} onChange={(event) => update('classification', event.target.value as ManualTaskInput['classification'])}>
+          <option value="homework">Homework</option><option value="classwork">Classwork</option>
+        </select>
+      </Field>
+      <Field label="Action">
+        <select className="control" value={form.action_kind} onChange={(event) => update('action_kind', event.target.value)}>
+          {ACTIONS.map((action) => <option key={action} value={action}>{action[0]?.toUpperCase()}{action.slice(1)}</option>)}
+        </select>
+      </Field>
+    </div>
+    <Disclosure title="Links" hint="Optional" defaultOpen={hasLinks}>
+      <div className="form-stack">
+        <Field label="Source URL"><input className="control" type="url" value={form.source_url ?? ''} onChange={(event) => update('source_url', event.target.value || null)} /></Field>
+        <Field label="Canvas assignment URL"><input className="control" type="url" value={form.assignment_url ?? ''} onChange={(event) => update('assignment_url', event.target.value || null)} /></Field>
+      </div>
+    </Disclosure>
+  </Sheet>
 }
 
 function taskToForm(task: TrackedTask | null, courseId: string): ManualTaskInput {
@@ -122,8 +226,4 @@ function taskToForm(task: TrackedTask | null, courseId: string): ManualTaskInput
     source_url: task?.source.url ?? null,
     assignment_url: task?.canvas.assignment_url ?? task?.source.assignment_url ?? null,
   }
-}
-
-function formatTaskDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T00:00:00Z`))
 }

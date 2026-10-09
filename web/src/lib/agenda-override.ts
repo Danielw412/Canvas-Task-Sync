@@ -18,3 +18,32 @@ export function agendaOverrideValidationMessage(settings: CourseSettings): strin
   }
   return null
 }
+
+export function calendarDate(timezone: string): string {
+  // A timezone draft can be incomplete while the user edits the course.
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone })
+  } catch {
+    timezone = 'UTC'
+  }
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date())
+  const part = (type: string) => parts.find((item) => item.type === type)?.value
+  return `${part('year')}-${part('month')}-${part('day')}`
+}
+
+export function offsetDate(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00Z`)
+  if (Number.isNaN(date.getTime())) return ''
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
+// An override covers its target week only; after that week, normal discovery resumes.
+export function agendaOverrideExpiry(settings: CourseSettings): { expiresOn: string; expired: boolean } | null {
+  const override = settings.canvas_agenda_override
+  if (!override) return null
+  const expiresOn = offsetDate(override.target_week_start, 6)
+  return { expiresOn, expired: Boolean(expiresOn && calendarDate(settings.timezone) > expiresOn) }
+}

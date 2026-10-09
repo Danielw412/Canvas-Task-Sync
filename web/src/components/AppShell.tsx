@@ -1,84 +1,81 @@
 import {
-  Activity,
-  BookOpen,
-  CalendarDays,
-  CircleCheck,
-  Clock3,
-  Grid2X2,
-  HeartPulse,
-  Menu,
-  Settings,
-  ListChecks,
-} from 'lucide-react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { mutate } from 'swr'
+  BooksIcon,
+  CalendarBlankIcon,
+  CheckCircleIcon,
+  ClockCounterClockwiseIcon,
+  DotsThreeOutlineIcon,
+  GearSixIcon,
+  HouseSimpleIcon,
+  ListChecksIcon,
+  PulseIcon,
+  WarningCircleIcon,
+} from '@phosphor-icons/react'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import logoUrl from '../assets/logo.png'
-import { mutateJson, useOverview } from '../lib/api'
+import { useOverview } from '../lib/api'
 import { useApp } from './AppContext'
-import { CourseSwitcher } from './CourseSwitcher'
-import { Button } from './ui'
+import { Menu } from './ui'
 
 const navigation = [
-  { to: '/', label: 'Overview', icon: Grid2X2, end: true },
-  { to: '/runs', label: 'Runs', icon: Clock3 },
-  { to: '/tasks', label: 'Tasks', icon: ListChecks },
-  { to: '/courses', label: 'Courses', icon: BookOpen },
-  { to: '/schedules', label: 'Schedules', icon: CalendarDays },
-  { to: '/diagnostics', label: 'Diagnostics', icon: Activity, desktopOnly: true },
-  { to: '/settings', label: 'Settings', icon: Settings, desktopOnly: true },
+  { to: '/', label: 'Overview', icon: HouseSimpleIcon, end: true },
+  { to: '/tasks', label: 'Tasks', icon: ListChecksIcon },
+  { to: '/runs', label: 'Runs', icon: ClockCounterClockwiseIcon },
+  { to: '/courses', label: 'Courses', icon: BooksIcon },
+  { to: '/schedules', label: 'Schedules', icon: CalendarBlankIcon, mobileMore: true },
 ]
 
+const moreRoutes = ['/schedules', '/diagnostics', '/settings']
+
 export function AppShell() {
-  const { selectedCourseId, setSelectedCourseId, toast } = useApp()
+  const { selectedCourseId } = useApp()
   const { data } = useOverview(selectedCourseId)
   const navigate = useNavigate()
   const location = useLocation()
-  const healthy = Boolean(data?.connections.google_authorized && data.connections.extraction_ready)
+  const ready = Boolean(data?.connections.google_authorized && data.connections.extraction_ready)
 
-  async function runHealth() {
-    try {
-      const result = await mutateJson<{ run_id: number }>(
-        `/api/v1/health-runs${selectedCourseId ? `?course_id=${encodeURIComponent(selectedCourseId)}` : ''}`,
-      )
-      await mutate((key) => typeof key === 'string' && key.includes('/api/v1/overview'))
-      navigate(`/runs/${result.run_id}`)
-    } catch (error) {
-      toast(error instanceof Error ? error.message : 'Health check could not be started.', 'error')
-    }
-  }
+  return <div className="shell">
+    <a className="skip-link" href="#main">Skip to content</a>
+    <header className="topbar">
+      <div className="topbar__inner">
+        <Link to="/" className="brand" aria-label="Canvas Task Sync overview">
+          <img src={logoUrl} alt="" />
+          <span>Canvas Task Sync</span>
+        </Link>
+        <nav className="nav" aria-label="Primary navigation">
+          {navigation.map(({ to, label, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => `nav__link${isActive ? ' is-active' : ''}`}>{label}</NavLink>)}
+        </nav>
+        <div className="topbar__end">
+          {data ? ready
+            ? <Link to="/diagnostics" className="health-link" title="Google and the extraction agent are connected. Open diagnostics.">
+              <CheckCircleIcon className="tone-success" size={17} weight="fill" aria-hidden /><span className="health-link__text">All systems ready</span>
+            </Link>
+            : <Link to="/settings" className="health-link health-link--warning" title="A connection needs setup. Open settings.">
+              <WarningCircleIcon size={17} weight="fill" aria-hidden /><span className="health-link__text">Finish setup</span>
+            </Link> : null}
+          <NavLink to="/settings" className={({ isActive }) => `nav__link settings-link${isActive ? ' is-active' : ''}`} aria-label="Settings" title="Settings">
+            <GearSixIcon size={19} aria-hidden /><span>Settings</span>
+          </NavLink>
+        </div>
+      </div>
+    </header>
 
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <NavLink to="/" className="brand" aria-label="Canvas Task Sync overview">
-        <span className="brand__mark"><img src={logoUrl} alt="" /></span>
-        <span>Canvas Task Sync</span>
-      </NavLink>
-      <nav className="desktop-nav" aria-label="Primary navigation">
-        {navigation.map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? 'nav-item nav-item--active' : 'nav-item'}>
-          <Icon size={19} strokeWidth={1.8} /><span>{label}</span>
-        </NavLink>)}
-      </nav>
-      <div className="server-status"><CircleCheck size={17} /><div><strong>Local server</strong><span>Connected</span></div></div>
-    </aside>
-    <div className="app-main">
-      <header className="topbar">
-        <div className="mobile-brand">
-          <NavLink to="/" aria-label="Canvas Task Sync overview"><span className="brand__mark"><img src={logoUrl} alt="" /></span><span>Canvas Task Sync</span></NavLink>
-          <NavLink to="/settings" aria-label="Open settings"><Menu size={22} /></NavLink>
-        </div>
-        <CourseSwitcher courses={data?.courses ?? []} selectedCourseId={selectedCourseId} onSelect={setSelectedCourseId} />
-        <div className="topbar__actions">
-          <Button variant="ghost" icon={HeartPulse} onClick={runHealth}>Check health</Button>
-          <div className={`connection-summary ${healthy ? 'tone-success' : 'tone-warning'}`}>
-            <CircleCheck size={18} /><span>{healthy ? 'Ready' : 'Needs setup'}</span>
-          </div>
-        </div>
-      </header>
-      <main className="page-shell" key={location.pathname}><Outlet /></main>
-    </div>
+    <main className="page-shell" id="main" key={location.pathname}><Outlet /></main>
+
     <nav className="mobile-nav" aria-label="Mobile navigation">
-      {navigation.filter((item) => !item.desktopOnly).map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><Icon size={20} strokeWidth={1.8} /><span>{label}</span></NavLink>)}
-      <NavLink to="/settings" className={({ isActive }) => isActive || location.pathname === '/diagnostics' ? 'mobile-nav__item mobile-nav__item--active' : 'mobile-nav__item'}><Menu size={20} strokeWidth={1.8} /><span>More</span></NavLink>
+      {navigation.filter((item) => !item.mobileMore).map(({ to, label, icon: Icon, end }) => <NavLink key={to} to={to} end={end} className={({ isActive }) => `mobile-nav__item${isActive ? ' is-active' : ''}`}>
+        <Icon size={22} aria-hidden /><span>{label}</span>
+      </NavLink>)}
+      <Menu
+        label="More pages"
+        placement="up"
+        triggerClassName={`mobile-nav__item${moreRoutes.includes(location.pathname) ? ' is-active' : ''}`}
+        trigger={<><DotsThreeOutlineIcon size={22} aria-hidden /><span>More</span></>}
+        items={[
+          { label: 'Schedules', icon: CalendarBlankIcon, onSelect: () => navigate('/schedules') },
+          { label: 'Diagnostics', icon: PulseIcon, onSelect: () => navigate('/diagnostics') },
+          { label: 'Settings', icon: GearSixIcon, onSelect: () => navigate('/settings') },
+        ]}
+      />
     </nav>
   </div>
 }
