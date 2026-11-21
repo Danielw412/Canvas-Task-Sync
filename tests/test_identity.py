@@ -252,6 +252,91 @@ def test_only_restated_dates_let_a_generic_title_follow_a_reschedule():
     ]
 
 
+def test_a_shorter_quote_of_the_same_line_keeps_identity():
+    # AP Psychology, Nov 20: one extraction quoted the whole slide line, the next only the
+    # part about the practice checks, dropping "[Day 63]" and with it the due date.
+    full = "Due Friday: Classical or Operant? [Day 63]; Practice checks [Days 62 and 64]"
+    excerpt = "Practice checks [Days 62 and 64]"
+    reinforcement = _draft(anchor="canvas:slides:h77ee_0_8", source_text=full,
+                           title="[PSYCH] Reinforcement schedules check",
+                           fingerprint="r-full", due=date(2026, 11, 20))
+    operant = _draft(anchor="canvas:slides:h5c21_4_8", ordinal=1, source_text=full,
+                     title="[PSYCH] Operant conditioning check",
+                     fingerprint="o-full", due=date(2026, 11, 20))
+    records = [_record(reinforcement, "reinforcement-id"), _record(operant, "operant-id")]
+    reread = [
+        reinforcement.model_copy(
+            update={"source_text": excerpt, "fingerprint": "r-short", "due_date": None}
+        ),
+        operant.model_copy(
+            update={"source_text": excerpt, "fingerprint": "o-short", "due_date": None}
+        ),
+    ]
+
+    assert resolve_logical_ids(reread, records) == {0: "reinforcement-id", 1: "operant-id"}
+
+
+def test_an_excerpt_too_short_to_name_an_item_is_not_containment():
+    original = _draft(source_text="Unit 2 Quiz and Unit 3 Quiz",
+                      title="[CHEM] Unit 2 Quiz", fingerprint="quizzes")
+    unrelated = _draft(anchor="canvas:other:4", source_text="Unit 3",
+                       title="[CHEM] Unit 3 review", fingerprint="u3")
+
+    assert resolve_logical_ids([unrelated], [_record(original, "quiz-id")])[0] != "quiz-id"
+
+
+def test_a_rewritten_row_keeps_identity_by_its_numbered_title():
+    # AP Physics C, Nov 12: the row was rewritten and gained a date, while unit 5
+    # assignment 2 left the same block.
+    anchor = "canvas:26-27-agenda-ap-physics-c:3"
+    first = _draft(anchor=anchor, ordinal=0, source_text="work on unit 5 assignment 1",
+                   title="[PHYSICS] Unit 5 Assignment 1", fingerprint="a1", due=None)
+    second = _draft(anchor=anchor, ordinal=1, source_text="work on unit 5 assignment 2",
+                    title="[PHYSICS] Unit 5 Assignment 2", fingerprint="a2", due=None)
+    rewritten = _draft(
+        anchor=anchor,
+        source_text="unit 5 assignment 1 will be due on Monday November 16",
+        title="[PHYSICS] Unit 5 Assignment 1",
+        fingerprint="a1-due",
+        due=date(2026, 11, 16),
+    )
+
+    resolved = resolve_logical_ids(
+        [rewritten], [_record(first, "assignment-1"), _record(second, "assignment-2")]
+    )
+
+    assert resolved == {0: "assignment-1"}
+
+
+def test_title_pairing_needs_one_to_one_and_a_kept_date_for_generic_items():
+    practice = _draft(source_text="Completar actividades de práctica - VHL",
+                      title="[SPANISH] VHL practice", fingerprint="vhl")
+    record = _record(practice, "vhl-id")
+    # Recurring generic work on another date is another occurrence.
+    moved = practice.model_copy(update={
+        "source_anchor": "table:agenda_table:r4:c2",
+        "source_text": "Actividades de práctica VHL - lección 3",
+        "fingerprint": "vhl-3",
+        "due_date": date(2026, 8, 14),
+    })
+    assert resolve_logical_ids([moved], [record])[0] != "vhl-id"
+
+    # Two new items cannot share one old task.
+    numbered = _record(
+        _draft(source_text="work on unit 5 assignment 1",
+               title="[PHYSICS] Unit 5 Assignment 1", fingerprint="a1"),
+        "a1-id",
+    )
+    twins = [
+        _draft(anchor=f"canvas:physics:{index}", source_text=text,
+               title="[PHYSICS] Unit 5 Assignment 1", fingerprint=f"twin-{index}")
+        for index, text in enumerate(
+            ["submit unit 5 assignment 1 today", "unit 5 assignment 1 corrections due"]
+        )
+    ]
+    assert "a1-id" not in resolve_logical_ids(twins, [numbered]).values()
+
+
 def test_ambiguous_duplicate_row_move_does_not_guess():
     one = _draft(anchor="table:agenda_table:r2:c2", source_text="VHL practice")
     two = _draft(anchor="table:agenda_table:r5:c2", source_text="VHL practice")

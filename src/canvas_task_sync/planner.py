@@ -8,7 +8,7 @@ from datetime import date
 
 from canvas_task_sync.gemini import normalized_text
 from canvas_task_sync.google_tasks import GoogleTasksClient, date_from_google_due
-from canvas_task_sync.identity import carryover_matches, resolve_logical_ids
+from canvas_task_sync.identity import carryover_matches, resolve_logical_ids, same_task_title
 from canvas_task_sync.managed_notes import (
     compose_task_notes,
     has_managed_delimiter,
@@ -27,6 +27,7 @@ from canvas_task_sync.models import (
     TaskType,
     UncertainItem,
 )
+from canvas_task_sync.scheduling import EVIDENCE_TIMING_REASONS
 from canvas_task_sync.state import StateStore
 
 
@@ -103,29 +104,39 @@ def _record_due(record: StateRecord) -> date | None:
 
 
 def _stabilized(desired: DesiredTask, record: StateRecord, today: date | None) -> DesiredTask:
-    """Keep what the last sync wrote while the exact source evidence is unchanged.
+    """Keep what the last sync wrote unless the source gives a reason to change it.
 
     Every re-extraction rewords titles and details slightly and can lose a relative
-    deadline. Those differences are noise when the evidence is identical, and turning a
-    known due date into "uncertain" would erase a deadline the source never withdrew. A
-    changed source is followed as usual.
+    deadline. Wording differences are noise when the evidence is identical. A known due
+    date is kept even when the evidence changed, as long as the new reading only failed to
+    find a date: "submit unit 5 assignment 1" on an undated row does not withdraw the
+    "due on Monday November 16" stated earlier. Evidence that itself makes the timing
+    uncertain (vague, conflicting, several dates) is followed, as is any new date.
     """
-    if normalized_text(record.source_text) != normalized_text(desired.source_text):
-        return desired
+    unchanged = normalized_text(record.source_text) == normalized_text(desired.source_text)
     update: dict[str, object] = {}
-    if record.title and normalized_text(record.title) == normalized_text(desired.title):
+    if unchanged and record.title and (
+        normalized_text(record.title) == normalized_text(desired.title)
+    ):
         update["title"] = record.title
-    if record.details:
+    if unchanged and record.details:
         update["details"] = record.details
     kept = _record_due(record)
-    if desired.due_date is None and desired.due_uncertain and kept and not record.due_uncertain:
+    if (
+        desired.due_date is None
+        and desired.due_uncertain
+        and desired.due_uncertain_reason not in EVIDENCE_TIMING_REASONS
+        and kept
+        and not record.due_uncertain
+    ):
+        evidence = "unchanged evidence" if unchanged else "the changed evidence"
         update.update(
             due_date=kept,
             due_uncertain=False,
             due_uncertain_reason=None,
             due_basis=(
                 f"{record.due_basis or 'Previously scheduled date'}; kept because this "
-                "extraction could not confirm a date from unchanged evidence"
+                f"extraction could not confirm a date from {evidence}"
             ),
             historical=bool(today and kept < today),
         )
@@ -432,6 +443,42 @@ class SyncPlanner:
                             remote_task_id=collision.id,
                             desired=desired,
                             task_list=collision.tasklist_title or desired.destination_task_list,
+                        )
+                    )
+                    continue
+
+                # The last line of defense against a second copy: when this same agenda just
+                # dropped a task with the same title, identity matching failed on a rewritten
+                # item, and its due date usually changed too, so the collision check above
+                # cannot catch it. Hold it for a person rather than create a duplicate.
+                replaced = [
+                    record
+                    for record in state_records
+                    if record.logical_id not in desired_ids
+                    and same_task_title(record.title, desired.title)
+                    and (record.task_type is None or record.task_type == desired.task_type)
+                ]
+                if replaced:
+                    previous = replaced[0]
+                    actions.append(
+                        SyncAction(
+                            kind=SyncActionKind.UNCERTAIN,
+                            title=desired.title,
+                            logical_id=desired.logical_id,
+                            due_date=desired.due_date,
+                            reason=(
+                                f"This agenda no longer lists the task \"{previous.title}\" "
+                                "it made earlier, and this item could not be matched to it "
+                                "with confidence; no second task will be made."
+                            ),
+                            conflict=True,
+                            evidence=desired.source_text,
+                            source_anchor=desired.source_anchor,
+                            remote_task_id=previous.google_task_id,
+                            desired=desired,
+                            task_list=id_to_title.get(
+                                previous.tasklist_id, desired.destination_task_list
+                            ),
                         )
                     )
                     continue

@@ -85,6 +85,14 @@ VAGUE_TIMING_PATTERN = re.compile(
     r"not\s+yet\s+(?:scheduled|announced)|will\s+be\s+announced)\b",
     re.IGNORECASE,
 )
+VAGUE_TIMING_REASON = "The source gives only vague timing for this item."
+WEEKDAY_DATE_CONFLICT_REASON = "The weekday and calendar date in the source evidence disagree."
+SEVERAL_DATES_REASON = "The source evidence names more than one date."
+# Uncertainty the evidence itself causes. Every other uncertain reason means only that no
+# date was found, which does not withdraw a date an earlier sync already set.
+EVIDENCE_TIMING_REASONS = frozenset(
+    {VAGUE_TIMING_REASON, WEEKDAY_DATE_CONFLICT_REASON, SEVERAL_DATES_REASON}
+)
 SAME_DAY_TIMING_PATTERN = re.compile(
     r"\b(?:today|tonight|end\s+of\s+(?:the\s+)?(?:class|period|day)|"
     r"(?:at|by)\s+midnight|closes?\s+at|due\s+(?:at|by)\s+\d)",
@@ -522,18 +530,14 @@ def _resolve_explicit_due(
         (value,) = evidence_dates
         named = _named_weekdays(task.source_text)
         if named and value.weekday() not in named:
-            return _ExplicitResolution(
-                uncertain_reason="The weekday and calendar date in the source evidence disagree."
-            )
+            return _ExplicitResolution(uncertain_reason=WEEKDAY_DATE_CONFLICT_REASON)
         return _ExplicitResolution(due_date=value, basis=stated)
     if evidence_dates:
         named = _named_weekdays(proposal)
         candidates = {value for value in evidence_dates if value.weekday() in named}
         if len(candidates) == 1:
             return _ExplicitResolution(due_date=candidates.pop(), basis=stated)
-        return _ExplicitResolution(
-            uncertain_reason="The source evidence names more than one date."
-        )
+        return _ExplicitResolution(uncertain_reason=SEVERAL_DATES_REASON)
     if explicit_weekday is not None:
         # Evidence such as "Due Thursday at midnight" names only a weekday.
         return _ExplicitResolution(
@@ -541,9 +545,7 @@ def _resolve_explicit_due(
             basis="Weekday explicitly stated in source evidence",
         )
     if VAGUE_TIMING_PATTERN.search(task.source_text) or VAGUE_TIMING_PATTERN.search(proposal):
-        return _ExplicitResolution(
-            uncertain_reason="The source gives only vague timing for this item."
-        )
+        return _ExplicitResolution(uncertain_reason=VAGUE_TIMING_REASON)
     stated = _stated_timing(task.source_text)
     if stated is not None:
         return _ExplicitResolution(fallback=stated)
@@ -1168,7 +1170,7 @@ def build_draft_tasks(
                 if VAGUE_TIMING_PATTERN.search(task.source_text):
                     # "Exam will be next week" announces an assessment; it is not on this row.
                     due_uncertain = True
-                    due_uncertain_reason = "The source gives only vague timing for this item."
+                    due_uncertain_reason = VAGUE_TIMING_REASON
                     due_basis = "Due date uncertain"
                 elif source_date is None:
                     due_uncertain = True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from canvas_task_sync.gemini import normalized_text, token_similarity
@@ -23,6 +23,10 @@ MATCH_MARGIN = 0.15
 POSITION_MIN_SIMILARITY = 0.4
 CARRYOVER_EVIDENCE_SIMILARITY = 0.4
 RESCHEDULED_EVIDENCE_SIMILARITY = 0.8
+# One extraction quotes a whole line and the next only part of it ("Due Friday: A; B" vs
+# "B"). The shorter quote must still say something on its own to count as the same item.
+CONTAINED_EVIDENCE_MIN_TOKENS = 3
+CONTAINED_EVIDENCE_SIMILARITY = 0.9
 # Words that vary between extractions of one item: the assessment noun (task type is
 # compared separately), filler "section", and the submission verb.
 TITLE_FILLER_PATTERN = re.compile(
@@ -69,11 +73,23 @@ def _family(anchor: str) -> str | None:
     return f"table:{match.group('element')}:c{match.group('column')}"
 
 
+def _evidence_contained(left: str, right: str) -> bool:
+    """True when one quote is a word-aligned excerpt of the other.
+
+    Re-extracting an unchanged line can quote all of it or only the part about one item.
+    """
+    shorter, longer = sorted((normalized_text(left), normalized_text(right)), key=len)
+    if len(shorter.split()) < CONTAINED_EVIDENCE_MIN_TOKENS:
+        return False
+    return f" {shorter} " in f" {longer} "
+
+
 def _evidence_similarity(left: str, right: str) -> float:
     """Evidence similarity that survives a date change ("September 28" -> "October 5")."""
     return max(
         token_similarity(left, right),
         token_similarity(strip_date_references(left), strip_date_references(right)),
+        CONTAINED_EVIDENCE_SIMILARITY if _evidence_contained(left, right) else 0.0,
     )
 
 
@@ -85,10 +101,16 @@ def _title_similarity(left: str, right: str) -> float:
 
 
 def _numbers_conflict(draft: DraftTask, record: StateRecord) -> bool:
-    """Different item numbers ("Unit 2" vs "Unit 3", "1.4" vs "1.5") are different items."""
+    """Different item numbers ("Unit 2" vs "Unit 3", "1.4" vs "1.5") are different items.
+
+    An excerpt of the same quote drops the numbers of the text it leaves out ("[Day 63]"),
+    which is not a different item.
+    """
     left = identity_numbers(draft.source_text)
     right = identity_numbers(record.source_text)
-    return bool(left and right and left != right)
+    if not (left and right and left != right):
+        return False
+    return not _evidence_contained(draft.source_text, record.source_text)
 
 
 def _score(draft: DraftTask, record: StateRecord) -> float:
@@ -113,6 +135,16 @@ def _plausibly_same_item(draft: DraftTask, record: StateRecord) -> bool:
 
 def _title_key(title: str) -> str:
     return normalized_text(TITLE_FILLER_PATTERN.sub(" ", title))
+
+
+def same_task_title(left: str, right: str) -> bool:
+    """Titles name the same item, ignoring wording that varies between extractions."""
+    key = _title_key(left)
+    return bool(key) and key == _title_key(right)
+
+
+def _draft_due(draft: DraftTask) -> str | None:
+    return draft.due_date.isoformat() if draft.due_date else None
 
 
 @dataclass(frozen=True)
@@ -309,6 +341,29 @@ def resolve_logical_ids(
         if match:
             resolved[index] = match.logical_id
             available.pop(match.logical_id, None)
+
+    # A rewritten row ("work on unit 5 assignment 1" -> "unit 5 assignment 1 will be due on
+    # Monday November 16") reads too differently to score, and its date changed too. Within
+    # one agenda the same item is still recognized by the rule carry-over uses across weeks:
+    # same title and task type, no conflicting item numbers, and compatible evidence unless
+    # the title is numbered. Only a one-to-one pairing is accepted, and an item that recurs
+    # (a generic title) must also keep its date.
+    unresolved = [index for index in range(len(drafts)) if index not in resolved]
+    pairs: dict[int, StateRecord] = {}
+    for index in unresolved:
+        draft = drafts[index]
+        matches = [
+            match.record
+            for match in carryover_matches(draft, list(available.values()))
+            if match.reschedulable or match.record.due_date == _draft_due(draft)
+        ]
+        if len(matches) == 1:
+            pairs[index] = matches[0]
+    claimed = Counter(record.logical_id for record in pairs.values())
+    for index, record in pairs.items():
+        if claimed[record.logical_id] == 1:
+            resolved[index] = record.logical_id
+            available.pop(record.logical_id, None)
 
     # A newly inserted action can occupy an ordinal previously used by a matched
     # record later in the same block. Reserve every stored/resolved ID so the new
