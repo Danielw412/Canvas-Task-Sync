@@ -677,6 +677,98 @@ def test_day_cells_with_schedule_notes_are_still_dated_day_labels():
     assert quiz.row_label == "Tuesday"
 
 
+def test_rows_without_a_day_column_are_dated_by_the_weekday_opening_their_cell():
+    # AP Physics C: one cell per row, its first line naming the day.
+    body = """
+    <table>
+      <tr><td><p><strong>Learning Targets for the Week: November 16</strong></p>
+        <p>apply Newton's second law of motion for rotational dynamics</p></td></tr>
+      <tr><td><strong>Assignments and learning activities</strong></td></tr>
+      <tr><td><p><strong>Monday</strong></p><p>Classwork:</p>
+        <p>submit unit 5 assignment 1</p><p>work on unit 5 lab 1</p></td></tr>
+      <tr><td><p>Tuesday</p><p>Classwork:</p><p>work on unit 5 lab 1</p></td></tr>
+      <tr><td><p>Wednesday</p><p>Classwork:</p><p>work on unit 6 assignment 1</p></td></tr>
+      <tr><td><p>Thursday</p><p>Classwork:</p><p>work on unit 6 assignment 1</p></td></tr>
+      <tr><td><p>Friday</p><p>Classwork:</p><p>work on unit 6 assignment 1</p></td></tr>
+    </table>
+    """
+    week = date(2026, 11, 16)
+    capture = front_page_source("11126", body, week).capture(include_image=False)
+    dates = row_date_ranges(capture)
+
+    day_rows = [block for block in capture.blocks if block.row_label]
+    assert [block.row_label for block in day_rows] == [
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"
+    ]
+    # The cell is still the row's content, not a day label.
+    assert {block.role for block in day_rows} == {BlockRole.ASSIGNMENTS}
+    assert [dates[(block.element_id, block.row_index)][0] for block in day_rows] == [
+        date(2026, 11, 16),
+        date(2026, 11, 17),
+        date(2026, 11, 18),
+        date(2026, 11, 19),
+        date(2026, 11, 20),
+    ]
+
+    course = CourseSettings.model_validate(
+        {
+            "name": "AP Physics C",
+            "prefix": "PHYSICS",
+            "task_list": "School",
+            "canvas_course_id": "11126",
+            "source": {"type": "none", "extraction": {"mode": "text"}},
+        }
+    )
+
+    def extracted(block, source_text, due_relation, action_kind):
+        return ExtractedTask(
+            source_anchor=block.anchor,
+            source_text=source_text,
+            classification=TaskClassification.HOMEWORK,
+            action_kind=action_kind,
+            title_stem=source_text,
+            due_relation=due_relation,
+            confidence=Confidence.HIGH,
+        )
+
+    monday, *_, friday = day_rows
+    drafts, uncertain, _ = build_draft_tasks(
+        course_id="11126",
+        course=course,
+        capture=capture,
+        tasks=[
+            extracted(monday, "submit unit 5 assignment 1", DueRelation.SAME_DAY,
+                      ActionKind.SUBMIT),
+            extracted(friday, "work on unit 6 assignment 1", DueRelation.NEXT_CLASS,
+                      ActionKind.OTHER),
+        ],
+        today=week,
+    )
+
+    assert not uncertain
+    assert sorted((draft.source_text, draft.due_date) for draft in drafts) == [
+        ("submit unit 5 assignment 1", date(2026, 11, 16)),
+        ("work on unit 6 assignment 1", date(2026, 11, 23)),
+    ]
+
+
+def test_a_row_is_not_dated_by_content_that_merely_mentions_a_day():
+    body = """
+    <table>
+      <caption><h4>WEEK OF NOVEMBER 16-20</h4></caption>
+      <tr><td><p>Monday</p><p>Read chapter 10</p></td>
+        <td><p>Friday</p><p>Lab due</p></td></tr>
+      <tr><td><p>Monday Quiz</p><p>Bring a calculator</p></td></tr>
+    </table>
+    """
+    capture = front_page_source("11126", body, date(2026, 11, 16)).capture(
+        include_image=False
+    )
+
+    # Two cells open with different days, and "Monday Quiz" is content, not a heading.
+    assert all(block.row_label is None for block in capture.blocks)
+
+
 def linear_algebra_week(heading: str, monday_assignment: str) -> str:
     return f"""
     <div>

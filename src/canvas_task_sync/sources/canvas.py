@@ -625,6 +625,24 @@ def _day_label(value: str) -> str | None:
     return None
 
 
+def _leading_day_label(value: str) -> str | None:
+    """Return the weekday heading a content cell opens with ("Monday / Classwork: ...").
+
+    Some agendas have no day column: each row is one cell whose first line names the day.
+    The cell stays content; its first line only dates the row.
+    """
+    first, _, rest = value.strip().partition("\n")
+    first = first.strip().rstrip(":")
+    if not rest.strip():
+        return None
+    if DAY_RE.fullmatch(first):
+        return first.rstrip(".")
+    dated = DATED_DAY_RE.fullmatch(first)
+    if dated is not None and _day_label(first) is not None:
+        return dated.group("day")
+    return None
+
+
 def _is_header_row(cells: list[HtmlNode], values: list[str]) -> bool:
     labels = [value for value in values if value.strip()]
     if not any(
@@ -738,6 +756,11 @@ def _agenda_blocks(
                 headers = values
             day_labels = [_day_label(value) for value in values]
             row_label = next((label for label in day_labels if label), None)
+            if row_label is None:
+                # Only an unambiguous heading dates the row: one cell opening with a day.
+                leading = {label for label in map(_leading_day_label, values) if label}
+                if len(leading) == 1:
+                    row_label = leading.pop()
             roles: list[BlockRole] = []
             for column_index in range(len(values)):
                 lowered_header = (

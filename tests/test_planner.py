@@ -22,6 +22,7 @@ from canvas_task_sync.models import (
     UncertainItem,
 )
 from canvas_task_sync.planner import SyncPlanner, apply_sync_plan
+from canvas_task_sync.scheduling import VAGUE_TIMING_REASON
 from canvas_task_sync.state import StateStore
 
 SOURCE_KEY = "google_slides:fixture:page"
@@ -652,12 +653,48 @@ def test_unchanged_evidence_keeps_the_known_date_title_and_details():
     assert plan.actions[0].due_uncertain is False
     assert plan.actions[0].desired.title == "[SPANISH] Complete Class Activity"
 
-    # When the source itself changed, the new reading is followed.
-    edited = flaky.model_copy(update={"source_text": "Completar la actividad (sin fecha)"})
+    # A changed source is followed for its wording, but failing to find a date in it does
+    # not withdraw the date an earlier sync set.
+    edited = flaky.model_copy(update={"source_text": "Completar la actividad en clase"})
     plan = _plan([edited], records=[record], remotes=[remote])
 
     assert plan.actions[0].kind == SyncActionKind.UPDATE
+    assert plan.actions[0].due_date == date(2026, 8, 13)
+    assert plan.actions[0].desired.title == "[SPANISH] Complete class activity"
+
+    # Evidence that itself makes the timing uncertain is followed.
+    vague = edited.model_copy(update={"due_uncertain_reason": VAGUE_TIMING_REASON})
+    plan = _plan([vague], records=[record], remotes=[remote])
+
+    assert plan.actions[0].kind == SyncActionKind.UPDATE
     assert plan.actions[0].due_date is None
+
+
+def test_unmatched_item_with_the_title_of_a_dropped_task_is_held_not_duplicated():
+    original = _draft(due=date(2026, 8, 12))
+    record = _record(original, "original-id", remote_id="remote-1")
+    remote = _remote("remote-1", original)
+    # Rewritten beyond recognition and moved to another day and row.
+    rewritten = original.model_copy(update={
+        "source_anchor": "table:agenda:r5:c2",
+        "source_text": "Hacer la tarea del libro, página 40",
+        "fingerprint": "rewritten",
+        "due_date": date(2026, 8, 14),
+    })
+
+    plan = _plan([rewritten], records=[record], remotes=[remote])
+
+    kinds = {action.kind for action in plan.actions}
+    assert SyncActionKind.CREATE not in kinds
+    held = next(action for action in plan.actions if action.kind == SyncActionKind.UNCERTAIN)
+    assert held.conflict is True
+    assert held.remote_task_id == "remote-1"
+    assert SyncActionKind.SOURCE_MISSING in kinds
+
+    # A different item is still created.
+    other = rewritten.model_copy(update={"title": "[SPANISH] Read chapter 2"})
+    plan = _plan([other], records=[record], remotes=[remote])
+    assert SyncActionKind.CREATE in {action.kind for action in plan.actions}
 
 
 def test_extraction_uncertainty_is_informational_not_a_conflict():
