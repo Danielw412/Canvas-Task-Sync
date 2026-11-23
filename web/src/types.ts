@@ -125,6 +125,8 @@ export interface ConnectionStatus {
   google_client_configured: boolean
   google_authorized: boolean
   gemini_configured: boolean
+  // Whether a Canvas API token is saved in the server's .env.
+  canvas_configured: boolean
   // The extraction agent every course uses (Settings → Extraction agent).
   extraction_provider: AgentProvider
   extraction_label: string

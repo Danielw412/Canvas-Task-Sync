@@ -53,6 +53,7 @@ from canvas_task_sync.google_oauth import (
 from canvas_task_sync.google_tasks import GoogleTasksError
 from canvas_task_sync.health import (
     agent_health_check,
+    canvas_token_health_check,
     connection_status,
     gemini_health_check,
     run_health_checks,
@@ -79,6 +80,7 @@ from canvas_task_sync.web_constants import (
 from canvas_task_sync.web_models import (
     ApiErrorDetail,
     BrowserResourceRead,
+    CanvasTokenUpdate,
     CaptureFailure,
     CourseSave,
     CourseView,
@@ -1043,6 +1045,18 @@ def create_web_app(
     async def test_gemini(request: Request) -> dict[str, Any]:
         runtime = _runtime(request)
         check = await asyncio.to_thread(gemini_health_check, runtime.settings)
+        return {"check": check}
+
+    @api.post("/settings/canvas-token", status_code=204)
+    def save_canvas_token(request: Request, payload: CanvasTokenUpdate) -> Response:
+        runtime = _runtime(request)
+        runtime.configuration.save_canvas_token(payload.token)
+        return Response(status_code=204)
+
+    @api.post("/settings/canvas/test")
+    async def test_canvas_token(request: Request) -> dict[str, Any]:
+        runtime = _runtime(request)
+        check = await asyncio.to_thread(canvas_token_health_check, runtime.settings)
         return {"check": check}
 
     @api.get("/settings/extraction-agent")

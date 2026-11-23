@@ -18,6 +18,18 @@ from canvas_task_sync.configuration import (
 from canvas_task_sync.web_models import CourseSave
 
 MAX_CREDENTIAL_FILE_BYTES = 128 * 1024
+# The name the Canvas source reads first, so a token saved here wins over the older
+# CANVAS_API_TOKEN / CANVAS_API_KEY spellings it also accepts.
+CANVAS_TOKEN_ENV = "CANVAS_TOKEN"
+CANVAS_TOKEN_ENV_NAMES = (CANVAS_TOKEN_ENV, "CANVAS_API_TOKEN", "CANVAS_API_KEY")
+
+
+def canvas_token_from_env() -> str | None:
+    for name in CANVAS_TOKEN_ENV_NAMES:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
 
 
 def _atomic_replace(path: Path, payload: bytes, *, backup: bool = False) -> None:
@@ -104,11 +116,32 @@ class ConfigurationService:
         normalized = api_key.strip()
         if not normalized:
             raise ValueError("Gemini API key cannot be blank.")
+        self._save_env_value("GEMINI_API_KEY", normalized)
+
+    def save_canvas_token(self, token: str) -> None:
+        normalized = token.strip()
+        if not normalized:
+            raise ValueError("Canvas API token cannot be blank.")
+        if not all(character.isascii() and character.isprintable() for character in normalized):
+            raise ValueError("Canvas API token must be one line of printable characters.")
+        if any(character.isspace() for character in normalized):
+            raise ValueError("Canvas API token cannot contain spaces.")
+        self._save_env_value(CANVAS_TOKEN_ENV, normalized)
+
+    def _save_env_value(self, name: str, value: str) -> None:
+        """Write one key to .env and make this process see it at once.
+
+        ``load_dotenv`` never overrides a variable that is already set, so without the
+        assignment below a replaced secret would keep its old value until a restart. Worker
+        processes started from here inherit the new value, and a worker already running
+        re-reads .env when the file changes.
+        """
         path = self.root_dir / ".env"
         values = {key: value for key, value in dotenv_values(path).items() if value is not None}
-        values["GEMINI_API_KEY"] = normalized
-        payload = "".join(f"{key}={_quote_env(value)}\n" for key, value in values.items())
+        values[name] = value
+        payload = "".join(f"{key}={_quote_env(item)}\n" for key, item in values.items())
         _atomic_replace(path, payload.encode("utf-8"), backup=True)
+        os.environ[name] = value
 
     def save_oauth_client(self, payload: bytes) -> None:
         if len(payload) > MAX_CREDENTIAL_FILE_BYTES:

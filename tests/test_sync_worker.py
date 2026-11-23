@@ -307,3 +307,26 @@ def test_the_worker_rereads_a_changed_config_between_runs(tmp_path):
     os.utime(config, ns=(config.stat().st_atime_ns, config.stat().st_mtime_ns + 2_000_000))
     reloader.refresh()
     assert service.settings.extraction_agent.model == "claude-opus-5-5"
+
+
+def test_the_worker_picks_up_a_token_replaced_in_env_between_runs(tmp_path, monkeypatch):
+    import os
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.sync_service import SyncService
+    from canvas_task_sync.worker import _SettingsReloader
+
+    config = _write_project(tmp_path)
+    settings = load_settings(config)
+    env = settings.root_dir / ".env"
+    env.write_text("CANVAS_TOKEN=old-token\n", encoding="utf-8")
+    # The worker inherited the old token, which load_dotenv alone would never replace.
+    monkeypatch.setenv("CANVAS_TOKEN", "old-token")
+    reloader = _SettingsReloader(config, SyncService(settings))
+    reloader.refresh()
+    assert os.environ["CANVAS_TOKEN"] == "old-token"
+
+    env.write_text("CANVAS_TOKEN=new-token\n", encoding="utf-8")
+    os.utime(env, ns=(env.stat().st_atime_ns, env.stat().st_mtime_ns + 1_000_000))
+    reloader.refresh()
+    assert os.environ["CANVAS_TOKEN"] == "new-token"

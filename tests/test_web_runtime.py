@@ -38,6 +38,7 @@ from canvas_task_sync.web_app import create_web_app
 from canvas_task_sync.web_models import (
     CourseSave,
     EventLevel,
+    HealthState,
     RunMode,
     RunStage,
     RunStatus,
@@ -613,6 +614,79 @@ def test_api_enforces_host_origin_csrf_and_never_echoes_secret_input(tmp_path):
         assert invalid_secret.status_code == 422
         assert secret not in invalid_secret.text
         assert set(invalid_secret.json()) == {"error"}
+
+
+def test_a_canvas_token_saved_in_settings_replaces_the_old_one_at_once(tmp_path, monkeypatch):
+    for name in ("CANVAS_TOKEN", "CANVAS_API_TOKEN", "CANVAS_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    config = _write_project(tmp_path)
+    env = tmp_path / ".env"
+    env.write_text("CANVAS_BASE_URL=https://canvas.example\nCANVAS_TOKEN=old-token-value\n")
+    app = create_web_app(config)
+    with TestClient(app) as client:
+        headers = _csrf(client)
+        connections = client.get("/api/v1/settings/connections").json()["connections"]
+        assert connections["canvas_configured"] is True
+
+        rejected = client.post(
+            "/api/v1/settings/canvas-token",
+            headers=headers,
+            json={"token": "has a space in it"},
+        )
+        assert rejected.status_code == 400
+        assert "has a space" not in rejected.text
+
+        saved = client.post(
+            "/api/v1/settings/canvas-token",
+            headers=headers,
+            json={"token": "  1234~new-token-value  "},
+        )
+        assert saved.status_code == 204, saved.text
+        assert "new-token-value" not in client.get("/api/v1/settings/connections").text
+
+    from dotenv import dotenv_values
+
+    assert dotenv_values(env) == {
+        "CANVAS_BASE_URL": "https://canvas.example",
+        "CANVAS_TOKEN": "1234~new-token-value",
+    }
+    assert (tmp_path / ".env.bak").read_text().endswith("CANVAS_TOKEN=old-token-value\n")
+    # The running backend uses the new token without a restart.
+    import os
+
+    assert os.environ["CANVAS_TOKEN"] == "1234~new-token-value"
+
+
+def test_the_canvas_token_check_sends_it_only_to_the_canvas_origin(tmp_path, monkeypatch):
+    import requests
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.health import canvas_token_health_check
+
+    monkeypatch.setenv("CANVAS_BASE_URL", "https://canvas.example/")
+    monkeypatch.setenv("CANVAS_TOKEN", "1234~secret-token")
+    calls: list[tuple[str, dict]] = []
+
+    class Answer:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    statuses = iter([200, 401])
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return Answer(next(statuses))
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    settings = load_settings(_write_project(tmp_path))
+    assert canvas_token_health_check(settings).state == HealthState.HEALTHY
+    rejected = canvas_token_health_check(settings)
+    assert rejected.state == HealthState.ERROR
+    assert "rejected" in rejected.summary
+    url, kwargs = calls[0]
+    assert url == "https://canvas.example/api/v1/users/self"
+    assert kwargs["headers"] == {"Authorization": "Bearer 1234~secret-token"}
+    assert kwargs["allow_redirects"] is False
 
 
 def test_run_event_stream_replays_after_last_event_id(tmp_path):

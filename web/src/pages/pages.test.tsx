@@ -50,6 +50,7 @@ const overview: OverviewResponse = {
     google_client_configured: true,
     google_authorized: true,
     gemini_configured: true,
+    canvas_configured: true,
     extraction_provider: 'gemini',
     extraction_label: 'Gemini · per-course models',
     extraction_ready: true,
@@ -589,6 +590,34 @@ describe('operational pages', () => {
     expect(screen.getByLabelText('Extension pairing token')).toHaveValue('pairing-token-fixture')
   })
 
+  it('replaces the Canvas token write-only and shows the token check result', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      requests.push({ url, init })
+      if (url.includes('/bootstrap')) return jsonResponse({ csrf_token: 'csrf' })
+      if (url.includes('/canvas-token')) return jsonResponse(null, 204)
+      if (url.includes('/canvas/test')) return jsonResponse({ check: { key: 'canvas_api', label: 'Canvas API', state: 'error', summary: 'Canvas rejected the token. It may be expired or revoked.', details: {} } })
+      if (url.includes('/settings/extraction-agent')) return jsonResponse({ settings: { provider: 'gemini', model: null, effort: 'medium' }, label: 'Gemini', parallel_turns: 3, providers: [] })
+      if (url.includes('/settings/extension')) return jsonResponse({ server_url: '', pairing_token: '', capture_ttl_seconds: 900, supported_sources: [], load_unpacked_path: '', captures: [] })
+      return jsonResponse({ connections: { ...overview.connections, checks: [] }, general: { history_retention_days: 90 }, paths: { control_database: '', state_database: '', config: '' } })
+    }))
+    renderPage(<SettingsPage />, '/settings?section=canvas')
+
+    expect(await screen.findByRole('heading', { name: 'Canvas' })).toBeVisible()
+    fireEvent.click(await screen.findByRole('button', { name: 'Test token' }))
+    expect(await screen.findByText('Canvas rejected the token. It may be expired or revoked.')).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Replace token' }))
+    fireEvent.change(screen.getByLabelText('Canvas access token'), { target: { value: '1234~fresh-canvas-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save token' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByDisplayValue('1234~fresh-canvas-token')).not.toBeInTheDocument()
+    expect(screen.queryByText('Canvas rejected the token. It may be expired or revoked.')).not.toBeInTheDocument()
+    const mutation = requests.find((request) => request.url.includes('/canvas-token'))!
+    expect(JSON.parse(String(mutation.init?.body))).toEqual({ token: '1234~fresh-canvas-token' })
+  })
+
   it('shows the setup checklist only until every connection is ready', async () => {
     const connections = { ...overview.connections, google_authorized: false, checks: [] }
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -600,7 +629,7 @@ describe('operational pages', () => {
     renderPage(<SettingsPage />, '/settings?section=data')
 
     expect(await screen.findByRole('heading', { name: 'Finish setting up' })).toBeVisible()
-    expect(screen.getByText('2 of 3 done')).toBeVisible()
+    expect(screen.getByText('3 of 4 done')).toBeVisible()
     expect(screen.getByRole('heading', { name: 'Data & privacy' })).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Set up' }))
     expect(await screen.findByRole('heading', { name: 'Google account' })).toBeVisible()

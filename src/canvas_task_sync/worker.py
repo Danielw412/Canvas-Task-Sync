@@ -23,11 +23,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+
+from dotenv import dotenv_values
 
 from canvas_task_sync.configuration import load_settings
 from canvas_task_sync.control_store import ControlStore
@@ -65,19 +68,15 @@ class _SettingsReloader:
     def __init__(self, config_path: Path, service: SyncService) -> None:
         self.config_path = config_path
         self.service = service
+        self.env_path = service.settings.root_dir / ".env"
         self._lock = threading.Lock()
-        self._stamp = self._current_stamp()
-
-    def _current_stamp(self) -> tuple[int, int] | None:
-        try:
-            stat = self.config_path.stat()
-        except OSError:
-            return None
-        return stat.st_mtime_ns, stat.st_size
+        self._stamp = _stamp(self.config_path)
+        self._env_stamp = _stamp(self.env_path)
 
     def refresh(self) -> None:
         with self._lock:
-            stamp = self._current_stamp()
+            self._refresh_env()
+            stamp = _stamp(self.config_path)
             if stamp is None or stamp == self._stamp:
                 return
             try:
@@ -89,6 +88,35 @@ class _SettingsReloader:
                     file=sys.stderr,
                 )
             self._stamp = stamp
+
+    def _refresh_env(self) -> None:
+        # A key or token replaced in Settings is written to .env while this process may
+        # already be running with the old one in its environment, which load_dotenv would
+        # never override. The file is the source of truth, so its values win.
+        stamp = _stamp(self.env_path)
+        if stamp is None or stamp == self._env_stamp:
+            return
+        try:
+            values = dotenv_values(self.env_path)
+        except Exception as error:
+            print(
+                f"canvas-task-sync worker: kept the previous .env values: "
+                f"{safe_exception_summary(error)}",
+                file=sys.stderr,
+            )
+        else:
+            for key, value in values.items():
+                if value is not None:
+                    os.environ[key] = value
+        self._env_stamp = stamp
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 class _Writer:

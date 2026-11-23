@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from canvas_task_sync.agent_status import check_agent_sign_in, quick_agent_status
 from canvas_task_sync.auth import SCOPES, load_google_credentials
 from canvas_task_sync.configuration import CourseSettings, ProjectSettings
+from canvas_task_sync.configuration_service import canvas_token_from_env
 from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
@@ -57,6 +58,7 @@ def connection_status(
         except (json.JSONDecodeError, UnicodeDecodeError):
             scope_summary = "token.json is not valid JSON"
     gemini = bool(os.getenv("GEMINI_API_KEY"))
+    canvas = bool(canvas_token_from_env())
     agent = settings.extraction_agent
     if agent.provider == "gemini":
         extraction_ready = gemini
@@ -104,6 +106,12 @@ def connection_status(
             summary=gemini_summary,
         ),
         ConnectionItem(
+            key="canvas_api",
+            label="Canvas API",
+            state=HealthState.HEALTHY if canvas else HealthState.MISSING,
+            summary="Token saved" if canvas else "Add a Canvas API token",
+        ),
+        ConnectionItem(
             key="local_database",
             label="Local database",
             state=HealthState.HEALTHY,
@@ -114,6 +122,7 @@ def connection_status(
         google_client_configured=client_configured,
         google_authorized=authorized,
         gemini_configured=gemini,
+        canvas_configured=canvas,
         extraction_provider=agent.provider,
         extraction_label=agent.describe(),
         extraction_ready=extraction_ready,
@@ -205,6 +214,56 @@ def gemini_health_check(
             "thinking_level": reasoning_level,
         },
     )
+
+
+def _canvas_base_url(settings: ProjectSettings) -> str | None:
+    """The Canvas origin the token is used with: .env's, else the courses' own."""
+    configured = (os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    for course in sorted(settings.courses.values(), key=lambda item: not item.enabled):
+        if course.canvas_base_url:
+            return course.canvas_base_url.rstrip("/")
+    return None
+
+
+def canvas_token_health_check(settings: ProjectSettings) -> HealthCheck:
+    """Ask Canvas who the token belongs to. Only the configured Canvas origin sees it."""
+    load_dotenv(settings.root_dir / ".env")
+    started = perf_counter()
+
+    def result(state: HealthState, summary: str) -> HealthCheck:
+        return HealthCheck(
+            key="canvas_api",
+            label="Canvas API",
+            state=state,
+            summary=summary,
+            duration_ms=int((perf_counter() - started) * 1000),
+        )
+
+    token = canvas_token_from_env()
+    if not token:
+        return result(HealthState.MISSING, "No Canvas API token is saved.")
+    base_url = _canvas_base_url(settings)
+    if not base_url:
+        return result(HealthState.MISSING, "Set CANVAS_BASE_URL or a course's Canvas URL first.")
+    try:
+        import requests
+
+        response = requests.get(
+            f"{base_url}/api/v1/users/self",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+            # A redirect could carry the token somewhere else; Canvas answers this directly.
+            allow_redirects=False,
+        )
+    except Exception as error:
+        return result(HealthState.ERROR, safe_exception_summary(error, known_secrets=[token]))
+    if response.status_code == 200:
+        return result(HealthState.HEALTHY, "Canvas accepted the token.")
+    if response.status_code == 401:
+        return result(HealthState.ERROR, "Canvas rejected the token. It may be expired or revoked.")
+    return result(HealthState.ERROR, f"Canvas answered HTTP {response.status_code}.")
 
 
 def agent_health_check(provider: str) -> HealthCheck:

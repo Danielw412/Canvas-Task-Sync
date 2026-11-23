@@ -6,6 +6,7 @@ import {
   CopyIcon,
   DatabaseIcon,
   GoogleLogoIcon,
+  GraduationCapIcon,
   KeyIcon,
   LockSimpleIcon,
   PlugsConnectedIcon,
@@ -52,10 +53,11 @@ interface ExtensionSetup {
   captures: { source_type: string; captured_at: string; item_count: number; screenshot_count: number }[]
 }
 
-type Section = 'ai' | 'google' | 'extension' | 'data'
+type Section = 'ai' | 'canvas' | 'google' | 'extension' | 'data'
 
 const SECTIONS: { id: Section; label: string; icon: Icon }[] = [
   { id: 'ai', label: 'AI extraction', icon: SparkleIcon },
+  { id: 'canvas', label: 'Canvas', icon: GraduationCapIcon },
   { id: 'google', label: 'Google account', icon: GoogleLogoIcon },
   { id: 'extension', label: 'Chrome extension', icon: PuzzlePieceIcon },
   { id: 'data', label: 'Data & privacy', icon: DatabaseIcon },
@@ -85,8 +87,10 @@ export default function SettingsPage() {
   const section: Section = SECTIONS.find((item) => item.id === searchParams.get('section'))?.id ?? 'ai'
   const { data, error, mutate } = useSWR<SettingsResponse>('/api/v1/settings/connections', fetchJson)
   const { data: extension, error: extensionError, mutate: mutateExtension } = useSWR<ExtensionSetup>('/api/v1/settings/extension', fetchJson)
-  const [keyModal, setKeyModal] = useState(false)
+  const [keyModal, setKeyModal] = useState<'gemini' | 'canvas' | null>(null)
   const [apiKey, setApiKey] = useState('')
+  const [canvasCheck, setCanvasCheck] = useState<HealthCheck | null>(null)
+  const [testingCanvas, setTestingCanvas] = useState(false)
   const [busy, setBusy] = useState(false)
   const [authorizing, setAuthorizing] = useState(false)
   const [consentUrl, setConsentUrl] = useState<string | null>(null)
@@ -109,10 +113,32 @@ export default function SettingsPage() {
     } finally { setBusy(false) }
   }
 
-  async function saveKey() {
-    await action(() => mutateJson('/api/v1/settings/gemini-key', { body: { api_key: apiKey } }), 'Gemini API key saved on the server.')
+  function closeKeyModal() {
     setApiKey('')
-    setKeyModal(false)
+    setKeyModal(null)
+  }
+
+  async function saveKey() {
+    if (keyModal === 'canvas') {
+      const saved = await action(() => mutateJson('/api/v1/settings/canvas-token', { body: { token: apiKey } }), 'Canvas API token saved on the server.')
+      if (!saved) return
+      setCanvasCheck(null)
+    } else {
+      await action(() => mutateJson('/api/v1/settings/gemini-key', { body: { api_key: apiKey } }), 'Gemini API key saved on the server.')
+    }
+    closeKeyModal()
+  }
+
+  async function testCanvas() {
+    setTestingCanvas(true)
+    try {
+      const result = await mutateJson<{ check: HealthCheck }>('/api/v1/settings/canvas/test')
+      setCanvasCheck(result.check)
+    } catch (requestError) {
+      toast(requestError instanceof Error ? requestError.message : 'The Canvas token check failed.', 'error')
+    } finally {
+      setTestingCanvas(false)
+    }
   }
 
   // Consent happens in this browser even when the backend is headless on another machine:
@@ -154,11 +180,13 @@ export default function SettingsPage() {
   const capture = extension?.captures?.[0]
   const sectionState: Record<Section, HealthState | null> = {
     ai: connections ? connections.extraction_ready ? 'healthy' : 'warning' : null,
+    canvas: connections ? connections.canvas_configured ? 'healthy' : 'warning' : null,
     google: connections ? connections.google_authorized ? 'healthy' : 'warning' : null,
     extension: capture ? 'healthy' : null,
     data: null,
   }
   const setupSteps = connections ? [
+    { done: connections.canvas_configured, title: 'Add your Canvas API token', target: 'canvas' as Section },
     { done: connections.google_client_configured, title: 'Upload your Google OAuth client', target: 'google' as Section },
     { done: connections.google_authorized, title: 'Connect Google Tasks', target: 'google' as Section },
     { done: connections.extraction_ready, title: 'Choose an AI agent and check its sign-in', target: 'ai' as Section },
@@ -200,8 +228,16 @@ export default function SettingsPage() {
           connections={connections}
           busy={busy}
           onSaved={() => Promise.all([mutate(), revalidateOverviews()])}
-          onKey={() => setKeyModal(true)}
+          onKey={() => setKeyModal('gemini')}
           onTestKey={() => void action(() => mutateJson('/api/v1/settings/gemini/test'), 'Gemini API key works.')}
+        /> : null}
+        {section === 'canvas' ? <CanvasSection
+          connections={connections}
+          busy={busy}
+          testing={testingCanvas}
+          check={canvasCheck}
+          onKey={() => setKeyModal('canvas')}
+          onTest={() => void testCanvas()}
         /> : null}
         {section === 'google' ? <GoogleSection
           connections={connections}
@@ -228,15 +264,26 @@ export default function SettingsPage() {
       </div>
     </div>
 
-    {keyModal ? <Modal
+    {keyModal === 'gemini' ? <Modal
       title={connections?.gemini_configured ? 'Replace Gemini API key' : 'Add Gemini API key'}
-      onClose={() => setKeyModal(false)}
-      footer={<><Button variant="secondary" onClick={() => setKeyModal(false)}>Cancel</Button><Button icon={KeyIcon} disabled={busy || apiKey.length < 8} onClick={() => void saveKey()}>Save key</Button></>}
+      onClose={closeKeyModal}
+      footer={<><Button variant="secondary" onClick={closeKeyModal}>Cancel</Button><Button icon={KeyIcon} disabled={busy || apiKey.length < 8} onClick={() => void saveKey()}>Save key</Button></>}
     >
       <label className="field">
         <span className="field__label">API key</span>
         <input className="control control--mono" aria-label="API key" type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
         <small className="field__help">Written to the server's .env file. It is never shown or logged again.</small>
+      </label>
+    </Modal> : null}
+    {keyModal === 'canvas' ? <Modal
+      title={connections?.canvas_configured ? 'Replace Canvas API token' : 'Add Canvas API token'}
+      onClose={closeKeyModal}
+      footer={<><Button variant="secondary" onClick={closeKeyModal}>Cancel</Button><Button icon={KeyIcon} disabled={busy || apiKey.trim().length < 8} onClick={() => void saveKey()}>Save token</Button></>}
+    >
+      <label className="field">
+        <span className="field__label">Access token</span>
+        <input className="control control--mono" aria-label="Canvas access token" type="password" autoComplete="off" spellCheck={false} value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+        <small className="field__help">In Canvas, open Account, then Settings, and choose New Access Token. It replaces the old token in the server's .env file and is never shown or logged again. The next run uses it.</small>
       </label>
     </Modal> : null}
     {confirm === 'disconnect' ? <Modal
@@ -430,6 +477,36 @@ function AiSection({ connections, busy: parentBusy, onSaved, onKey, onTestKey }:
     </Disclosure> : null}
 
     <p className="fine-print"><SparkleIcon size={14} aria-hidden />Claude and Codex run on this server, up to {data?.parallel_turns ?? 3} at a time. Switching the agent or model reads each agenda again once.</p>
+  </>
+}
+
+function CanvasSection({ connections, busy, testing, check, onKey, onTest }: {
+  connections?: ConnectionStatus
+  busy: boolean
+  testing: boolean
+  check: HealthCheck | null
+  onKey: () => void
+  onTest: () => void
+}) {
+  const configured = connections?.canvas_configured
+  return <>
+    <div className="settings-pane__head">
+      <h2>Canvas</h2>
+      <p>Courses read their agendas, pages, and assignments through the Canvas API with your access token. It is only ever sent to your school's Canvas.</p>
+    </div>
+    <div className="surface">
+      <div className="setting">
+        <div className="setting__text">
+          <span className="setting__title">API token <span className={`badge ${configured ? 'badge--success' : 'badge--warning'}`}>{configured ? 'Saved' : 'Not set'}</span></span>
+          <span className="setting__desc">Kept in the server's .env file and never shown again after saving.</span>
+          {check ? <span className="choice__status"><StatusIcon state={check.state} size={14} />{check.summary}</span> : null}
+        </div>
+        <div className="setting__control">
+          <Button variant="ghost" size="sm" icon={PlugsConnectedIcon} loading={testing} disabled={busy || !configured} onClick={onTest}>Test token</Button>
+          <Button variant="secondary" icon={KeyIcon} disabled={busy} onClick={onKey}>{configured ? 'Replace token' : 'Add token'}</Button>
+        </div>
+      </div>
+    </div>
   </>
 }
 

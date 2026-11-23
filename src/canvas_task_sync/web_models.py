@@ -257,6 +257,7 @@ class ConnectionStatus(BaseModel):
     google_client_configured: bool
     google_authorized: bool
     gemini_configured: bool
+    canvas_configured: bool = False
     # The extraction agent every course uses, and whether it can run here.
     extraction_provider: str = "gemini"
     extraction_label: str = "Gemini"
@@ -364,6 +365,10 @@ class DiagnosticsResponse(BaseModel):
 
 class GeminiKeyUpdate(BaseModel):
     api_key: str = Field(min_length=8, max_length=4096)
+
+
+class CanvasTokenUpdate(BaseModel):
+    token: str = Field(min_length=8, max_length=4096)
 
 
 class ExtractionAgentTest(BaseModel):
