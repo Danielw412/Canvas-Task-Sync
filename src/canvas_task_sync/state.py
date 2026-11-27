@@ -135,6 +135,21 @@ class StateStore:
     def close(self) -> None:
         self.connection.close()
 
+    def backup(self) -> None:
+        """Keep a copy beside the database (state.sqlite3.bak).
+
+        This file is the only record of which Google Task belongs to which agenda item; lose it
+        and items whose due date moved are created again. The copy is written aside and swapped
+        in, so a failed copy never destroys the previous one.
+        """
+        temporary = Path(f"{self.path}.bak.tmp")
+        target = sqlite3.connect(temporary)
+        try:
+            self.connection.backup(target)
+        finally:
+            target.close()
+        temporary.replace(f"{self.path}.bak")
+
     def __enter__(self) -> StateStore:
         return self
 

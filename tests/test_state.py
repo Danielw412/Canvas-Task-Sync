@@ -67,3 +67,33 @@ def test_a_locked_state_database_is_an_error_not_an_empty_list(tmp_path):
         with pytest.raises(sqlite3.OperationalError, match="locked"):
             state.all_records()
 
+
+def test_backup_keeps_a_readable_copy_and_replaces_it_on_the_next_one(tmp_path):
+    def record(logical_id: str) -> StateRecord:
+        return StateRecord(
+            logical_id=logical_id,
+            course_id="spanish",
+            source_key="source",
+            anchor="anchor",
+            ordinal=0,
+            fingerprint="fingerprint",
+            source_text="evidence",
+            title="[SPANISH] Task",
+            google_task_id="remote",
+        )
+
+    path = tmp_path / "state.sqlite3"
+    copy_path = tmp_path / "state.sqlite3.bak"
+    with StateStore(path, writable=True) as state:
+        state.upsert_record(record("first"))
+        state.backup()
+        state.upsert_record(record("second"))
+    with StateStore(copy_path, writable=False) as copy:
+        assert [item.logical_id for item in copy.all_records()] == ["first"]
+
+    with StateStore(path, writable=True) as state:
+        state.backup()
+    with StateStore(copy_path, writable=False) as copy:
+        assert {item.logical_id for item in copy.all_records()} == {"first", "second"}
+    assert not (tmp_path / "state.sqlite3.bak.tmp").exists()
+

@@ -974,6 +974,7 @@ class SyncService:
                         agent_key=verification.agent_key,
                         verification_json=verification.model_dump_json(exclude={"cached"}),
                     )
+                state.backup()
             sink.emit(
                 RunStage.PERSIST_STATE,
                 "stage_completed",

@@ -8,8 +8,8 @@ from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+from ruamel.yaml import YAML
 
 from canvas_task_sync.models import ActionKind, DueRelation, ExtractionMode
 
@@ -523,7 +523,7 @@ def load_settings(path: Path) -> ProjectSettings:
     config_path = path.resolve()
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw = YAML(typ="safe").load(config_path.read_text(encoding="utf-8"))
     settings = ProjectSettings.model_validate(raw)
     settings.root_dir = config_path.parent.parent
     return settings

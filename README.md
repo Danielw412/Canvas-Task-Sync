@@ -417,7 +417,8 @@ journalctl --user -u canvas-task-sync -f
 
 Copy `config/courses.yaml`, `.env`, `credentials.json`, and `token.json` to the server, and migrate
 `.canvas-task-sync/state.sqlite3` once so existing Google Tasks keep their identity. After that the
-databases stay on the server; they are never synchronized between machines.
+databases stay on the server; they are never synchronized between machines. After every apply a
+copy of `state.sqlite3` is kept beside it as `state.sqlite3.bak`.
 
 Schedules belong to the server and run whenever it is on. The laptop is only a window
 onto it. With the laptop asleep and the tunnel down, the scheduler still fires, the worker

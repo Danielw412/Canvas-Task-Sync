@@ -885,6 +885,15 @@ def test_saving_a_secret_keeps_env_comments_and_stays_owner_only(tmp_path, monke
         assert env.stat().st_mode & 0o777 == 0o600
 
 
+def test_course_flags_written_the_old_yaml_way_still_load(tmp_path):
+    from canvas_task_sync.configuration import load_settings
+
+    config = _write_project(tmp_path)
+    config.write_text(config.read_text().replace("enabled: true", "enabled: no"))
+
+    assert load_settings(config).course("spanish").enabled is False
+
+
 def test_run_event_stream_replays_after_last_event_id(tmp_path):
     app = create_web_app(_write_project(tmp_path))
     with TestClient(app) as client:

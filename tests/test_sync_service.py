@@ -582,6 +582,34 @@ def test_apply_reads_each_task_list_once_however_many_actions_it_writes(
     assert tasks.reads == validation_reads + len(lists)
 
 
+def test_apply_leaves_a_backup_of_the_identity_records(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, _tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    service.apply(prepared)
+
+    path = service.settings.resolved_state_path
+    with StateStore(path, writable=False) as state:
+        records = state.all_records()
+    with StateStore(path.with_name(f"{path.name}.bak"), writable=False) as backup:
+        assert records
+        assert backup.all_records() == records
+
+
 def test_partial_failure_keeps_completed_identity_mapping(
     tmp_path,
     spanish_course,
