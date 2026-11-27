@@ -236,9 +236,16 @@ def create_web_app(
         "testserver",
         *loopback_host_headers(*dashboard_ports),
     }
+    # The Vite dev server is trusted only on request. Port 5173 is the default for every Vite
+    # project, so otherwise any page served there could call this API.
+    dev_origins = (
+        ("http://127.0.0.1:5173", "http://localhost:5173")
+        if os.getenv("CANVAS_TASK_SYNC_DEV") == "1"
+        else ()
+    )
     allowed_mutation_origins = {
-        f"http://{host}" for host in loopback_host_headers(*dashboard_ports, 5173, simple_port)
-    }
+        f"http://{host}" for host in loopback_host_headers(*dashboard_ports, simple_port)
+    } | set(dev_origins)
 
     app = FastAPI(
         title="Canvas Task Sync Control Center",
@@ -255,8 +262,7 @@ def create_web_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
+            *dev_origins,
             f"http://127.0.0.1:{simple_port}",
             f"http://localhost:{simple_port}",
         ],

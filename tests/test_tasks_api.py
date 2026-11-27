@@ -275,3 +275,39 @@ def test_manual_task_create_and_edit_write_google_and_persist_override(tmp_path:
     assert record is not None
     assert record.manually_managed is True
     assert record.title == "[PHYSICS] Revised lab report"
+
+
+def test_manual_task_is_tracked_even_when_the_due_date_check_fails(tmp_path: Path) -> None:
+    from canvas_task_sync.google_tasks import GoogleTasksError
+
+    class DueCheckFails(MutableTasksClient):
+        def verify_due(self, tasklist_id: str, task_id: str, due_date) -> RemoteTask:
+            raise GoogleTasksError("Google Task did not retain its due date.")
+
+    app = create_web_app(_write_project(tmp_path))
+    tasks = DueCheckFails()
+    with TestClient(app) as client:
+        app.state.runtime.manual_tasks.credentials_loader = lambda *_args, **_kwargs: object()
+        app.state.runtime.manual_tasks.tasks_client_factory = lambda _credentials: tasks
+        csrf = client.get("/api/v1/bootstrap").json()["csrf_token"]
+        created = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "course_id": "physics",
+                "title": "Lab report",
+                "details": "Finish the analysis.",
+                "due_date": "2026-09-03",
+                "completed": False,
+                "classification": "homework",
+                "task_type": "assignment",
+                "action_kind": "write",
+                "source_url": "https://school.instructure.com/courses/11126",
+            },
+        )
+
+    assert created.status_code == 502
+    # The Google Task exists, so it must be tracked: a retry would otherwise duplicate it.
+    assert list(tasks.tasks) == ["manual-google-1"]
+    with StateStore(tmp_path / ".canvas-task-sync" / "state.sqlite3", writable=False) as state:
+        assert [record.google_task_id for record in state.all_records()] == ["manual-google-1"]

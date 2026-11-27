@@ -68,9 +68,6 @@ class ManualTaskService:
             notes=payload.details,
             due_date=payload.due_date,
         )
-        client.verify_due(tasklist_id, remote.id, payload.due_date)
-        if payload.completed:
-            client.set_task_completed(tasklist_id, remote.id, completed=True)
         logical_id = str(uuid.uuid4())
         source_key = f"manual:{logical_id}"
         record = StateRecord(
@@ -95,8 +92,12 @@ class ManualTaskService:
             tasklist_title=resolved_title,
             manually_managed=True,
         )
+        # Saved before the checks below, so a failure once the task exists cannot orphan it.
         with StateStore(self.settings.resolved_state_path, writable=True) as state:
             state.upsert_record(record)
+        client.verify_due(tasklist_id, remote.id, payload.due_date)
+        if payload.completed:
+            client.set_task_completed(tasklist_id, remote.id, completed=True)
         return logical_id
 
     def update(self, logical_id: str, payload: ManualTaskSave) -> None:
@@ -121,13 +122,6 @@ class ManualTaskService:
             notes=payload.details,
             due_date=payload.due_date,
         )
-        client.verify_due(record.tasklist_id, record.google_task_id, payload.due_date)
-        if (existing.status == "completed") != payload.completed:
-            client.set_task_completed(
-                record.tasklist_id,
-                record.google_task_id,
-                completed=payload.completed,
-            )
         updated = record.model_copy(
             update={
                 "source_url": payload.source_url,
@@ -146,8 +140,16 @@ class ManualTaskService:
                 "manually_managed": True,
             }
         )
+        # Saved before the checks below, so the dashboard matches what Google already holds.
         with StateStore(self.settings.resolved_state_path, writable=True) as state:
             state.upsert_record(updated)
+        client.verify_due(record.tasklist_id, record.google_task_id, payload.due_date)
+        if (existing.status == "completed") != payload.completed:
+            client.set_task_completed(
+                record.tasklist_id,
+                record.google_task_id,
+                completed=payload.completed,
+            )
 
     def _client(self) -> Any:
         try:

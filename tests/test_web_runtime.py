@@ -472,6 +472,93 @@ def test_scheduler_records_all_offline_occurrences_then_queues_grace_window(tmp_
         store.close()
 
 
+class _FailingRunQueue(_LocalRunQueue):
+    def create_preview(self, request, **kwargs):
+        if request.course_id == "gone":
+            raise ValueError("Unknown course 'gone'.")
+        return super().create_preview(request, **kwargs)
+
+
+def test_a_schedule_that_cannot_start_does_not_stop_the_others(tmp_path):
+    store = ControlStore(tmp_path / "control.sqlite3")
+    try:
+        due = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+        schedules = {
+            course: store.create_schedule(
+                ScheduleCreate(
+                    name=course,
+                    course_id=course,
+                    weekdays=list(range(7)),
+                    local_time=time(12, 0),
+                    timezone="UTC",
+                    mode=ScheduleMode.PREVIEW,
+                    enabled=True,
+                ),
+                next_run_at=due,
+            )
+            for course in ("gone", "spanish")
+        }
+        queue = _FailingRunQueue(store)
+        manager = ScheduleManager(store, queue)  # type: ignore[arg-type]
+        manager.tick(datetime(2026, 8, 8, 12, 0, 30, tzinfo=UTC))
+
+        by_schedule = {item.schedule_id: item for item in store.list_schedule_occurrences()}
+        assert by_schedule[schedules["gone"].id].status == "failed"
+        assert "Unknown course" in by_schedule[schedules["gone"].id].details
+        assert by_schedule[schedules["spanish"].id].status == "queued"
+        assert len(queue.created) == 1
+        # The failed schedule moved on to its next date instead of retrying every tick.
+        assert store.get_schedule(schedules["gone"].id).next_run_at > due
+    finally:
+        store.close()
+
+
+def test_a_restart_fails_runs_it_left_active_and_keeps_the_rest(tmp_path):
+    config = _write_project(tmp_path)
+    seed = ControlStore(tmp_path / ".canvas-task-sync" / "control.sqlite3")
+    expected: dict[int, RunStatus] = {}
+    for left, after in (
+        (RunStatus.QUEUED, RunStatus.FAILED),
+        (RunStatus.RUNNING, RunStatus.FAILED),
+        (RunStatus.APPLYING, RunStatus.FAILED_PARTIAL),
+        (RunStatus.AWAITING_APPROVAL, RunStatus.AWAITING_APPROVAL),
+    ):
+        run_id = seed.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.PREVIEW,
+        )
+        seed.update_run(run_id, status=left)
+        expected[run_id] = after
+    seed.close()
+
+    with TestClient(create_web_app(config)) as client:
+        for run_id, after in expected.items():
+            run = client.get(f"/api/v1/runs/{run_id}").json()
+            assert run["status"] == after.value
+            interrupted = after != RunStatus.AWAITING_APPROVAL
+            assert run["error_code"] == ("interrupted" if interrupted else None)
+        # Course deletion is no longer blocked by a run nothing is working on.
+        csrf = _csrf(client)
+        assert client.delete("/api/v1/courses/spanish", headers=csrf).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("dev_mode", "status", "cors_origin"),
+    [("", 403, None), ("1", 204, "http://127.0.0.1:5173")],
+)
+def test_the_vite_dev_origin_is_trusted_only_in_dev_mode(
+    tmp_path, monkeypatch, dev_mode, status, cors_origin
+):
+    monkeypatch.setenv("CANVAS_TASK_SYNC_DEV", dev_mode)
+    origin = "http://127.0.0.1:5173"
+    with TestClient(create_web_app(_write_project(tmp_path))) as client:
+        read = client.get("/api/v1/bootstrap", headers={"origin": origin})
+        sent = client.delete("/api/v1/history", headers={**_csrf(client), "origin": origin})
+    assert read.headers.get("access-control-allow-origin") == cors_origin
+    assert sent.status_code == status
+
+
 def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     config = _write_project(tmp_path)
     service = ConfigurationService(config)
