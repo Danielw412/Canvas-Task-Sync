@@ -689,6 +689,40 @@ def test_the_canvas_token_check_sends_it_only_to_the_canvas_origin(tmp_path, mon
     assert kwargs["allow_redirects"] is False
 
 
+def test_the_canvas_token_check_uses_the_address_sync_uses(tmp_path, monkeypatch):
+    import requests
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.health import canvas_token_health_check
+
+    monkeypatch.setenv("CANVAS_BASE_URL", "https://env.example")
+    monkeypatch.setenv("CANVAS_TOKEN", "1234~secret-token")
+    urls: list[str] = []
+
+    class Answer:
+        status_code = 200
+
+    def fake_get(url, **kwargs):
+        urls.append(url)
+        return Answer()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    settings = load_settings(_write_project(tmp_path))
+    course = settings.courses["spanish"]
+    for update in (
+        {},  # no course address: .env's
+        {"canvas_base_url": "https://course.example"},  # sync ignores it without a course ID
+        {"canvas_base_url": "https://course.example", "canvas_course_id": "12345"},
+    ):
+        settings.courses["spanish"] = course.model_copy(update=update)
+        canvas_token_health_check(settings)
+    assert urls == [
+        "https://env.example/api/v1/users/self",
+        "https://env.example/api/v1/users/self",
+        "https://course.example/api/v1/users/self",
+    ]
+
+
 def test_run_event_stream_replays_after_last_event_id(tmp_path):
     app = create_web_app(_write_project(tmp_path))
     with TestClient(app) as client:

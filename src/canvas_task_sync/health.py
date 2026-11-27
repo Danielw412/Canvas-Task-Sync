@@ -217,14 +217,13 @@ def gemini_health_check(
 
 
 def _canvas_base_url(settings: ProjectSettings) -> str | None:
-    """The Canvas origin the token is used with: .env's, else the courses' own."""
-    configured = (os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
-    if configured:
-        return configured
+    """The Canvas origin sync sends the token to: a Canvas course's own, else .env's."""
+    # shortcut: tests the first enabled course's address only; upgrade if courses use
+    # different Canvas sites.
     for course in sorted(settings.courses.values(), key=lambda item: not item.enabled):
-        if course.canvas_base_url:
-            return course.canvas_base_url.rstrip("/")
-    return None
+        if course.canvas_course_id and course.canvas_base_url:
+            return course.canvas_base_url
+    return (os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/") or None
 
 
 def canvas_token_health_check(settings: ProjectSettings) -> HealthCheck:
