@@ -7,10 +7,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
+from dotenv import set_key
 from ruamel.yaml import YAML
 
 from canvas_task_sync.configuration import (
+    CANVAS_TOKEN_ENV,
     ExtractionAgentSettings,
     ProjectSettings,
     load_settings,
@@ -18,18 +19,6 @@ from canvas_task_sync.configuration import (
 from canvas_task_sync.web_models import CourseSave
 
 MAX_CREDENTIAL_FILE_BYTES = 128 * 1024
-# The name the Canvas source reads first, so a token saved here wins over the older
-# CANVAS_API_TOKEN / CANVAS_API_KEY spellings it also accepts.
-CANVAS_TOKEN_ENV = "CANVAS_TOKEN"
-CANVAS_TOKEN_ENV_NAMES = (CANVAS_TOKEN_ENV, "CANVAS_API_TOKEN", "CANVAS_API_KEY")
-
-
-def canvas_token_from_env() -> str | None:
-    for name in CANVAS_TOKEN_ENV_NAMES:
-        value = os.getenv(name)
-        if value:
-            return value
-    return None
 
 
 def _atomic_replace(path: Path, payload: bytes, *, backup: bool = False) -> None:
@@ -137,10 +126,11 @@ class ConfigurationService:
         re-reads .env when the file changes.
         """
         path = self.root_dir / ".env"
-        values = {key: value for key, value in dotenv_values(path).items() if value is not None}
-        values[name] = value
-        payload = "".join(f"{key}={_quote_env(item)}\n" for key, item in values.items())
-        _atomic_replace(path, payload.encode("utf-8"), backup=True)
+        if path.exists():
+            shutil.copy2(path, path.with_suffix(".bak"))
+        else:
+            path.touch(mode=0o600)  # set_key would create it readable by other users
+        set_key(path, name, value)  # changes one line, so comments and other keys stay
         os.environ[name] = value
 
     def save_oauth_client(self, payload: bytes) -> None:
@@ -203,13 +193,6 @@ class ConfigurationService:
         except Exception:
             temporary.unlink(missing_ok=True)
             raise
-
-
-def _quote_env(value: str) -> str:
-    if not value or any(character.isspace() or character in {"#", '"', "'"} for character in value):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
-    return value
 
 
 def _merge_mapping(target: Any, source: dict[str, Any]) -> None:

@@ -810,6 +810,59 @@ def test_the_canvas_token_check_uses_the_address_sync_uses(tmp_path, monkeypatch
     ]
 
 
+def test_a_canvas_redirect_tells_you_to_check_the_address(tmp_path, monkeypatch):
+    import requests
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.health import canvas_token_health_check
+
+    monkeypatch.setenv("CANVAS_BASE_URL", "http://canvas.example")
+    monkeypatch.setenv("CANVAS_TOKEN", "1234~secret-token")
+
+    class Answer:
+        status_code = 301
+
+    monkeypatch.setattr(requests, "get", lambda url, **kwargs: Answer())
+    check = canvas_token_health_check(load_settings(_write_project(tmp_path)))
+
+    assert check.state == HealthState.ERROR
+    assert "CANVAS_BASE_URL" in check.summary
+
+
+def test_the_canvas_token_is_read_from_the_first_name_that_is_set(monkeypatch):
+    from canvas_task_sync.configuration import canvas_token_from_env
+
+    monkeypatch.setenv("CANVAS_TOKEN", "")
+    monkeypatch.setenv("CANVAS_API_TOKEN", "second")
+    monkeypatch.setenv("CANVAS_API_KEY", "third")
+    assert canvas_token_from_env() == "second"
+    monkeypatch.setenv("CANVAS_TOKEN", "first")
+    assert canvas_token_from_env() == "first"
+
+
+def test_saving_a_secret_keeps_env_comments_and_stays_owner_only(tmp_path, monkeypatch):
+    import os
+
+    from dotenv import dotenv_values
+
+    monkeypatch.setenv("CANVAS_TOKEN", "restored-after-the-test")
+    service = ConfigurationService(_write_project(tmp_path))
+    env = tmp_path / ".env"
+    env.write_text("# Canvas notes\n\nCANVAS_BASE_URL=https://canvas.example\nCANVAS_TOKEN=old\n")
+    env.chmod(0o600)
+
+    service.save_canvas_token("1234~new-token-value")
+
+    assert env.read_text().startswith("# Canvas notes\n\nCANVAS_BASE_URL=https://canvas.example\n")
+    assert dotenv_values(env)["CANVAS_TOKEN"] == "1234~new-token-value"
+    assert (tmp_path / ".env.bak").read_text().endswith("CANVAS_TOKEN=old\n")
+    env.unlink()
+    service.save_canvas_token("1234~another-token-value")  # a missing .env is created too
+    assert dotenv_values(env) == {"CANVAS_TOKEN": "1234~another-token-value"}
+    if os.name != "nt":  # Windows has no owner-only mode bits
+        assert env.stat().st_mode & 0o777 == 0o600
+
+
 def test_run_event_stream_replays_after_last_event_id(tmp_path):
     app = create_web_app(_write_project(tmp_path))
     with TestClient(app) as client:

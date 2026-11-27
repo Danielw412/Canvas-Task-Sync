@@ -70,6 +70,9 @@ class _Pending:
     flow: Any
     redirect_uri: str
     created_at: datetime
+    # Set while a callback is exchanging its code, so a second callback for the same state
+    # cannot start another exchange (the status only changes once the first one ends).
+    exchanging: bool = False
     status: str = "pending"
     message: str | None = None
     error_code: str | None = None
@@ -266,11 +269,12 @@ class GoogleAuthorizationManager:
                     "Start authorization again from the dashboard.",
                 )
             entry = self._pending[matched]
-            if entry.status != "pending":
+            if entry.status != "pending" or entry.exchanging:
                 raise GoogleAuthorizationError(
                     "google_state_used",
                     "This authorization link was already used. Start authorization again.",
                 )
+            entry.exchanging = True
             return entry, matched
 
     def _record(

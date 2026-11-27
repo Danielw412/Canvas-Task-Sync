@@ -709,10 +709,14 @@ def apply_sync_plan(
     tasklist_id: str,
     tasks_client: GoogleTasksClient,
     state: StateStore,
+    remote_by_id: dict[str, RemoteTask] | None = None,
 ) -> None:
     if plan.dry_run:
         raise RuntimeError("A dry-run plan cannot be applied.")
-    remote_by_id = {task.id: task for task in tasks_client.list_tasks(tasklist_id)}
+    # A caller applying one action at a time passes the list it already read, and this keeps
+    # that dict current as it writes.
+    if remote_by_id is None:
+        remote_by_id = {task.id: task for task in tasks_client.list_tasks(tasklist_id)}
     for action in plan.actions:
         desired = action.desired
         if action.kind == SyncActionKind.CREATE and desired is not None:

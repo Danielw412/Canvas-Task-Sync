@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, timedelta
 from pathlib import Path
@@ -11,6 +12,20 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from canvas_task_sync.models import ActionKind, DueRelation, ExtractionMode
+
+# The name the Canvas source reads first, so a token saved in Settings wins over the older
+# CANVAS_API_TOKEN / CANVAS_API_KEY spellings it also accepts.
+CANVAS_TOKEN_ENV = "CANVAS_TOKEN"
+CANVAS_TOKEN_ENV_NAMES = (CANVAS_TOKEN_ENV, "CANVAS_API_TOKEN", "CANVAS_API_KEY")
+
+
+def canvas_token_from_env() -> str | None:
+    for name in CANVAS_TOKEN_ENV_NAMES:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
 
 WEEKDAY_NAMES = {
     "mon": 0,

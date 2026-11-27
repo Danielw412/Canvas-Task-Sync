@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from canvas_task_sync.configuration import CanvasAgendaOverride
+from canvas_task_sync.configuration import CanvasAgendaOverride, canvas_token_from_env
 from canvas_task_sync.models import AgendaBlock, BlockRole, SourceCapture
 from canvas_task_sync.sources.published_slides import (
     PublishedDeck,
@@ -1054,12 +1054,7 @@ class CanvasAgendaSource:
         agenda_override: CanvasAgendaOverride | None = None,
     ) -> None:
         resolved_base = (base_url or os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
-        resolved_token = (
-            token
-            or os.getenv("CANVAS_TOKEN")
-            or os.getenv("CANVAS_API_TOKEN")
-            or os.getenv("CANVAS_API_KEY")
-        )
+        resolved_token = token or canvas_token_from_env()
         if not resolved_base:
             raise CanvasSourceError("CANVAS_BASE_URL is required for Canvas agenda discovery.")
         if not resolved_token:

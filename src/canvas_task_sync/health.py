@@ -12,8 +12,7 @@ from dotenv import load_dotenv
 
 from canvas_task_sync.agent_status import check_agent_sign_in, quick_agent_status
 from canvas_task_sync.auth import SCOPES, load_google_credentials
-from canvas_task_sync.configuration import CourseSettings, ProjectSettings
-from canvas_task_sync.configuration_service import canvas_token_from_env
+from canvas_task_sync.configuration import CourseSettings, ProjectSettings, canvas_token_from_env
 from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
@@ -262,6 +261,12 @@ def canvas_token_health_check(settings: ProjectSettings) -> HealthCheck:
         return result(HealthState.HEALTHY, "Canvas accepted the token.")
     if response.status_code == 401:
         return result(HealthState.ERROR, "Canvas rejected the token. It may be expired or revoked.")
+    if 300 <= response.status_code < 400:
+        return result(
+            HealthState.ERROR,
+            "Canvas redirected the request. Check CANVAS_BASE_URL: use https and the exact "
+            "Canvas address.",
+        )
     return result(HealthState.ERROR, f"Canvas answered HTTP {response.status_code}.")
 
 
