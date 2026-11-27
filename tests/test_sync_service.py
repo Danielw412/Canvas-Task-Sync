@@ -537,6 +537,79 @@ def test_apply_exact_snapshot_persists_completed_mappings(
         assert len(state.records("spanish", prepared.source_key)) == expected_writes
 
 
+def test_apply_reads_each_task_list_once_however_many_actions_it_writes(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    class CountingTasks(FakeTasks):
+        reads = 0
+
+        def list_tasks(self, tasklist_id: str):
+            self.reads += 1
+            return super().list_tasks(tasklist_id)
+
+        def verify_due(self, tasklist_id: str, task_id: str, due_date):
+            # The fake's own check would call list_tasks and hide the count.
+            source = self.test_tasks if tasklist_id == "list-2" else self.tasks
+            return next(task for task in source if task.id == task_id).model_copy(deep=True)
+
+    service, _source, _tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    tasks = CountingTasks()
+    service.tasks_client_factory = lambda _credentials: tasks
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    writes = [a for a in prepared.plan.actions if a.kind.value in {"create", "update"}]
+    lists = {action.task_list for action in writes}
+    assert len(writes) > len(lists), "the fixture must write twice to one list for this to count"
+
+    tasks.reads = 0
+    service.validate_prepared_plan(prepared)
+    validation_reads = tasks.reads
+    tasks.reads = 0
+    service.apply(prepared)
+
+    assert tasks.reads == validation_reads + len(lists)
+
+
+def test_apply_leaves_a_backup_of_the_identity_records(
+    tmp_path,
+    spanish_course,
+    spanish_capture,
+    spanish_candidates,
+):
+    service, _source, _tasks, _backend = _service(
+        tmp_path,
+        spanish_course,
+        spanish_capture,
+        spanish_candidates,
+    )
+    prepared = service.prepare(
+        course_id="spanish",
+        include_past=True,
+        rebase_week=None,
+        extraction_mode=ExtractionMode.TEXT,
+    )
+    service.apply(prepared)
+
+    path = service.settings.resolved_state_path
+    with StateStore(path, writable=False) as state:
+        records = state.all_records()
+    with StateStore(path.with_name(f"{path.name}.bak"), writable=False) as backup:
+        assert records
+        assert backup.all_records() == records
+
+
 def test_partial_failure_keeps_completed_identity_mapping(
     tmp_path,
     spanish_course,

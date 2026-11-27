@@ -236,9 +236,16 @@ def create_web_app(
         "testserver",
         *loopback_host_headers(*dashboard_ports),
     }
+    # The Vite dev server is trusted only on request. Port 5173 is the default for every Vite
+    # project, so otherwise any page served there could call this API.
+    dev_origins = (
+        ("http://127.0.0.1:5173", "http://localhost:5173")
+        if os.getenv("CANVAS_TASK_SYNC_DEV") == "1"
+        else ()
+    )
     allowed_mutation_origins = {
-        f"http://{host}" for host in loopback_host_headers(*dashboard_ports, 5173, simple_port)
-    }
+        f"http://{host}" for host in loopback_host_headers(*dashboard_ports, simple_port)
+    } | set(dev_origins)
 
     app = FastAPI(
         title="Canvas Task Sync Control Center",
@@ -255,8 +262,7 @@ def create_web_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "http://127.0.0.1:5173",
-            "http://localhost:5173",
+            *dev_origins,
             f"http://127.0.0.1:{simple_port}",
             f"http://localhost:{simple_port}",
         ],
@@ -1171,7 +1177,17 @@ def create_web_app(
 
     @api.delete("/history", status_code=204)
     def clear_history(request: Request) -> Response:
-        _runtime(request).store.clear_history()
+        runtime = _runtime(request)
+        # A run still writing its progress would fail on the rows deleted under it and stop
+        # halfway. shortcut: a run that starts between this check and the delete is still
+        # lost; use one guarded DELETE if more than one person ever uses this.
+        if runtime.store.list_runs(limit=1, statuses=ACTIVE_STATUSES):
+            raise _http_error(
+                409,
+                "run_active",
+                "A run is in progress. Wait for it to finish before clearing history.",
+            )
+        runtime.store.clear_history()
         return Response(status_code=204)
 
     @api.get("/diagnostics", response_model=DiagnosticsResponse)

@@ -12,8 +12,7 @@ from dotenv import load_dotenv
 
 from canvas_task_sync.agent_status import check_agent_sign_in, quick_agent_status
 from canvas_task_sync.auth import SCOPES, load_google_credentials
-from canvas_task_sync.configuration import CourseSettings, ProjectSettings
-from canvas_task_sync.configuration_service import canvas_token_from_env
+from canvas_task_sync.configuration import CourseSettings, ProjectSettings, canvas_token_from_env
 from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.web_constants import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT
 from canvas_task_sync.web_models import (
@@ -217,14 +216,13 @@ def gemini_health_check(
 
 
 def _canvas_base_url(settings: ProjectSettings) -> str | None:
-    """The Canvas origin the token is used with: .env's, else the courses' own."""
-    configured = (os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/")
-    if configured:
-        return configured
+    """The Canvas origin sync sends the token to: a Canvas course's own, else .env's."""
+    # shortcut: tests the first enabled course's address only; upgrade if courses use
+    # different Canvas sites.
     for course in sorted(settings.courses.values(), key=lambda item: not item.enabled):
-        if course.canvas_base_url:
-            return course.canvas_base_url.rstrip("/")
-    return None
+        if course.canvas_course_id and course.canvas_base_url:
+            return course.canvas_base_url
+    return (os.getenv("CANVAS_BASE_URL") or "").strip().rstrip("/") or None
 
 
 def canvas_token_health_check(settings: ProjectSettings) -> HealthCheck:
@@ -263,6 +261,12 @@ def canvas_token_health_check(settings: ProjectSettings) -> HealthCheck:
         return result(HealthState.HEALTHY, "Canvas accepted the token.")
     if response.status_code == 401:
         return result(HealthState.ERROR, "Canvas rejected the token. It may be expired or revoked.")
+    if 300 <= response.status_code < 400:
+        return result(
+            HealthState.ERROR,
+            "Canvas redirected the request. Check CANVAS_BASE_URL: use https and the exact "
+            "Canvas address.",
+        )
     return result(HealthState.ERROR, f"Canvas answered HTTP {response.status_code}.")
 
 

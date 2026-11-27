@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from canvas_task_sync.configuration import ProjectSettings
 from canvas_task_sync.control_store import ControlStore, utc_now
 from canvas_task_sync.memory import release_memory
+from canvas_task_sync.redaction import safe_exception_summary
 from canvas_task_sync.web_models import (
     EventLevel,
     RunCreate,
@@ -219,7 +220,31 @@ class RunManager:
         self._client = SyncWorkerClient(config_path, max_workers=self._worker_count)
         self._local: Any | None = None
 
+    def _fail_interrupted_runs(self) -> None:
+        """Close runs a restart left active: the queue is in memory, so none will finish."""
+        message = "The backend restarted before this run finished. Start a new run."
+        for run in self.store.list_runs(limit=1000, statuses=ACTIVE_STATUSES):
+            # An apply may have written some tasks before the restart.
+            applying = run.status == RunStatus.APPLYING
+            self.store.update_run(
+                run.id,
+                status=RunStatus.FAILED_PARTIAL if applying else RunStatus.FAILED,
+                stage=RunStage.COMPLETE,
+                finished_at=utc_now(),
+                error_code="interrupted",
+                error_summary=message,
+            )
+            self.store.add_event(
+                run.id,
+                stage=RunStage.COMPLETE,
+                event_type="run_interrupted",
+                message=message,
+                level=EventLevel.ERROR,
+            )
+            self.store.finish_schedule_occurrence(run_id=run.id, status="failed", details=message)
+
     async def start(self) -> None:
+        self._fail_interrupted_runs()
         if not self._worker_tasks:
             self._worker_tasks = [
                 asyncio.create_task(self._worker(), name=f"canvas-sync-worker-{index + 1}")
@@ -491,24 +516,31 @@ class ScheduleManager:
                 if schedule.mode == ScheduleMode.AUTO_APPLY
                 else RunMode.PREVIEW
             )
-            run_id = self.runs.create_preview(
-                RunCreate(course_id=schedule.course_id),
-                trigger=RunTrigger.SCHEDULE,
-                requested_mode=mode,
-                schedule_id=schedule.id,
-            )
+            try:
+                run_id = self.runs.create_preview(
+                    RunCreate(course_id=schedule.course_id),
+                    trigger=RunTrigger.SCHEDULE,
+                    requested_mode=mode,
+                    schedule_id=schedule.id,
+                )
+            except Exception as error:
+                # A schedule that cannot start (its course left courses.yaml) must not stop the
+                # others, so it is recorded as failed and moved on to its next date.
+                run_id, status, details = None, "failed", safe_exception_summary(error)
+            else:
+                status, details = "queued", "Scheduled occurrence queued."
             self.store.record_schedule_occurrence(
                 schedule_id=schedule.id,
                 scheduled_for=scheduled_for,
-                status="queued",
+                status=status,
                 run_id=run_id,
-                details="Scheduled occurrence queued.",
+                details=details,
             )
             self.store.advance_schedule(
                 schedule.id,
                 next_run_at=next_run,
                 last_run_at=scheduled_for,
-                last_result="queued",
+                last_result=status,
             )
 
 

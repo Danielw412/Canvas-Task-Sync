@@ -1,6 +1,8 @@
 .env
+.env.bak
 .venv/
 credentials.json
+credentials.json.bak
 token.json
 token.json.*
 .canvas-task-sync/

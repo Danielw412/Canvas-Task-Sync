@@ -887,6 +887,7 @@ class SyncService:
                 ]
             completed_indexes: list[int] = []
             applied_counts: Counter[str] = Counter()
+            remote_by_list: dict[str, dict[str, RemoteTask]] = {}
             state_path = self.settings.resolved_state_path
             snapshots_by_title = {
                 snapshot.title: snapshot for snapshot in prepared.tasklists.values()
@@ -915,11 +916,16 @@ class SyncService:
                         actions=[action],
                     )
                     stage_started = perf_counter()
+                    if destination.id not in remote_by_list:
+                        remote_by_list[destination.id] = {
+                            task.id: task for task in tasks_client.list_tasks(destination.id)
+                        }
                     apply_sync_plan(
                         single,
                         tasklist_id=destination.id,
                         tasks_client=tasks_client,
                         state=state,
+                        remote_by_id=remote_by_list[destination.id],
                     )
                     completed_indexes.append(index)
                     applied_counts[action.kind.value] += 1
@@ -968,6 +974,7 @@ class SyncService:
                         agent_key=verification.agent_key,
                         verification_json=verification.model_dump_json(exclude={"cached"}),
                     )
+                state.backup()
             sink.emit(
                 RunStage.PERSIST_STATE,
                 "stage_completed",

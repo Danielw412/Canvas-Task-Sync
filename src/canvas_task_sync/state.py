@@ -135,6 +135,21 @@ class StateStore:
     def close(self) -> None:
         self.connection.close()
 
+    def backup(self) -> None:
+        """Keep a copy beside the database (state.sqlite3.bak).
+
+        This file is the only record of which Google Task belongs to which agenda item; lose it
+        and items whose due date moved are created again. The copy is written aside and swapped
+        in, so a failed copy never destroys the previous one.
+        """
+        temporary = Path(f"{self.path}.bak.tmp")
+        target = sqlite3.connect(temporary)
+        try:
+            self.connection.backup(target)
+        finally:
+            target.close()
+        temporary.replace(f"{self.path}.bak")
+
     def __enter__(self) -> StateStore:
         return self
 
@@ -142,10 +157,8 @@ class StateStore:
         self.close()
 
     def _task_mapping_column_names(self) -> set[str]:
-        try:
-            rows = self.connection.execute("PRAGMA table_info(task_mappings)").fetchall()
-        except sqlite3.OperationalError:
-            return set()
+        # An absent table is an empty result, not an error; any other failure should surface.
+        rows = self.connection.execute("PRAGMA table_info(task_mappings)").fetchall()
         return {str(row[1]) for row in rows}
 
     def _migrate_task_mappings(self) -> None:
@@ -175,7 +188,11 @@ class StateStore:
                 f"SELECT {self._record_select()} FROM task_mappings {where} ORDER BY {order_by}",
                 parameters,
             ).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as error:
+            # A database that has no table yet holds nothing; a locked or broken one must not
+            # look the same, or a preview would be built as if no task were tracked.
+            if "no such table" not in str(error):
+                raise
             return []
         return [StateRecord.model_validate(dict(row)) for row in rows]
 

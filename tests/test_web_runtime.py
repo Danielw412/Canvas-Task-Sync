@@ -472,6 +472,115 @@ def test_scheduler_records_all_offline_occurrences_then_queues_grace_window(tmp_
         store.close()
 
 
+class _FailingRunQueue(_LocalRunQueue):
+    def create_preview(self, request, **kwargs):
+        if request.course_id == "gone":
+            raise ValueError("Unknown course 'gone'.")
+        return super().create_preview(request, **kwargs)
+
+
+def test_a_schedule_that_cannot_start_does_not_stop_the_others(tmp_path):
+    store = ControlStore(tmp_path / "control.sqlite3")
+    try:
+        due = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
+        schedules = {
+            course: store.create_schedule(
+                ScheduleCreate(
+                    name=course,
+                    course_id=course,
+                    weekdays=list(range(7)),
+                    local_time=time(12, 0),
+                    timezone="UTC",
+                    mode=ScheduleMode.PREVIEW,
+                    enabled=True,
+                ),
+                next_run_at=due,
+            )
+            for course in ("gone", "spanish")
+        }
+        queue = _FailingRunQueue(store)
+        manager = ScheduleManager(store, queue)  # type: ignore[arg-type]
+        manager.tick(datetime(2026, 8, 8, 12, 0, 30, tzinfo=UTC))
+
+        by_schedule = {item.schedule_id: item for item in store.list_schedule_occurrences()}
+        assert by_schedule[schedules["gone"].id].status == "failed"
+        assert "Unknown course" in by_schedule[schedules["gone"].id].details
+        assert by_schedule[schedules["spanish"].id].status == "queued"
+        assert len(queue.created) == 1
+        # The failed schedule moved on to its next date instead of retrying every tick.
+        assert store.get_schedule(schedules["gone"].id).next_run_at > due
+    finally:
+        store.close()
+
+
+def test_a_restart_fails_runs_it_left_active_and_keeps_the_rest(tmp_path):
+    config = _write_project(tmp_path)
+    seed = ControlStore(tmp_path / ".canvas-task-sync" / "control.sqlite3")
+    expected: dict[int, RunStatus] = {}
+    for left, after in (
+        (RunStatus.QUEUED, RunStatus.FAILED),
+        (RunStatus.RUNNING, RunStatus.FAILED),
+        (RunStatus.APPLYING, RunStatus.FAILED_PARTIAL),
+        (RunStatus.AWAITING_APPROVAL, RunStatus.AWAITING_APPROVAL),
+    ):
+        run_id = seed.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.PREVIEW,
+        )
+        seed.update_run(run_id, status=left)
+        expected[run_id] = after
+    seed.close()
+
+    with TestClient(create_web_app(config)) as client:
+        for run_id, after in expected.items():
+            run = client.get(f"/api/v1/runs/{run_id}").json()
+            assert run["status"] == after.value
+            interrupted = after != RunStatus.AWAITING_APPROVAL
+            assert run["error_code"] == ("interrupted" if interrupted else None)
+        # Course deletion is no longer blocked by a run nothing is working on.
+        csrf = _csrf(client)
+        assert client.delete("/api/v1/courses/spanish", headers=csrf).status_code == 200
+
+
+def test_clearing_history_is_refused_while_a_run_is_active(tmp_path):
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        store = app.state.runtime.store
+        run_id = store.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.PREVIEW,
+        )
+        store.update_run(run_id, status=RunStatus.RUNNING)
+        csrf = _csrf(client)
+
+        refused = client.delete("/api/v1/history", headers=csrf)
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "run_active"
+        assert client.get(f"/api/v1/runs/{run_id}").status_code == 200
+
+        store.update_run(run_id, status=RunStatus.SUCCEEDED)
+        assert client.delete("/api/v1/history", headers=csrf).status_code == 204
+        assert client.get(f"/api/v1/runs/{run_id}").status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("dev_mode", "status", "cors_origin"),
+    [("", 403, None), ("1", 204, "http://127.0.0.1:5173")],
+)
+def test_the_vite_dev_origin_is_trusted_only_in_dev_mode(
+    tmp_path, monkeypatch, dev_mode, status, cors_origin
+):
+    monkeypatch.setenv("CANVAS_TASK_SYNC_DEV", dev_mode)
+    origin = "http://127.0.0.1:5173"
+    with TestClient(create_web_app(_write_project(tmp_path))) as client:
+        read = client.get("/api/v1/bootstrap", headers={"origin": origin})
+        sent = client.delete("/api/v1/history", headers={**_csrf(client), "origin": origin})
+    assert read.headers.get("access-control-allow-origin") == cors_origin
+    assert sent.status_code == status
+
+
 def test_configuration_updates_preserve_comments_and_create_backup(tmp_path):
     config = _write_project(tmp_path)
     service = ConfigurationService(config)
@@ -687,6 +796,102 @@ def test_the_canvas_token_check_sends_it_only_to_the_canvas_origin(tmp_path, mon
     assert url == "https://canvas.example/api/v1/users/self"
     assert kwargs["headers"] == {"Authorization": "Bearer 1234~secret-token"}
     assert kwargs["allow_redirects"] is False
+
+
+def test_the_canvas_token_check_uses_the_address_sync_uses(tmp_path, monkeypatch):
+    import requests
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.health import canvas_token_health_check
+
+    monkeypatch.setenv("CANVAS_BASE_URL", "https://env.example")
+    monkeypatch.setenv("CANVAS_TOKEN", "1234~secret-token")
+    urls: list[str] = []
+
+    class Answer:
+        status_code = 200
+
+    def fake_get(url, **kwargs):
+        urls.append(url)
+        return Answer()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    settings = load_settings(_write_project(tmp_path))
+    course = settings.courses["spanish"]
+    for update in (
+        {},  # no course address: .env's
+        {"canvas_base_url": "https://course.example"},  # sync ignores it without a course ID
+        {"canvas_base_url": "https://course.example", "canvas_course_id": "12345"},
+    ):
+        settings.courses["spanish"] = course.model_copy(update=update)
+        canvas_token_health_check(settings)
+    assert urls == [
+        "https://env.example/api/v1/users/self",
+        "https://env.example/api/v1/users/self",
+        "https://course.example/api/v1/users/self",
+    ]
+
+
+def test_a_canvas_redirect_tells_you_to_check_the_address(tmp_path, monkeypatch):
+    import requests
+
+    from canvas_task_sync.configuration import load_settings
+    from canvas_task_sync.health import canvas_token_health_check
+
+    monkeypatch.setenv("CANVAS_BASE_URL", "http://canvas.example")
+    monkeypatch.setenv("CANVAS_TOKEN", "1234~secret-token")
+
+    class Answer:
+        status_code = 301
+
+    monkeypatch.setattr(requests, "get", lambda url, **kwargs: Answer())
+    check = canvas_token_health_check(load_settings(_write_project(tmp_path)))
+
+    assert check.state == HealthState.ERROR
+    assert "CANVAS_BASE_URL" in check.summary
+
+
+def test_the_canvas_token_is_read_from_the_first_name_that_is_set(monkeypatch):
+    from canvas_task_sync.configuration import canvas_token_from_env
+
+    monkeypatch.setenv("CANVAS_TOKEN", "")
+    monkeypatch.setenv("CANVAS_API_TOKEN", "second")
+    monkeypatch.setenv("CANVAS_API_KEY", "third")
+    assert canvas_token_from_env() == "second"
+    monkeypatch.setenv("CANVAS_TOKEN", "first")
+    assert canvas_token_from_env() == "first"
+
+
+def test_saving_a_secret_keeps_env_comments_and_stays_owner_only(tmp_path, monkeypatch):
+    import os
+
+    from dotenv import dotenv_values
+
+    monkeypatch.setenv("CANVAS_TOKEN", "restored-after-the-test")
+    service = ConfigurationService(_write_project(tmp_path))
+    env = tmp_path / ".env"
+    env.write_text("# Canvas notes\n\nCANVAS_BASE_URL=https://canvas.example\nCANVAS_TOKEN=old\n")
+    env.chmod(0o600)
+
+    service.save_canvas_token("1234~new-token-value")
+
+    assert env.read_text().startswith("# Canvas notes\n\nCANVAS_BASE_URL=https://canvas.example\n")
+    assert dotenv_values(env)["CANVAS_TOKEN"] == "1234~new-token-value"
+    assert (tmp_path / ".env.bak").read_text().endswith("CANVAS_TOKEN=old\n")
+    env.unlink()
+    service.save_canvas_token("1234~another-token-value")  # a missing .env is created too
+    assert dotenv_values(env) == {"CANVAS_TOKEN": "1234~another-token-value"}
+    if os.name != "nt":  # Windows has no owner-only mode bits
+        assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_course_flags_written_the_old_yaml_way_still_load(tmp_path):
+    from canvas_task_sync.configuration import load_settings
+
+    config = _write_project(tmp_path)
+    config.write_text(config.read_text().replace("enabled: true", "enabled: no"))
+
+    assert load_settings(config).course("spanish").enabled is False
 
 
 def test_run_event_stream_replays_after_last_event_id(tmp_path):

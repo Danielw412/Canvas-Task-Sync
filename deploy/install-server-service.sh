@@ -16,6 +16,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_NAME="canvas-task-sync.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# The path is spliced into the unit with sed and read back by systemd, which splits on
+# spaces and treats % and \ specially, so such a path would give a broken unit.
+case "${REPO_ROOT}" in
+  *[[:space:]\&\|\\%]*)
+    echo "error: ${REPO_ROOT} contains a space, &, |, \\ or %, which the systemd unit cannot hold." >&2
+    echo "       Move the repository to a plainer path and run this again." >&2
+    exit 1
+    ;;
+esac
+
 if [[ ! -x "${REPO_ROOT}/.venv/bin/python" ]]; then
   echo "error: ${REPO_ROOT}/.venv/bin/python is missing. Create the venv first:" >&2
   echo "  python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'" >&2

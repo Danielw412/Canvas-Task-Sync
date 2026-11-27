@@ -341,3 +341,35 @@ def test_authorize_uses_the_configured_dashboard_origin_when_it_differs(tmp_path
         headers = {"X-CSRF-Token": client.get("/api/v1/bootstrap").json()["csrf_token"]}
         started = client.post("/api/v1/settings/google/authorize", headers=headers)
     assert started.json()["redirect_uri"] == f"http://127.0.0.1:9999{CALLBACK_PATH}"
+
+
+def test_a_second_callback_during_the_exchange_is_refused(tmp_path):
+    import threading
+
+    manager = _manager(tmp_path)
+    started = manager.begin(redirect_uri=REDIRECT_URI)
+    flow = FakeFlow.instances[-1]
+    exchanged: list[str] = []
+    refused: list[str] = []
+
+    def second_callback() -> None:
+        try:
+            manager.complete(state=started.state, code="second")
+        except GoogleAuthorizationError as error:
+            refused.append(error.code)
+
+    second = threading.Thread(target=second_callback)
+
+    def fetch_token(*, code: str) -> None:
+        exchanged.append(code)
+        if len(exchanged) == 1:  # the same callback URL arrives again mid-exchange
+            second.start()
+            second.join(timeout=1)  # a thread, so a missing guard fails instead of hanging
+
+    flow.fetch_token = fetch_token
+    manager.complete(state=started.state, code="first")
+    second.join(timeout=5)
+
+    assert exchanged == ["first"]
+    assert refused == ["google_state_used"]
+    assert manager.status(started.state)["status"] == "completed"

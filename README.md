@@ -298,7 +298,9 @@ Schedules run only while this process is running. Operational history is written
 
 The server always binds to `127.0.0.1`; it validates same-origin requests and requires a
 per-process CSRF token for every mutation. It is intended as a local control center, not a remotely
-hosted multi-user service.
+hosted multi-user service. To work on the frontend with `npm run dev` (Vite, port 5173), start the
+backend with `CANVAS_TASK_SYNC_DEV=1`; otherwise it refuses that origin, because any other Vite
+project on the same port could call this API.
 
 ### Temporary Canvas agenda overrides
 
@@ -415,7 +417,8 @@ journalctl --user -u canvas-task-sync -f
 
 Copy `config/courses.yaml`, `.env`, `credentials.json`, and `token.json` to the server, and migrate
 `.canvas-task-sync/state.sqlite3` once so existing Google Tasks keep their identity. After that the
-databases stay on the server; they are never synchronized between machines.
+databases stay on the server; they are never synchronized between machines. After every apply a
+copy of `state.sqlite3` is kept beside it as `state.sqlite3.bak`.
 
 Schedules belong to the server and run whenever it is on. The laptop is only a window
 onto it. With the laptop asleep and the tunnel down, the scheduler still fires, the worker
