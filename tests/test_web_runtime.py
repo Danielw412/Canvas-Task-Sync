@@ -543,6 +543,28 @@ def test_a_restart_fails_runs_it_left_active_and_keeps_the_rest(tmp_path):
         assert client.delete("/api/v1/courses/spanish", headers=csrf).status_code == 200
 
 
+def test_clearing_history_is_refused_while_a_run_is_active(tmp_path):
+    app = create_web_app(_write_project(tmp_path))
+    with TestClient(app) as client:
+        store = app.state.runtime.store
+        run_id = store.create_run(
+            course_id="spanish",
+            trigger=RunTrigger.MANUAL,
+            requested_mode=RunMode.PREVIEW,
+        )
+        store.update_run(run_id, status=RunStatus.RUNNING)
+        csrf = _csrf(client)
+
+        refused = client.delete("/api/v1/history", headers=csrf)
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "run_active"
+        assert client.get(f"/api/v1/runs/{run_id}").status_code == 200
+
+        store.update_run(run_id, status=RunStatus.SUCCEEDED)
+        assert client.delete("/api/v1/history", headers=csrf).status_code == 204
+        assert client.get(f"/api/v1/runs/{run_id}").status_code == 404
+
+
 @pytest.mark.parametrize(
     ("dev_mode", "status", "cors_origin"),
     [("", 403, None), ("1", 204, "http://127.0.0.1:5173")],
